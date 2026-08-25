@@ -141,7 +141,7 @@ Subagents recurse up to a **depth cap of 4** (the `task` tool is withheld at the
 ### 1. Python package
 
 ```bash
-git clone https://github.com/<your-account>/cluxmate.git   # replace with the real URL
+git clone https://github.com/r1c7/CluxMate.git   
 cd cluxmate
 
 pip install .            # direct install

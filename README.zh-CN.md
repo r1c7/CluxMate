@@ -141,7 +141,7 @@ agent 所做的一切都被记录在追加式事件日志中——每个会话�
 ### 1. Python 包
 
 ```bash
-git clone https://github.com/<your-account>/cluxmate.git   # 换成真实仓库地址
+git clone https://github.com/r1c7/CluxMate.git   
 cd cluxmate
 
 pip install .            # 直接安装
