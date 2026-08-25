@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CluxMate</title>
+  <script>
+    // Apply the persisted theme before any stylesheet paints, so a dark theme
+    // never flashes the default light shell on startup.
+    (function () {
+      var THEMES = ['cream','stone','porcelain','solarized','onelight','sage','github','nord','onedark','solarizeddark','vscodedark','githubdark'];
+      var t = null;
+      try { t = localStorage.getItem('cluxmate.theme'); } catch (e) { t = null; }
+      document.documentElement.setAttribute('data-theme', THEMES.indexOf(t) >= 0 ? t : 'cream');
+
+      var FONT_STACKS = {
+        system: "ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace",
+        consolas: "Consolas, 'Courier New', monospace",
+        cascadia: "'Cascadia Code', Consolas, monospace",
+        courier: "'Courier New', Courier, monospace"
+      };
+      var fid = null, fs = null;
+      try {
+        fid = localStorage.getItem('cluxmate.font-family');
+        fs = parseInt(localStorage.getItem('cluxmate.font-size'), 10);
+      } catch (e) { fid = null; fs = null; }
+      if (fid && FONT_STACKS[fid]) document.documentElement.style.setProperty('--font-mono', FONT_STACKS[fid]);
+      if (fs >= 10 && fs <= 30) document.documentElement.style.fontSize = fs + 'px';
+
+      // Apply the persisted UI language before first paint so <html lang>
+      // never flashes the default. Falls back to the OS language.
+      var lang = null;
+      try { lang = localStorage.getItem('cluxmate.lang'); } catch (e) { lang = null; }
+      if (lang !== 'en' && lang !== 'zh') {
+        lang = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+      }
+      document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="./index.tsx"></script>
+</body>
+</html>

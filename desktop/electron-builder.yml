@@ -1,0 +1,22 @@
+appId: com.cluxmate.desktop
+productName: CluxMate
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**/*
+  - "!out/renderer/**/*"
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+extraResources:
+  - from: ../cluxmate/
+    to: cluxmate
+    filter:
+      - "**/*.py"
+      - "**/*.j2"

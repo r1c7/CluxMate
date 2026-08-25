@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.egg-info/
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+docs/
+.cluxmate/

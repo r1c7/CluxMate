@@ -1,0 +1,208 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global type scale. Tailwind's rem-based sizes (text-sm/xs, prose-sm) and
+   spacing (p-3, gap-2, …) all resolve against this root font-size, so lowering
+   it from the 16px default scales the whole UI down proportionally — text and
+   layout tighten together rather than one shrinking against the other. */
+html {
+  font-size: 15px;
+}
+
+/* ==================================================================
+   Theme tokens (RGB triplets). `:root` is the default (Cream); each
+   `[data-theme=…]` block overrides it. tailwind.config.js maps its color
+   names onto these via `rgb(var(--…) / <alpha-value>)`.
+   ================================================================== */
+:root {
+  --accent: 194 104 74; --accent-hover: 169 84 59; --accent-muted: 243 226 214; --accent-ink: 255 255 255;
+  --sidebar: 251 250 247; --sidebar-hover: 235 230 220; --sidebar-active: 228 222 210;
+  --chat: 251 250 247; --chat-user: 240 234 224; --chat-agent: 255 255 255;
+  --surface: 251 250 247; --surface-raised: 243 239 231; --surface-border: 232 228 218; --surface-input: 255 255 255;
+  --ink: 43 41 37; --ink-soft: 106 99 87; --ink-faint: 155 145 133;
+  /* Role tints for the Context History panel (light values). Dark themes
+     override these in a combined selector further down. */
+  --role-user: 180 83 9; --role-user-bg: 255 251 235;
+  --role-toolcall: 3 105 161; --role-toolcall-bg: 240 249 255;
+  --role-toolresult: 4 120 87; --role-toolresult-bg: 236 253 245;
+  --role-compaction: 109 40 217; --role-compaction-bg: 245 243 255;
+  --role-injection: 87 83 78; --role-injection-bg: 250 250 249;
+  /* Code / monospace font stack — overridden at runtime by the Settings font
+     picker (see renderer/fonts.ts). */
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+}
+[data-theme="stone"] {
+  --accent: 180 83 9; --accent-hover: 151 63 7; --accent-muted: 246 230 212; --accent-ink: 255 255 255;
+  --sidebar: 255 255 255; --sidebar-hover: 238 236 231; --sidebar-active: 230 227 220;
+  --chat: 255 255 255; --chat-user: 243 241 236; --chat-agent: 255 255 255;
+  --surface: 251 251 249; --surface-raised: 243 242 238; --surface-border: 231 229 223; --surface-input: 255 255 255;
+  --ink: 41 37 36; --ink-soft: 87 83 78; --ink-faint: 156 150 143;
+}
+[data-theme="porcelain"] {
+  --accent: 192 57 43; --accent-hover: 165 42 31; --accent-muted: 244 221 218; --accent-ink: 255 255 255;
+  --sidebar: 255 255 255; --sidebar-hover: 237 235 235; --sidebar-active: 228 225 225;
+  --chat: 255 255 255; --chat-user: 242 239 239; --chat-agent: 255 255 255;
+  --surface: 251 250 250; --surface-raised: 243 241 241; --surface-border: 231 228 228; --surface-input: 255 255 255;
+  --ink: 42 37 36; --ink-soft: 87 80 79; --ink-faint: 156 148 147;
+}
+[data-theme="solarized"] {
+  --accent: 185 80 21; --accent-hover: 156 66 15; --accent-muted: 240 226 210; --accent-ink: 255 255 255;
+  --sidebar: 249 247 240; --sidebar-hover: 232 228 214; --sidebar-active: 224 220 203;
+  --chat: 249 247 240; --chat-user: 239 234 220; --chat-agent: 253 252 247;
+  --surface: 249 247 240; --surface-raised: 240 237 227; --surface-border: 227 223 209; --surface-input: 253 252 247;
+  --ink: 79 90 95; --ink-soft: 102 116 122; --ink-faint: 147 161 161;
+}
+[data-theme="onelight"] {
+  --accent: 64 120 242; --accent-hover: 53 99 209; --accent-muted: 228 236 251; --accent-ink: 255 255 255;
+  --sidebar: 250 250 250; --sidebar-hover: 231 231 232; --sidebar-active: 221 221 222;
+  --chat: 250 250 250; --chat-user: 240 240 241; --chat-agent: 255 255 255;
+  --surface: 250 250 250; --surface-raised: 240 240 241; --surface-border: 227 227 228; --surface-input: 255 255 255;
+  --ink: 56 58 66; --ink-soft: 105 108 119; --ink-faint: 154 155 161;
+}
+[data-theme="sage"] {
+  --accent: 79 122 91; --accent-hover: 65 104 76; --accent-muted: 221 231 220; --accent-ink: 255 255 255;
+  --sidebar: 245 246 241; --sidebar-hover: 224 229 216; --sidebar-active: 214 221 204;
+  --chat: 245 246 241; --chat-user: 230 233 221; --chat-agent: 251 252 248;
+  --surface: 245 246 241; --surface-raised: 233 236 227; --surface-border: 216 221 204; --surface-input: 251 252 248;
+  --ink: 36 40 34; --ink-soft: 90 97 85; --ink-faint: 139 145 132;
+}
+[data-theme="github"] {
+  --accent: 9 105 218; --accent-hover: 7 87 184; --accent-muted: 221 244 255; --accent-ink: 255 255 255;
+  --sidebar: 255 255 255; --sidebar-hover: 234 238 242; --sidebar-active: 226 232 238;
+  --chat: 255 255 255; --chat-user: 240 243 246; --chat-agent: 255 255 255;
+  --surface: 255 255 255; --surface-raised: 246 248 250; --surface-border: 208 215 222; --surface-input: 255 255 255;
+  --ink: 31 35 40; --ink-soft: 89 99 110; --ink-faint: 129 139 152;
+}
+[data-theme="nord"] {
+  --accent: 136 192 208; --accent-hover: 129 161 193; --accent-muted: 59 66 82; --accent-ink: 46 52 64;
+  --sidebar: 42 47 58; --sidebar-hover: 54 60 74; --sidebar-active: 63 70 86;
+  --chat: 46 52 64; --chat-user: 59 66 82; --chat-agent: 51 58 71;
+  --surface: 46 52 64; --surface-raised: 59 66 82; --surface-border: 69 76 94; --surface-input: 59 66 82;
+  --ink: 236 239 244; --ink-soft: 198 205 217; --ink-faint: 123 136 161;
+}
+[data-theme="onedark"] {
+  --accent: 97 175 239; --accent-hover: 77 156 224; --accent-muted: 43 59 82; --accent-ink: 33 37 43;
+  --sidebar: 33 37 43; --sidebar-hover: 44 49 58; --sidebar-active: 51 56 66;
+  --chat: 40 44 52; --chat-user: 59 64 72; --chat-agent: 44 49 58;
+  --surface: 40 44 52; --surface-raised: 51 56 66; --surface-border: 62 68 79; --surface-input: 51 56 66;
+  --ink: 171 178 191; --ink-soft: 130 137 151; --ink-faint: 92 99 112;
+}
+[data-theme="solarizeddark"] {
+  --accent: 38 139 210; --accent-hover: 31 122 184; --accent-muted: 11 54 66; --accent-ink: 7 54 66;
+  --sidebar: 7 54 66; --sidebar-hover: 11 66 80; --sidebar-active: 17 80 96;
+  --chat: 0 43 54; --chat-user: 7 54 66; --chat-agent: 6 53 64;
+  --surface: 0 43 54; --surface-raised: 7 54 66; --surface-border: 12 73 86; --surface-input: 7 54 66;
+  --ink: 147 161 161; --ink-soft: 131 148 150; --ink-faint: 88 110 117;
+}
+[data-theme="vscodedark"] {
+  --accent: 51 156 255; --accent-hover: 26 133 242; --accent-muted: 18 44 68; --accent-ink: 255 255 255;
+  --sidebar: 20 20 20; --sidebar-hover: 31 31 31; --sidebar-active: 38 38 38;
+  --chat: 24 24 24; --chat-user: 38 38 38; --chat-agent: 30 30 30;
+  --surface: 24 24 24; --surface-raised: 34 34 34; --surface-border: 48 48 48; --surface-input: 34 34 34;
+  --ink: 255 255 255; --ink-soft: 200 200 200; --ink-faint: 138 138 138;
+}
+[data-theme="githubdark"] {
+  --accent: 1 105 204; --accent-hover: 1 89 179; --accent-muted: 12 45 79; --accent-ink: 255 255 255;
+  --sidebar: 13 13 13; --sidebar-hover: 26 26 26; --sidebar-active: 34 34 34;
+  --chat: 17 17 17; --chat-user: 30 30 30; --chat-agent: 22 22 22;
+  --surface: 17 17 17; --surface-raised: 26 26 26; --surface-border: 44 44 44; --surface-input: 26 26 26;
+  --ink: 252 252 252; --ink-soft: 173 173 173; --ink-faint: 125 125 125;
+}
+
+/* Context History role tints — dark variants (lighter label text + dark tint). */
+[data-theme="nord"], [data-theme="onedark"], [data-theme="solarizeddark"], [data-theme="vscodedark"], [data-theme="githubdark"] {
+  --role-user: 251 191 36; --role-user-bg: 45 33 10;
+  --role-toolcall: 56 189 248; --role-toolcall-bg: 12 40 51;
+  --role-toolresult: 52 211 153; --role-toolresult-bg: 10 36 24;
+  --role-compaction: 167 139 250; --role-compaction-bg: 38 27 56;
+  --role-injection: 168 162 158; --role-injection-bg: 32 31 30;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI Variable Display', 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui, 'Inter', sans-serif;
+  background: rgb(var(--chat));
+  color: rgb(var(--ink));
+}
+
+code, pre, .font-mono {
+  font-family: var(--font-mono, 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace);
+}
+
+/* Map @tailwindcss/typography (prose) to the active theme's tokens so rendered
+   markdown matches the app's colors instead of the plugin's default grays. */
+.prose {
+  --tw-prose-body: rgb(var(--ink));
+  --tw-prose-headings: rgb(var(--ink));
+  --tw-prose-bold: rgb(var(--ink));
+  --tw-prose-links: rgb(var(--accent-hover));
+  --tw-prose-code: rgb(var(--accent));
+  --tw-prose-quotes: rgb(var(--ink-soft));
+  --tw-prose-bullets: rgb(var(--ink-faint));
+  --tw-prose-counters: rgb(var(--ink-soft));
+  --tw-prose-hr: rgb(var(--surface-border));
+  --tw-prose-borders: rgb(var(--surface-border));
+  --tw-prose-th-borders: rgb(var(--surface-border));
+  --tw-prose-td-borders: rgb(var(--surface-border));
+  --tw-prose-pre-bg: rgb(var(--surface-raised));
+  --tw-prose-pre-code: rgb(var(--ink));
+}
+
+/* Drop the backtick pseudo-elements typography adds around inline code. */
+.prose :where(code):not(:where([class~="not-prose"] *))::before,
+.prose :where(code):not(:where([class~="not-prose"] *))::after {
+  content: "";
+}
+
+/* Inline code chip: subtle raised background instead of bare colored text. */
+.prose :where(code):not(:where(pre code)) {
+  background: rgb(var(--surface-raised));
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-weight: 500;
+}
+
+.drag-region { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* Session "working" (streaming) indicator — eight green dots chase clockwise
+   around a circle: a brightness wave sweeps the ring (each dot fades bright→dim
+   as the "front" passes), so it reads as clockwise rotation with a green
+   color/brightness gradient — the familiar "generating / typing" signal. The
+   5.5px orbit radius + 3px dots give a 14px outer footprint, matching the
+   amber "!" badge in the same 16px slot. Plain CSS rather than tailwind.config
+   so the keyframes ship independent of config recompilation. */
+@keyframes session-spin-chase {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 1; }
+}
+.session-spin-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  margin: -1.5px 0 0 -1.5px;
+  border-radius: 9999px;
+  background: #22c55e; /* Tailwind green-500 */
+  animation: session-spin-chase 1.2s linear infinite;
+}
+
+/* Session "needs input" indicator — an amber halo spreads outward and fades
+   behind the "!" badge, so a session paused on approval / a diff review / a
+   question answer visibly pings for attention instead of reading as still
+   "working" (the green spinner above). Plain CSS so the keyframes ship
+   independent of Tailwind config recompilation. */
+@keyframes session-ping {
+  0% { transform: scale(1); opacity: 0.7; }
+  75%, 100% { transform: scale(2.6); opacity: 0; }
+}
+.session-ping {
+  animation: session-ping 1.3s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgb(var(--surface-border)); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--ink-faint)); }
