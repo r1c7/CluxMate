@@ -3,8 +3,9 @@
 Windows Low-IL tests are real end-to-end runs (label a temp workspace, spawn
 a low-IL child, assert NO_WRITE_UP). They are skipped when icacls/ctypes are
 unavailable. macOS Seatbelt tests are real end-to-end runs skipped off-Darwin;
-their profile/argv construction is unit-tested everywhere. bwrap tests are
-unit-level (argv construction) since CI hosts are Windows.
+their profile/argv construction is unit-tested everywhere. Linux bwrap tests
+run end-to-end when bubblewrap is on PATH (skipped otherwise); argv
+construction is unit-tested everywhere.
 """
 
 import os
@@ -30,6 +31,10 @@ sys.stdout.reconfigure(errors="replace")  # GBK console safety
 
 IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
+IS_LINUX = platform.system() == "Linux"
+# bwrap end-to-end tests need the real bubblewrap binary; skip when absent
+# (fail-closed semantics is covered separately by test_bashtool_fail_closed_*).
+HAS_BWRAP = BwrapSandbox.available()
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +202,110 @@ def test_bwrap_binds_grant_paths():
     # Count of --bind pairs went from 2 (ws + temp) to 3 with one grant.
     assert argv.count("--bind") == 3
     assert resolved in argv
+
+
+def test_bwrap_deny_subtree_ro_bind(monkeypatch):
+    # <cwd>/.cluxmate is re-mounted read-only AFTER the writable workspace
+    # bind (last mount wins) — mirroring WriteFence.denyroots / Windows medium
+    # re-label / Seatbelt STATE. is_dir is faked (rather than creating a real
+    # dir) so the test is hermetic even in constrained temp environments; the
+    # real end-to-end deny is covered by test_bwrap_deny_subtree_for_cluxmate_state.
+    real_is_dir = Path.is_dir
+    monkeypatch.setattr(
+        Path, "is_dir",
+        lambda self: True if self.name == ".cluxmate" else real_is_dir(self),
+    )
+    sb = BwrapSandbox()
+    argv = sb._bwrap_argv("/home/u/ws")
+    state = str((Path("/home/u/ws").resolve() / ".cluxmate").resolve())
+    assert "--ro-bind" in argv
+    i = argv.index(state)
+    assert argv[i - 1] == "--ro-bind"   # re-mounted read-only, not --bind
+    assert argv[i + 1] == state          # src == dst
+    assert argv.index("--bind") < i      # workspace bind comes first
+
+
+def test_bwrap_no_deny_bind_when_state_missing():
+    # Without .cluxmate, no --ro-bind of it (bwrap fails on a missing source);
+    # run()/spawn_popen() create it first via _ensure_state_dir.
+    sb = BwrapSandbox()
+    argv = sb._bwrap_argv("/home/u/ws")
+    assert str((Path("/home/u/ws").resolve() / ".cluxmate").resolve()) not in argv
+
+
+# ---------------------------------------------------------------------------
+# Linux bwrap: end-to-end (requires the real bubblewrap binary)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not HAS_BWRAP, reason="linux-only (needs bubblewrap)")
+def test_bwrap_write_inside_workspace_blocked_outside():
+    import shutil
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = BwrapSandbox()
+        # 1) write inside workspace succeeds
+        r = sb.run(argv=[], shell_cmd="echo ws > ok.txt", cwd=str(ws),
+                   timeout=60, env=os.environ.copy())
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        assert (ws / "ok.txt").exists()
+        # 2) write to home is denied (read-only root bind)
+        escape = Path.home() / "cluxmate-sbtest-escape.txt"
+        r2 = sb.run(argv=[], shell_cmd=f'echo bad > "{escape}"', cwd=str(ws),
+                    timeout=60, env=os.environ.copy())
+        assert r2.returncode != 0
+        assert not escape.exists()
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not HAS_BWRAP, reason="linux-only (needs bubblewrap)")
+def test_bwrap_deny_subtree_for_cluxmate_state():
+    import shutil
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = BwrapSandbox()
+        # _ensure_state_dir creates .cluxmate, which _bwrap_argv then ro-binds;
+        # a write to permissions.json must fail on the read-only mount.
+        r = sb.run(argv=[], shell_cmd="echo hacked > .cluxmate/permissions.json",
+                   cwd=str(ws), timeout=60, env=os.environ.copy())
+        assert r.returncode != 0
+        assert not (ws / ".cluxmate" / "permissions.json").exists()
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not HAS_BWRAP, reason="linux-only (needs bubblewrap)")
+def test_bwrap_granted_folder_writable():
+    import shutil
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    granted = Path(tempfile.mkdtemp(prefix="cluxmate-grant-"))
+    try:
+        sb = BwrapSandbox(grant_paths=[str(granted)])
+        target = granted / "granted.txt"
+        r = sb.run(argv=[], shell_cmd=f'echo ok > "{target}"', cwd=str(ws),
+                   timeout=60, env=os.environ.copy())
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        assert target.exists()
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+        shutil.rmtree(granted, ignore_errors=True)
+
+
+@pytest.mark.skipif(not HAS_BWRAP, reason="linux-only (needs bubblewrap)")
+def test_bwrap_tmp_is_writable():
+    import shutil
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = BwrapSandbox()
+        tmp = Path(tempfile.gettempdir()).resolve()
+        target = tmp / "cluxmate-sbtest-child.txt"
+        r = sb.run(argv=[], shell_cmd=f'echo t > "{target}"', cwd=str(ws),
+                   timeout=60, env=os.environ.copy())
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        assert target.exists()
+        target.unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

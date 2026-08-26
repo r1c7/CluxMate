@@ -179,10 +179,20 @@ class BwrapSandbox(ShellSandbox):
     Layout:
       --ro-bind / /                everything visible, read-only
       --bind <ws> <ws>             workspace writable at its real path
+      --ro-bind <ws>/.cluxmate …   deny subtree re-mounted read-only (last
+                                   mount wins, so the writable workspace bind
+                                   cannot reach the agent's own permission/
+                                   config state — mirrors WriteFence.denyroots,
+                                   Windows' medium re-label, Seatbelt's STATE)
       --bind <tmp> <tmp>           platform temp dir writable (its real path)
       --dev /dev                   minimal device nodes (null, zero, ...)
       --proc /proc                 fresh procfs
       --die-with-parent --new-session  no orphaned descendants
+
+    The deny-subtree ``--ro-bind`` is added only when ``<ws>/.cluxmate``
+    exists (``run``/``spawn_popen`` create it best-effort first); on a
+    read-only workspace it is skipped, but there the workspace itself is
+    already read-only so nothing can write the subtree anyway.
 
     NOT isolated: network (curl/npm/pip must work). Honest omission.
     """
@@ -197,14 +207,35 @@ class BwrapSandbox(ShellSandbox):
     def available(cls) -> bool:
         return platform.system() == "Linux" and shutil.which("bwrap") is not None
 
+    def _state_dir(self, cwd: str) -> Path:
+        """The deny subtree: ``<cwd>/.cluxmate`` (resolved)."""
+        return (Path(cwd).resolve() / ".cluxmate").resolve()
+
+    def _ensure_state_dir(self, cwd: str) -> None:
+        """Create ``<cwd>/.cluxmate`` so ``--ro-bind`` has a source to bind.
+
+        Best-effort (side-effectful by design, run only from ``run`` /
+        ``spawn_popen`` — never ``available``). On a read-only workspace the
+        mkdir fails and ``_bwrap_argv`` omits the deny bind; that is safe
+        because the workspace is read-only there anyway.
+        """
+        try:
+            self._state_dir(cwd).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
     def _bwrap_argv(self, cwd: str) -> list[str]:
         tmp = Path(tempfile.gettempdir()).resolve()
+        ws = Path(cwd).resolve()
+        state = self._state_dir(cwd)
         argv = [
             "bwrap",
             "--ro-bind", "/", "/",
-            "--bind", str(Path(cwd).resolve()), str(Path(cwd).resolve()),
-            "--bind", str(tmp), str(tmp),
+            "--bind", str(ws), str(ws),
         ]
+        if state.is_dir():
+            argv += ["--ro-bind", str(state), str(state)]
+        argv += ["--bind", str(tmp), str(tmp)]
         for g in self._grant_paths:
             gp = str(Path(g).resolve())
             argv += ["--bind", gp, gp]
@@ -225,7 +256,9 @@ class BwrapSandbox(ShellSandbox):
         timeout: float,
         env: dict[str, str],
     ) -> SandboxResult:
-        prefix = self._bwrap_argv(str(Path(cwd).resolve()))
+        resolved = str(Path(cwd).resolve())
+        self._ensure_state_dir(resolved)
+        prefix = self._bwrap_argv(resolved)
         if shell_cmd is not None:
             full = prefix + ["--", "/bin/sh", "-c", shell_cmd]
         else:
@@ -237,7 +270,9 @@ class BwrapSandbox(ShellSandbox):
         return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
 
     def spawn_popen(self, argv: list[str], *, cwd: str, env: dict[str, str]):
-        prefix = self._bwrap_argv(str(Path(cwd).resolve()))
+        resolved = str(Path(cwd).resolve())
+        self._ensure_state_dir(resolved)
+        prefix = self._bwrap_argv(resolved)
         return subprocess.Popen(
             prefix + ["--"] + argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
