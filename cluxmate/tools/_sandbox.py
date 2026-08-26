@@ -10,6 +10,11 @@ primitives (the threat-model doc's "three positions: build glue"):
 - Linux:  bubblewrap (bwrap) mount namespaces. Root filesystem read-only,
   workspace + temp dir bind-mounted writable, minimal /dev, fresh /proc.
   Network stays SHARED (documented omission).
+- macOS:  Seatbelt via ``sandbox-exec``. Everything stays at its default
+  (reads, process exec, network) EXCEPT writes, which are denied everywhere
+  but the workspace, temp dir, and granted folders — ``<cwd>/.cluxmate`` is
+  re-denied so the sandboxed shell can't edit the agent's permission config.
+  Reads/network remain unrestricted (same honest omission as the others).
 - Windows: Low integrity-level (IL) token via token duplication. The
   workspace tree is labeled low-IL (mandatory label with inheritance);
   NO_WRITE_UP then blocks the low-IL child from writing anything medium-IL
@@ -235,6 +240,115 @@ class BwrapSandbox(ShellSandbox):
         prefix = self._bwrap_argv(str(Path(cwd).resolve()))
         return subprocess.Popen(
             prefix + ["--"] + argv,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, bufsize=1, env=env, cwd=cwd,
+            text=True, encoding="utf-8", errors="replace",
+        )
+
+
+# ---------------------------------------------------------------------------
+# macOS: Seatbelt (sandbox-exec)
+# ---------------------------------------------------------------------------
+
+class DarwinSeatbeltSandbox(ShellSandbox):
+    """Seatbelt sandbox via ``sandbox-exec`` (Apple's sandbox framework).
+
+    Write-only restriction, mirroring Windows Low-IL NO_WRITE_UP (and bwrap's
+    read-only root): the profile leaves every operation at its default
+    (reads, process exec, network — the honest omission shared across all
+    backends) and restricts ONLY writes:
+
+        (deny file-write*)                       no writes anywhere
+        (allow file-write* ws tmp grants…)       except the writable roots
+        (deny file-write* (subpath STATE))       <cwd>/.cluxmate re-denied
+
+    Rule semantics are last-match-wins, so the specific ``STATE`` deny after
+    the broad allow re-denies the agent's own permission/config subtree even
+    though it sits inside the writable workspace — matching
+    ``WriteFence.denyroots`` and the Windows medium re-label.
+
+    Paths are injected as ``-D`` profile PARAMETERS (``(param "…")``), never
+    string-interpolated into the scheme source, so a path containing spaces,
+    quotes, or parens cannot break out of a ``subpath`` filter. ``sandbox-exec``
+    is deprecated since macOS ~11 but still ships and works; ``available()``
+    probes it read-only so removal degrades to fail-closed, not a crash.
+    """
+
+    name = "seatbelt"
+    enforcement = "same-kernel"
+
+    def __init__(self, grant_paths: list[str] | None = None):
+        self._grant_paths = grant_paths or []
+
+    @classmethod
+    def available(cls) -> bool:
+        return platform.system() == "Darwin" and shutil.which("sandbox-exec") is not None
+
+    def _profile(self) -> str:
+        """Scheme source. Writable roots are ``(param …)`` refs (see _prefix)."""
+        allow_filters = ['(subpath (param "WS"))', '(subpath (param "TMP"))']
+        for i in range(len(self._grant_paths)):
+            allow_filters.append(f'(subpath (param "GRANT{i}"))')
+        return (
+            "(version 1)\n"
+            "(deny file-write*)\n"
+            f'(allow file-write* {" ".join(allow_filters)})\n'
+            '(deny file-write* (subpath (param "STATE")))\n'
+        )
+
+    def _profile_params(self, cwd: str) -> list[str]:
+        """``-D key=value`` pairs the profile's ``(param "…")`` refs resolve.
+
+        ``STATE`` is ``<cwd>/.cluxmate`` (the deny subtree, resolved so a
+        symlinked workspace can't dodge it).
+        """
+        ws = str(Path(cwd).resolve())
+        tmp = str(Path(tempfile.gettempdir()).resolve())
+        state = str((Path(ws) / ".cluxmate").resolve())
+        params = [f"WS={ws}", f"TMP={tmp}", f"STATE={state}"]
+        for i, g in enumerate(self._grant_paths):
+            params.append(f"GRANT{i}={str(Path(g).resolve())}")
+        return params
+
+    def _prefix(self, cwd: str) -> list[str]:
+        """``sandbox-exec`` argv up to (not including) the child command.
+
+        ``-D`` params carry the resolved paths verbatim; ``-p`` takes the
+        profile inline. No ``--`` separator: ``sandbox-exec`` takes the
+        command as the next argv element, and our commands are absolute
+        paths (``/bin/sh`` or resolved executables), so there is no leading-
+        dash ambiguity.
+        """
+        argv = ["sandbox-exec"]
+        for p in self._profile_params(cwd):
+            argv += ["-D", p]
+        argv += ["-p", self._profile()]
+        return argv
+
+    def run(
+        self,
+        argv: list[str],
+        *,
+        shell_cmd: str | None,
+        cwd: str,
+        timeout: float,
+        env: dict[str, str],
+    ) -> SandboxResult:
+        prefix = self._prefix(str(Path(cwd).resolve()))
+        if shell_cmd is not None:
+            full = prefix + ["/bin/sh", "-c", shell_cmd]
+        else:
+            full = prefix + argv
+        proc = subprocess.run(
+            full, capture_output=True, stdin=subprocess.DEVNULL,
+            timeout=timeout, cwd=cwd, env=env,
+        )
+        return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
+
+    def spawn_popen(self, argv: list[str], *, cwd: str, env: dict[str, str]):
+        prefix = self._prefix(str(Path(cwd).resolve()))
+        return subprocess.Popen(
+            prefix + argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, bufsize=1, env=env, cwd=cwd,
             text=True, encoding="utf-8", errors="replace",
@@ -831,6 +945,8 @@ def pick_sandbox(workspace: str, grant_paths: list[str] | None = None) -> ShellS
     candidates: list[Any] = []
     if system == "Linux":
         candidates = [BwrapSandbox]
+    elif system == "Darwin":
+        candidates = [DarwinSeatbeltSandbox]
     elif system == "Windows":
         candidates = [WindowsLowILSandbox]
     for cls in candidates:

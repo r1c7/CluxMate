@@ -280,8 +280,9 @@ class BashTool(BaseTool):
             return (
                 "Error: command refused — shell sandboxing is enabled on this "
                 "session but no sandbox backend is available on this platform. "
-                "Install one (Linux: bubblewrap; Windows: icacls/ctypes) or "
-                "set CLUXMATE_BASH_SANDBOX=off to explicitly disable sandboxing."
+                "Install one (Linux: bubblewrap; macOS: sandbox-exec/Seatbelt; "
+                "Windows: icacls/ctypes) or set CLUXMATE_BASH_SANDBOX=off to "
+                "explicitly disable sandboxing."
             )
 
         def _run():

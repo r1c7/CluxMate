@@ -2,8 +2,9 @@
 
 Windows Low-IL tests are real end-to-end runs (label a temp workspace, spawn
 a low-IL child, assert NO_WRITE_UP). They are skipped when icacls/ctypes are
-unavailable. bwrap tests are unit-level (argv construction) since CI hosts
-are Windows.
+unavailable. macOS Seatbelt tests are real end-to-end runs skipped off-Darwin;
+their profile/argv construction is unit-tested everywhere. bwrap tests are
+unit-level (argv construction) since CI hosts are Windows.
 """
 
 import os
@@ -17,6 +18,7 @@ import pytest
 from cluxmate.tools._sandbox import (
     ENV_DISABLE,
     BwrapSandbox,
+    DarwinSeatbeltSandbox,
     SandboxUnavailable,
     WindowsLowILSandbox,
     pick_sandbox,
@@ -27,6 +29,7 @@ from cluxmate.tools.bash import BashTool
 sys.stdout.reconfigure(errors="replace")  # GBK console safety
 
 IS_WIN = platform.system() == "Windows"
+IS_MAC = platform.system() == "Darwin"
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +197,119 @@ def test_bwrap_binds_grant_paths():
     # Count of --bind pairs went from 2 (ws + temp) to 3 with one grant.
     assert argv.count("--bind") == 3
     assert resolved in argv
+
+
+# ---------------------------------------------------------------------------
+# macOS Seatbelt: profile/argv construction (unit level) + end-to-end
+# ---------------------------------------------------------------------------
+
+def test_seatbelt_profile_layout():
+    sb = DarwinSeatbeltSandbox(grant_paths=["/mnt/data"])
+    profile = sb._profile()
+    assert "(version 1)" in profile
+    # Write-only restriction, in last-match-wins order: deny all writes, then
+    # allow the writable roots, then re-deny the state subtree.
+    assert profile.index("(deny file-write*)") < profile.index("(allow file-write*")
+    assert profile.index("(allow file-write*") < profile.index(
+        '(deny file-write* (subpath (param "STATE")))'
+    )
+    assert '(subpath (param "WS"))' in profile
+    assert '(subpath (param "TMP"))' in profile
+    assert '(subpath (param "GRANT0"))' in profile
+
+
+def test_seatbelt_prefix_layout():
+    sb = DarwinSeatbeltSandbox(grant_paths=["/mnt/data"])
+    prefix = sb._prefix("/Users/u/ws")
+    assert prefix[0] == "sandbox-exec"
+    # -D params carry resolved absolute paths verbatim (never scheme-interpolated).
+    params: dict[str, str] = {}
+    i = 1
+    while i < len(prefix) and prefix[i] == "-D":
+        k, v = prefix[i + 1].split("=", 1)
+        params[k] = v
+        i += 2
+    assert params["WS"] == str(Path("/Users/u/ws").resolve())
+    assert params["STATE"] == str((Path("/Users/u/ws").resolve() / ".cluxmate").resolve())
+    assert params["TMP"] == str(Path(tempfile.gettempdir()).resolve())
+    assert params["GRANT0"] == str(Path("/mnt/data").resolve())
+    # Profile follows the -D pairs via -p.
+    assert prefix[i] == "-p"
+    assert prefix[i + 1] == sb._profile()
+
+
+def test_pick_sandbox_returns_seatbelt_on_darwin(monkeypatch):
+    import cluxmate.tools._sandbox as sb_mod
+    monkeypatch.setattr(sb_mod.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sb_mod.DarwinSeatbeltSandbox, "available",
+                        classmethod(lambda cls: True))
+    sb = sb_mod.pick_sandbox("/Users/u/ws")
+    assert isinstance(sb, DarwinSeatbeltSandbox)
+
+
+def test_pick_sandbox_none_on_darwin_without_backend(monkeypatch):
+    # Fail-closed: on macOS without sandbox-exec, pick_sandbox returns None and
+    # BashTool refuses (sandbox_required=True) rather than running bare.
+    import cluxmate.tools._sandbox as sb_mod
+    monkeypatch.setattr(sb_mod.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sb_mod.DarwinSeatbeltSandbox, "available",
+                        classmethod(lambda cls: False))
+    assert sb_mod.pick_sandbox("/Users/u/ws") is None
+
+
+@pytest.mark.skipif(not IS_MAC, reason="macos-only")
+def test_seatbelt_write_inside_workspace_blocked_outside():
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = DarwinSeatbeltSandbox()
+        # 1) write inside workspace succeeds
+        r = sb.run(argv=[], shell_cmd="echo ws > ok.txt", cwd=str(ws),
+                   timeout=60, env=os.environ.copy())
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        assert (ws / "ok.txt").exists()
+        # 2) write to home is denied (Operation not permitted)
+        escape = Path.home() / "cluxmate-sbtest-escape.txt"
+        r2 = sb.run(argv=[], shell_cmd=f'echo bad > "{escape}"', cwd=str(ws),
+                    timeout=60, env=os.environ.copy())
+        assert r2.returncode != 0
+        assert not escape.exists()
+    finally:
+        import shutil
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not IS_MAC, reason="macos-only")
+def test_seatbelt_deny_subtree_for_cluxmate_state():
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = DarwinSeatbeltSandbox()
+        # The dir must exist so the shell reaches the sandbox's write-denial
+        # (rather than failing on a missing parent before any I/O).
+        (ws / ".cluxmate").mkdir(parents=True, exist_ok=True)
+        r = sb.run(argv=[], shell_cmd="echo hacked > .cluxmate/permissions.json",
+                   cwd=str(ws), timeout=60, env=os.environ.copy())
+        assert r.returncode != 0
+        assert not (ws / ".cluxmate" / "permissions.json").exists()
+    finally:
+        import shutil
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not IS_MAC, reason="macos-only")
+def test_seatbelt_granted_folder_writable():
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    granted = Path(tempfile.mkdtemp(prefix="cluxmate-grant-"))
+    try:
+        sb = DarwinSeatbeltSandbox(grant_paths=[str(granted)])
+        target = granted / "granted.txt"
+        r = sb.run(argv=[], shell_cmd=f'echo ok > "{target}"', cwd=str(ws),
+                   timeout=60, env=os.environ.copy())
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        assert target.exists()
+    finally:
+        import shutil
+        shutil.rmtree(ws, ignore_errors=True)
+        shutil.rmtree(granted, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
