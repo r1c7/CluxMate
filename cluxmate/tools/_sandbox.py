@@ -300,9 +300,16 @@ class DarwinSeatbeltSandbox(ShellSandbox):
     (reads, process exec, network — the honest omission shared across all
     backends) and restricts ONLY writes:
 
+        (allow default)                          everything else unchanged
         (deny file-write*)                       no writes anywhere
         (allow file-write* ws tmp grants…)       except the writable roots
         (deny file-write* (subpath STATE))       <cwd>/.cluxmate re-denied
+
+    ``(allow default)`` is REQUIRED: once a Seatbelt profile contains any rule,
+    unmentioned operations (``process-exec``, ``file-read*``, network) default
+    to DENY — without it even ``/bin/sh`` fails to exec with "Operation not
+    permitted". It is the Homebrew-build-sandbox pattern, same as bwrap's
+    read-only root + writable binds.
 
     Rule semantics are last-match-wins, so the specific ``STATE`` deny after
     the broad allow re-denies the agent's own permission/config subtree even
@@ -333,6 +340,7 @@ class DarwinSeatbeltSandbox(ShellSandbox):
             allow_filters.append(f'(subpath (param "GRANT{i}"))')
         return (
             "(version 1)\n"
+            "(allow default)\n"
             "(deny file-write*)\n"
             f'(allow file-write* {" ".join(allow_filters)})\n'
             '(deny file-write* (subpath (param "STATE")))\n'

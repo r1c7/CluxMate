@@ -254,7 +254,9 @@ async def test_bash_escalate_runs_unsandboxed():
             sandbox_required=True,
         )
         result = await tool.execute(
-            command=f"echo esc > {target}",
+            # as_posix() (forward slashes) so the redirect works under BOTH
+            # cmd.exe and Git Bash — the latter mangles backslash paths.
+            command=f"echo esc > {target.as_posix()}",
             sandbox_permissions="danger-full-access",
             justification="test",
         )

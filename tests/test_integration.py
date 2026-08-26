@@ -751,7 +751,7 @@ class _RecordingTracker:
     async def on_agent_start(self, agent_id, parent_id, subagent_type, description, depth, prompt=""):
         self.starts.append((agent_id, parent_id, subagent_type, description, depth))
 
-    async def on_agent_end(self, agent_id, status, result):
+    async def on_agent_end(self, agent_id, status, result, input_tokens=0, output_tokens=0):
         self.ends.append((agent_id, status, result))
 
     def scoped(self, agent_id, auto_approve=True):
@@ -1055,7 +1055,7 @@ async def test_subagent_text_streams_through_scoped_callbacks():
         async def on_agent_start(self, agent_id, parent_id, subagent_type, description, depth, prompt=""):
             self.starts.append((agent_id, depth))
 
-        async def on_agent_end(self, agent_id, status, result):
+        async def on_agent_end(self, agent_id, status, result, input_tokens=0, output_tokens=0):
             self.ends.append((agent_id, status))
 
         def scoped(self, agent_id, auto_approve=True):

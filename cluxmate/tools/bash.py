@@ -208,21 +208,30 @@ class BashTool(BaseTool):
     ) -> str:
         timeout = (timeout_ms or self._timeout_ms) / 1000.0
         cwd = self._workdir or os.getcwd()
-        use_shell, prefix = _resolve_shell()
         env = _subprocess_env()
-
-        if use_shell and platform.system() == "Windows":
-            # chcp 65001 switches cmd.exe to UTF-8 (code page 65001) so
-            # Chinese characters in command output are UTF-8, not GBK.
-            command = f"chcp 65001 >NUL && {command}"
-
         # Sandbox dispatch (phase 1): when a backend is configured, run the
         # command under it. When sandboxing is REQUIRED but no backend is
         # available, FAIL CLOSED — refuse rather than run bare. A
         # danger-full-access escalation bypasses the sandbox entirely (the
         # approval already happened in on_tool_start): it runs bare.
         sandboxed = self._sandbox is not None or self._sandbox_required
-        if sandboxed and sandbox_permissions != "danger-full-access":
+        will_sandbox = sandboxed and sandbox_permissions != "danger-full-access"
+
+        use_shell, prefix = _resolve_shell()
+        if will_sandbox and platform.system() == "Windows":
+            # Git Bash (MSYS2) cannot run under the Low-IL sandbox: its runtime
+            # needs a \BaseNamedObjects\msys-* object at Medium+ integrity, so a
+            # low-IL child dies with NtCreateDirectoryObject 0xC0000022. Fall
+            # back to cmd.exe (the shell_cmd path, which the Low-IL backend runs
+            # natively via cmd.exe /d /c).
+            use_shell, prefix = True, []
+
+        if use_shell and platform.system() == "Windows":
+            # chcp 65001 switches cmd.exe to UTF-8 (code page 65001) so
+            # Chinese characters in command output are UTF-8, not GBK.
+            command = f"chcp 65001 >NUL && {command}"
+
+        if will_sandbox:
             return await self._run_sandboxed(command, use_shell, prefix,
                                              cwd, env, timeout)
 

@@ -32,9 +32,26 @@ sys.stdout.reconfigure(errors="replace")  # GBK console safety
 IS_WIN = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
-# bwrap end-to-end tests need the real bubblewrap binary; skip when absent
-# (fail-closed semantics is covered separately by test_bashtool_fail_closed_*).
-HAS_BWRAP = BwrapSandbox.available()
+# bwrap end-to-end tests need a WORKING bubblewrap, not just the binary on PATH.
+# GitHub-hosted ubuntu runners install bwrap but restrict unprivileged user
+# namespaces, so `bwrap … true` fails with "setting up uid map: Permission
+# denied" — probe once and skip rather than failing the whole matrix.
+def _bwrap_usable() -> bool:
+    if not BwrapSandbox.available():
+        return False
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+             "--die-with-parent", "true"],
+            capture_output=True, timeout=30,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+HAS_BWRAP = _bwrap_usable()
 
 
 # ---------------------------------------------------------------------------
@@ -329,8 +346,10 @@ def test_seatbelt_profile_layout():
     sb = DarwinSeatbeltSandbox(grant_paths=["/mnt/data"])
     profile = sb._profile()
     assert "(version 1)" in profile
-    # Write-only restriction, in last-match-wins order: deny all writes, then
-    # allow the writable roots, then re-deny the state subtree.
+    # Write-only restriction, in last-match-wins order: allow everything by
+    # default (Seatbelt is deny-by-default once any rule exists), then deny all
+    # writes, allow the writable roots, then re-deny the state subtree.
+    assert profile.index("(allow default)") < profile.index("(deny file-write*)")
     assert profile.index("(deny file-write*)") < profile.index("(allow file-write*")
     assert profile.index("(allow file-write*") < profile.index(
         '(deny file-write* (subpath (param "STATE")))'
