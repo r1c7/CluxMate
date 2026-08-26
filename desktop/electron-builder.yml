@@ -44,9 +44,10 @@ mac:
   icon: resources/icon.icns
   target:
     - target: dmg
-      arch: [x64, arm64]
     - target: zip
-      arch: [x64, arm64]
+  # arch defaults to the build host's architecture (arm64 on Apple Silicon
+  # runners). Building a universal / multi-arch distribution is a separate,
+  # heavier step (add `arch: [x64, arm64]` or a per-arch matrix).
   # Signing + notarization: enable once Apple Developer credentials are present
   # (CSC_LINK / APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID env vars)
   # and a build/entitlements.mac.plist exists. Unsigned builds still run locally
