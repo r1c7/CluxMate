@@ -1,14 +1,13 @@
 import { Tray, Menu, nativeImage, app, BrowserWindow } from 'electron'
-import { join } from 'path'
-import { existsSync } from 'fs'
+import { resolveIconPath } from './icon'
 
 let tray: Tray | null = null
 
 export function createTray() {
-  // Resolve tray icon from icon.ico
-  const devPath = join(__dirname, '..', '..', 'resources', 'icon.ico')
-  const icon = existsSync(devPath)
-    ? nativeImage.createFromPath(devPath).resize({ width: 16, height: 16 })
+  // Resolve the runtime tray icon (ico on Windows, png on macOS/Linux).
+  const iconPath = resolveIconPath()
+  const icon = iconPath
+    ? nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
     : nativeImage.createEmpty()
 
   tray = new Tray(icon)

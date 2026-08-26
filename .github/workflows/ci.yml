@@ -4,6 +4,10 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Manual trigger (Actions → CI → "Run workflow"). Also a diagnostic: if the
+  # button runs but push doesn't, the auto-trigger is the problem; if the
+  # button itself is missing, GitHub didn't register this file at all.
+  workflow_dispatch:
 
 # Bash shell on all three runners keeps the run steps (quoting, `-m "not
 # network"`) consistent — Git Bash is present on the Windows runner.

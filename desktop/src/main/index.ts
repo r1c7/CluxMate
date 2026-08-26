@@ -1,21 +1,21 @@
 import { app, BrowserWindow, Menu, nativeImage } from 'electron'
 import { join } from 'path'
-import { existsSync } from 'fs'
 import { setupSecurity } from './security'
 import { registerIpcHandlers, killAllBridges, stopIdleReaper } from './ipc-handlers'
 import { createTray } from './tray'
+import { resolveIconPath } from './icon'
 import { IPC } from '../shared/ipc-channels'
 
 function createWindow() {
-  // Resolve window icon from icon.ico
-  const iconPath = join(__dirname, '..', '..', 'resources', 'icon.ico')
+  // Resolve the runtime window icon (ico on Windows, png on macOS/Linux).
+  const iconPath = resolveIconPath()
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
     // Frameless: the renderer draws its own title bar (icon + min/max/close)
     // so its height is fully controllable instead of the fixed native strip.
     frame: false,
-    icon: existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined,
+    icon: iconPath ? nativeImage.createFromPath(iconPath) : undefined,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,

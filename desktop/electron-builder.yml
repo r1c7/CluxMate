@@ -5,7 +5,32 @@ directories:
   buildResources: resources
 files:
   - out/**/*
-  - "!out/renderer/**/*"
+  # Renderer is required at runtime (main loads ../renderer/index.html), so it
+  # must NOT be excluded. Only strip source maps.
+  - "!**/*.map"
+# Rebuild native modules (better-sqlite3) against Electron's ABI during
+# packaging — `npm install` builds them against the local Node version, which
+# is ABI-incompatible with Electron.
+npmRebuild: true
+# Native .node binaries cannot be require()'d from inside the asar archive —
+# unpack them so better-sqlite3 loads at runtime.
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/better-sqlite3/**"
+extraResources:
+  # Bundle the Python agent core alongside the app. (The bridge currently
+  # still spawns `python -m cluxmate` from PATH — see the packaging note; this
+  # keeps the source available for a future self-contained spawn.)
+  - from: ../cluxmate/
+    to: cluxmate
+    filter:
+      - "**/*.py"
+      - "**/*.j2"
+  # Runtime window/tray icons (outside asar, resolved via process.resourcesPath).
+  - from: resources/icon.ico
+    to: icon.ico
+  - from: resources/icon.png
+    to: icon.png
 win:
   target:
     - target: nsis
@@ -14,9 +39,26 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-extraResources:
-  - from: ../cluxmate/
-    to: cluxmate
-    filter:
-      - "**/*.py"
-      - "**/*.j2"
+mac:
+  category: public.app-category.developer-tools
+  icon: resources/icon.icns
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  # Signing + notarization: enable once Apple Developer credentials are present
+  # (CSC_LINK / APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID env vars)
+  # and a build/entitlements.mac.plist exists. Unsigned builds still run locally
+  # but trip Gatekeeper on other machines.
+  # hardenedRuntime: true
+  # entitlements: build/entitlements.mac.plist
+  # entitlementsInherit: build/entitlements.mac.plist
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  icon: resources/icon.png
+  category: Development
