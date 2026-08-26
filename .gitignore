@@ -13,3 +13,21 @@ build/
 venv/
 docs/
 .cluxmate/
+
+# Node / Electron desktop
+node_modules/
+.npm-cache
+desktop/out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# pytest cache temp files (leak into cwd under some sandboxes)
+pytest-cache-files-*
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+scripts/
