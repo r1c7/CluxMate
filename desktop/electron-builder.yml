@@ -63,3 +63,5 @@ linux:
       arch: [x64]
   icon: resources/icon.png
   category: Development
+  # .deb requires an explicit maintainer ("Name <email>").
+  maintainer: CluxMate contributors <dev@example.com>

@@ -2,6 +2,12 @@
   "name": "cluxmate-desktop",
   "version": "0.1.0",
   "description": "CluxMate Desktop — AI coding agent",
+  "homepage": "https://github.com/r1c7/CluxMate",
+  "author": {
+    "name": "CluxMate contributors",
+    "email": "dev@example.com"
+  },
+  "license": "MIT",
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
