@@ -15,6 +15,7 @@ def tool():
 # ── Real HTTP (httpbin.org) tests ──────────────────────────────────
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_basic_get(tool):
     """Fetch a known static page and verify content is returned."""
@@ -23,6 +24,7 @@ async def test_basic_get(tool):
     assert "httpbin" in result.lower()
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_custom_headers(tool):
     """Custom headers should be sent and reflected by httpbin."""
@@ -37,6 +39,7 @@ async def test_custom_headers(tool):
     assert body["headers"]["X-Test"] == "hello"
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_post_with_body(tool):
     """POST with body should echo back correctly."""
@@ -53,6 +56,7 @@ async def test_post_with_body(tool):
     assert body["json"] == {"key": "value"}
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_raw_format_prefix(tool):
     """Raw format should have Status: and Content-Type: prefix lines."""
@@ -63,6 +67,7 @@ async def test_raw_format_prefix(tool):
     assert lines[2] == ""
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_verbose_format(tool):
     """Verbose format should return valid JSON with filtered headers."""
@@ -77,6 +82,7 @@ async def test_verbose_format(tool):
         assert key in ("content-type", "content-length", "last-modified")
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_verbose_include_all_headers(tool):
     """include_all_headers=True should return all headers."""
@@ -96,6 +102,7 @@ async def test_nonexistent_domain(tool):
     assert "error" in result.lower() or "Error" in result
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_not_found_status(tool):
     """404 should return content with status line showing it."""
@@ -111,6 +118,7 @@ async def test_plan_mode_rejects_write_methods(tool):
     assert "error" in result.lower() or "read-only" in result.lower()
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_plan_mode_allows_get(tool):
     """GET should work normally in plan mode."""

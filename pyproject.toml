@@ -17,3 +17,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = {find = {include = ["cluxmate*"]}}
+
+[tool.pytest.ini_options]
+# Async tests use explicit @pytest.mark.asyncio (strict is the pytest-asyncio
+# default; pinned here so a future default change can't silently alter collection).
+asyncio_mode = "strict"
+markers = [
+    "network: tests that hit the real network (httpbin.org); excluded from CI by default via -m 'not network'",
+]

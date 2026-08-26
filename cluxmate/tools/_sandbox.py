@@ -176,15 +176,22 @@ class ShellSandbox:
 class BwrapSandbox(ShellSandbox):
     """bubblewrap mount-namespace sandbox (the reference implementation).
 
-    Layout:
+    Layout (mount order matters — later mounts stack over earlier ones, and a
+    parent mount shadowing an earlier child mount would hide it, so parents
+    come first and the deny subtree last):
       --ro-bind / /                everything visible, read-only
+      --bind <tmp> <tmp>           platform temp dir writable FIRST: a
+                                   workspace under the temp dir (tests use
+                                   mkdtemp) must not be shadowed by the temp
+                                   bind that follows it
       --bind <ws> <ws>             workspace writable at its real path
-      --ro-bind <ws>/.cluxmate …   deny subtree re-mounted read-only (last
-                                   mount wins, so the writable workspace bind
-                                   cannot reach the agent's own permission/
-                                   config state — mirrors WriteFence.denyroots,
-                                   Windows' medium re-label, Seatbelt's STATE)
-      --bind <tmp> <tmp>           platform temp dir writable (its real path)
+      [--bind <grant> <grant> …]   user-granted folders
+      --ro-bind <ws>/.cluxmate …   deny subtree re-mounted read-only LAST, so
+                                   it overrides every writable bind above and
+                                   the sandboxed shell can't reach the agent's
+                                   own permission/config state — mirrors
+                                   WriteFence.denyroots, Windows' medium
+                                   re-label, Seatbelt's STATE
       --dev /dev                   minimal device nodes (null, zero, ...)
       --proc /proc                 fresh procfs
       --die-with-parent --new-session  no orphaned descendants
@@ -231,14 +238,14 @@ class BwrapSandbox(ShellSandbox):
         argv = [
             "bwrap",
             "--ro-bind", "/", "/",
+            "--bind", str(tmp), str(tmp),
             "--bind", str(ws), str(ws),
         ]
-        if state.is_dir():
-            argv += ["--ro-bind", str(state), str(state)]
-        argv += ["--bind", str(tmp), str(tmp)]
         for g in self._grant_paths:
             gp = str(Path(g).resolve())
             argv += ["--bind", gp, gp]
+        if state.is_dir():
+            argv += ["--ro-bind", str(state), str(state)]
         argv += [
             "--dev", "/dev",
             "--proc", "/proc",

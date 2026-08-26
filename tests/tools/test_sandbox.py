@@ -205,24 +205,37 @@ def test_bwrap_binds_grant_paths():
 
 
 def test_bwrap_deny_subtree_ro_bind(monkeypatch):
-    # <cwd>/.cluxmate is re-mounted read-only AFTER the writable workspace
-    # bind (last mount wins) — mirroring WriteFence.denyroots / Windows medium
-    # re-label / Seatbelt STATE. is_dir is faked (rather than creating a real
-    # dir) so the test is hermetic even in constrained temp environments; the
-    # real end-to-end deny is covered by test_bwrap_deny_subtree_for_cluxmate_state.
+    # <cwd>/.cluxmate is re-mounted read-only AFTER every writable bind (last
+    # mount wins) — mirroring WriteFence.denyroots / Windows medium re-label /
+    # Seatbelt STATE. is_dir is faked (rather than creating a real dir) so the
+    # test is hermetic even in constrained temp environments; the real
+    # end-to-end deny is covered by test_bwrap_deny_subtree_for_cluxmate_state.
     real_is_dir = Path.is_dir
     monkeypatch.setattr(
         Path, "is_dir",
         lambda self: True if self.name == ".cluxmate" else real_is_dir(self),
     )
-    sb = BwrapSandbox()
+    sb = BwrapSandbox(grant_paths=["/mnt/data"])
     argv = sb._bwrap_argv("/home/u/ws")
     state = str((Path("/home/u/ws").resolve() / ".cluxmate").resolve())
-    assert "--ro-bind" in argv
     i = argv.index(state)
-    assert argv[i - 1] == "--ro-bind"   # re-mounted read-only, not --bind
+    assert argv[i - 1] == "--ro-bind"    # re-mounted read-only, not --bind
     assert argv[i + 1] == state          # src == dst
-    assert argv.index("--bind") < i      # workspace bind comes first
+    # The deny bind is LAST: after the temp, workspace, and grant --bind pairs.
+    for idx in (argv.index(str(Path(tempfile.gettempdir()).resolve())),
+                argv.index(str(Path("/home/u/ws").resolve())),
+                argv.index(str(Path("/mnt/data").resolve()))):
+        assert idx < i
+
+
+def test_bwrap_tmp_bound_before_workspace():
+    # Mount order: temp dir FIRST, then workspace — a workspace under the temp
+    # dir (tests mkdtemp there) must not be shadowed by the temp bind.
+    sb = BwrapSandbox()
+    argv = sb._bwrap_argv("/home/u/ws")
+    tmp = str(Path(tempfile.gettempdir()).resolve())
+    ws = str(Path("/home/u/ws").resolve())
+    assert argv.index(tmp) < argv.index(ws)
 
 
 def test_bwrap_no_deny_bind_when_state_missing():
