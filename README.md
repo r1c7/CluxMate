@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.12+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Platform](https://img.shields.io/badge/platform-Windows-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue.svg)
 
 **English** · [中文文档](README.zh-CN.md)
 
@@ -40,11 +40,12 @@ It speaks the **OpenAI-compatible API**, so it works with DeepSeek, Qwen, GLM, O
 - **Event-sourced sessions, fully traceable** — every session is an append-only event log; the model's message history is *derived* from it, never stored separately. Every turn of every agent — main *and* subagents — is bracketed by `turn/start`/`turn/end`, every step logs `step/start`, `request/header`, and tool results, so the exact prompt sent at any step can be reconstructed and replayed verbatim, and context compaction rewrites a summary region without erasing the underlying events. See [Sessions you can replay](#sessions-you-can-replay) below.
 - **Stable, cache-friendly context** — the system prompt never changes with your session: memory, skills, and mode are injected as tagged synthetic messages, so request prefixes stay stable and prompt caches stay hot — with per-turn cache-hit and latency metrics surfaced in the UI.
 - **Risk-tiered permissions** — every tool declares a risk level (`safe` / `write` / `dangerous`); four modes (`plan` / `default` / `acceptEdits` / `yolo`) plus a persistent always-allow list control approval. `plan` mode is read-only by construction; dangerous commands always prompt.
-- **A two-layer sandbox** — file write/delete tools are guarded by an in-process **WriteFence** (canonicalize-then-contain), and model-generated `bash` commands run inside an **OS-level sandbox** (Windows Low-integrity token). Sandboxing is *fail-closed* and only `yolo` mode — the explicit opt-out — disarms it. See [Security: sandbox](#security-sandbox).
+- **A two-layer sandbox** — file write/delete tools are guarded by an in-process **WriteFence** (canonicalize-then-contain), and model-generated `bash` commands run inside an **OS-level sandbox** (Windows Low-integrity token, Linux bubblewrap, macOS Seatbelt). Sandboxing is *fail-closed* and only `yolo` mode — the explicit opt-out — disarms it. See [Security: sandbox](#security-sandbox).
 - **Checkpoints & rewind** — a shadow-git repository per working directory snapshots your files before and after every turn, so you can undo any turn — session-scoped, so other sessions' edits surface as conflicts, never clobbered.
 - **Subagent delegation** — delegate independent tasks to restricted subagents (`general-purpose`, read-only `explore`) with a depth cap of 4, each with its own replayable session log.
 - **Doom-loop guard** — if the agent starts repeating identical tool calls, escalating advisories nudge it back on track; `MAX_TURNS` remains the hard backstop.
 - **Skills, memory & MCP** — project-scoped skill packs, durable project memory (`AGENTS.md`), and Model Context Protocol servers (stdio / HTTP) plug into the same context pipeline.
+- **Lifecycle hooks** — run your own shell commands at `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`, receiving context as stdin JSON and deciding to block or inject context via stdout JSON. Hooks are your own trusted config, never sandboxed; crashes/timeouts degrade to a no-op.
 - **Rich toolset, safely capped** — `bash`, file read/write/edit/delete, `grep`, `list_dir`, `web_fetch`, `web_search`, `ask_user_question`, subagents, skills, memory updates and more; every tool's output is capped and truncated to keep context bounded.
 
 ## Architecture at a glance
@@ -63,6 +64,7 @@ It speaks the **OpenAI-compatible API**, so it works with DeepSeek, Qwen, GLM, O
 │  Builder ── Permissions ── Checkpoints       │
 │  WriteFence ── Bash/MCP sandbox              │
 │  Skills ── Memory ── MCP ── Subagents        │
+│  Hooks ── Grants                              │
 └──────────────────────────────────────────────┘
                      │
          OpenAI-compatible API (httpx)
@@ -94,11 +96,15 @@ Permissions decide what is *allowed*; two enforcement boundaries make denials *s
 
 **① WriteFence (in-process)** — guards the five file tools (`write_file`, `search_replace`, `multi_edit`, `multi_write`, `delete_file`). Every path is canonicalized (`..` and symlinks resolved) then checked: deny-list first, containment second, *before any I/O*. Only the working directory, the platform temp dir, and your `~/.cluxmate/AGENTS.md` are writable — and `<project>/.cluxmate/` (permission config, MCP servers, skills) is always off-limits so a prompt-injected model can never edit its own permission settings.
 
-**② Bash + MCP sandbox (OS-level)** — model-generated `bash` commands run under an OS sandbox instead of your full user:
+**② Bash + MCP sandbox (OS-level)** — model-generated `bash` commands run under an OS sandbox instead of your full user, with a kernel-level backend on each platform:
 - **Windows**: a Low-integrity token (`NO_WRITE_UP`) with the workspace tree labeled low — the shell can read and reach the network, but cannot modify anything above its integrity level.
+- **Linux**: bubblewrap (`bwrap`) mount namespaces — the root filesystem is read-only, only the workspace/temp dirs/granted folders are writable, and `<project>/.cluxmate` is re-mounted read-only.
+- **macOS**: Seatbelt (`sandbox-exec`) — `(allow default)` with only file writes denied, the workspace/temp dirs/granted folders allowed, and `<project>/.cluxmate` denied again.
 - **Fail-closed**: if sandboxing is on but no backend is available, `bash` refuses to run rather than falling back to a bare subprocess. Escape hatch: `CLUXMATE_BASH_SANDBOX=off`.
 
-Both boundaries are enabled in every mode **except `yolo`** — the one explicit opt-out that disarms everything. Writable-folder grants (`~/.cluxmate/sandbox-grants.json`) let you whitelist extra directories. The permission modes:
+MCP stdio servers reuse the same sandbox (best-effort: they are your explicit config, so with no backend they fall back to running bare).
+
+Both boundaries are enabled in every mode **except `yolo`** — the one explicit opt-out that disarms everything. Writable-folder grants (`~/.cluxmate/sandbox-grants.json`) let you whitelist extra directories. When the sandbox denies something, the model can request a one-off escalation (`sandbox_permissions="danger-full-access"` + a one-sentence reason) — this triggers a `dangerous` approval, and the grant applies to that single call only. The permission modes:
 
 | Mode | Behavior | Sandbox |
 |---|---|---|
@@ -128,8 +134,30 @@ Subagents recurse up to a **depth cap of 4** (the `task` tool is withheld at the
 
 - **Skills** — project-scoped instruction packs (`<project>/.cluxmate/skills.json`) that the model can load on demand via the `use_skill` tool.
 - **Memory** — a durable project memory file, `AGENTS.md`, rendered as a tagged synthetic message every turn. A legacy `CLAUDE.md` file is also honored as a read-only fallback.
-- **MCP** — Model Context Protocol servers (stdio or HTTP) plug their tools straight into the agent's context; servers are loaded once per working directory and sandboxed on Windows like `bash`.
+- **MCP** — Model Context Protocol servers (stdio or HTTP) plug their tools straight into the agent's context; servers are loaded once per working directory, and stdio servers are OS-sandboxed like `bash`.
 
+
+## Lifecycle hooks
+
+Run your own shell commands at fixed points (Claude Code style): `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`. Commands receive context as stdin JSON and decide to block or inject via stdout JSON:
+
+```jsonc
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [{"type": "command", "command": "python .cluxmate/hooks/audit.py", "timeout": 30}]
+      }
+    ]
+  }
+}
+```
+
+- **Block**: output `{"decision":"block","reason":"..."}` or exit with code 2 → the tool/reply is blocked and the model receives the reason.
+- **Inject**: output `{"hookSpecificOutput":{"additionalContext":"..."}}` → extra context is injected for the model.
+- **Location**: `~/.cluxmate/settings.json` (global) and `<project>/.cluxmate/settings.json` (project, runs after global) are merged.
+- **Trust model**: hooks are your own trusted config, running in a normal subprocess (not sandboxed); crashes/timeouts degrade to a no-op.
 
 ## Installation
 
@@ -169,10 +197,13 @@ Then run it in one of two ways:
   npm run dev
   ```
 
-- **Build & package** — compiles and produces a Windows installer (`dist/`):
+- **Build & package** — compiles and produces an installer for the current platform (`dist/`):
 
   ```bash
-  npm run package
+  npm run package          # current platform
+  npm run package:win      # Windows installer
+  npm run package:mac      # macOS DMG
+  npm run package:linux    # Linux AppImage / deb
   ```
 
 Other useful commands:
@@ -226,7 +257,7 @@ Global config lives at `~/.cluxmate/config.json` (schema v2) — a list of model
 - **`max_tokens`** — output budget; leave empty/`0` for the 32768 default.
 - **`reasoning_efforts`** — optional per-model override of the reasoning-effort levels (the system ships presets per dialect: DeepSeek / Qwen / GLM / OpenAI).
 
-Per-project state (always-allow permissions, MCP servers, skills, sandbox grants, and hooks — user-defined shell commands at lifecycle points, configured in `settings.json`) lives under `<project>/.cluxmate/` — it stays with the project, not your home directory.
+Per-project state (always-allow permissions, MCP servers, skills, sandbox grants, and [lifecycle hooks](#lifecycle-hooks)) lives under `<project>/.cluxmate/` — it stays with the project, not your home directory.
 
 ## Desktop app
 

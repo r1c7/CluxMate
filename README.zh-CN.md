@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.12+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Platform](https://img.shields.io/badge/platform-Windows-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue.svg)
 
 [English](README.md) · **中文文档**
 
@@ -22,7 +22,7 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 |---|---|
 | **无头 CLI** | 一次性提示词，适合脚本、CI 与自动化（`cluxmate -p "..."`） |
 | **Textual TUI** | 完整的交互式终端界面（`cluxmate`） |
-| **Electron 桌面端** | 精美的图形界面，通过 JSON-RPC（stdio）驱动同一个核心 |
+| **Electron 桌面端** | 交互友好的图形界面，通过 JSON-RPC（stdio）驱动同一个核心 |
 
 它使用 **OpenAI 兼容协议**，因此可以对接 DeepSeek、Qwen、GLM、OpenAI、OpenRouter、Ollama，或任何自建的同协议端点——只需配置一个 `base_url`。没有任何厂商锁定。
 
@@ -40,11 +40,12 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 - **事件溯源会话，完全可追溯** —— 每个会话都是一个追加式事件日志；模型的对话历史*由它推导而来*，从不单独存储。每个 agent（主 agent *和*子 agent）的每一轮都被 `turn/start`/`turn/end` 包围，每一步都记录 `step/start`、`request/header` 和工具结果，因此任意一步实际发送的提示词都可以逐字重建、回放；上下文压缩只重写一个摘要区域，不会抹掉底层事件。参见下文 [可回放的会话](#可回放的会话)。
 - **稳定、缓存友好的上下文** —— 系统提示词不随会话变化：记忆、技能、模式以带标签的合成消息注入，请求前缀保持稳定，提示词缓存保持热度——UI 中还会展示每轮的缓存命中与延迟指标。
 - **分级风险权限** —— 每个工具声明风险等级（`safe` / `write` / `dangerous`）；四种模式（`plan` / `default` / `acceptEdits` / `yolo`）加上持久化的 always-allow 列表控制审批。`plan` 模式天然只读；危险命令永远需要确认。
-- **双层沙箱** —— 文件写入/删除工具由进程内 **WriteFence**（先规范化再包含性检查）守护；模型生成的 `bash` 命令在**操作系统级沙箱**内运行（Windows 低完整性令牌）。沙箱**默认失败即关闭（fail-closed）**，只有 `yolo` 模式——唯一的显式豁免——会解除它。参见 [安全：沙箱](#安全沙箱)。
+- **双层沙箱** —— 文件写入/删除工具由进程内 **WriteFence**（先规范化再包含性检查）守护；模型生成的 `bash` 命令在**操作系统级沙箱**内运行（Windows 低完整性令牌、Linux bubblewrap、macOS Seatbelt）。沙箱**默认失败即关闭（fail-closed）**，只有 `yolo` 模式——唯一的显式豁免——会解除它。参见 [安全：沙箱](#安全沙箱)。
 - **检查点与回滚** —— 每个工作目录都有一个 shadow-git 仓库，在每轮前后快照你的文件，因此可以撤销任意一轮——且是会话级的，其他会话的修改会以冲突形式呈现，绝不会被覆盖。
 - **子 agent 委派** —— 把独立任务委派给受限子 agent（`general-purpose`、只读的 `explore`），递归深度上限 4，每个子 agent 都有自己可回放的会话日志。
 - **死循环防护** —— 如果 agent 开始重复相同的工具调用，逐级升级的提醒会把它拉回正轨；`MAX_TURNS` 仍是最终的硬兜底。
 - **技能、记忆与 MCP** —— 项目级技能包、持久化项目记忆（`AGENTS.md`）、以及 Model Context Protocol 服务器（stdio / HTTP）接入同一条上下文管线。
+- **生命周期 Hooks** —— 在 `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` 时点运行你自己定义的 shell 命令，通过 stdin JSON 收上下文、stdout JSON 决定拦截（block）或注入额外上下文。hooks 是你自己的受信配置，不进沙箱；崩溃/超时一律降级为 no-op。
 - **丰富且受控的工具集** —— `bash`、文件读写/编辑/删除、`grep`、`list_dir`、`web_fetch`、`web_search`、`ask_user_question`、子 agent、技能、记忆更新等；每个工具的输出都有上限与截断，保证上下文有界。
 
 ## 架构一览
@@ -63,6 +64,7 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 │  Builder ── Permissions ── Checkpoints       │
 │  WriteFence ── Bash/MCP 沙箱                  │
 │  Skills ── Memory ── MCP ── Subagents        │
+│  Hooks ── Grants                              │
 └──────────────────────────────────────────────┘
                      │
          OpenAI 兼容 API（httpx）
@@ -94,11 +96,15 @@ agent 所做的一切都被记录在追加式事件日志中——每个会话�
 
 **① WriteFence（进程内）** —— 守护五个文件工具（`write_file`、`search_replace`、`multi_edit`、`multi_write`、`delete_file`）。每个路径先被规范化（展开 `..`、解析符号链接），再做拒绝检查、包含性检查，*任何 I/O 之前*完成。只有工作目录、平台临时目录和你的 `~/.cluxmate/AGENTS.md` 可写——而 `<项目>/.cluxmate/`（权限配置、MCP 服务器、技能）永远不可写，防止被提示词注入的模型修改自己的权限设置。
 
-**② Bash + MCP 沙箱（OS 级）** —— 模型生成的 `bash` 命令在操作系统沙箱内运行，而不是你的完整用户权限：
+**② Bash + MCP 沙箱（OS 级）** —— 模型生成的 `bash` 命令在操作系统沙箱内运行，而不是你的完整用户权限，三个平台各有内核级后端：
 - **Windows**：低完整性令牌（`NO_WRITE_UP`），工作区目录树被标记为低完整性——shell 可以读取、可以联网，但无法修改高于其完整性级别的任何内容。
+- **Linux**：bubblewrap（`bwrap`）挂载命名空间——根文件系统只读，仅工作区/临时目录/授权文件夹可写，`<项目>/.cluxmate` 重新挂载为只读。
+- **macOS**：Seatbelt（`sandbox-exec`）——`(allow default)` 基础上只拒绝文件写入，放行工作区/临时目录/授权文件夹，再拒绝 `<项目>/.cluxmate`。
 - **失败即关闭**：沙箱开启但后端不可用时，`bash` 拒绝运行，而不是回退到裸子进程。逃生口：`CLUXMATE_BASH_SANDBOX=off`。
 
-两层边界在除 **`yolo`** 之外的每种模式下都开启——`yolo` 是解除一切的唯一显式豁免。可写文件夹授权（`~/.cluxmate/sandbox-grants.json`）允许你白名单额外的目录。权限模式一览：
+MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配置，无后端时退回裸运行）。
+
+两层边界在除 **`yolo`** 之外的每种模式下都开启——`yolo` 是解除一切的唯一显式豁免。可写文件夹授权（`~/.cluxmate/sandbox-grants.json`）允许你白名单额外的目录。被沙箱拒绝时，模型可以请求一次性升级（`sandbox_permissions="danger-full-access"` + 一句理由）——这会触发一次 `dangerous` 审批，批准仅对该次调用生效。权限模式一览：
 
 | 模式 | 行为 | 沙箱 |
 |---|---|---|
@@ -128,8 +134,30 @@ agent 所做的一切都被记录在追加式事件日志中——每个会话�
 
 - **技能（Skills）** —— 项目级指令包（`<项目>/.cluxmate/skills.json`），模型可通过 `use_skill` 工具按需加载。
 - **记忆（Memory）** —— 持久化项目记忆文件 `AGENTS.md`，每轮以带标签的合成消息渲染。旧版遗留的 `CLAUDE.md` 文件也会作为只读回退被兼容。
-- **MCP** —— Model Context Protocol 服务器（stdio 或 HTTP）把它们的工具直接接入 agent 上下文；服务器每个工作目录只加载一次，在 Windows 上像 `bash` 一样被沙箱保护。
+- **MCP** —— Model Context Protocol 服务器（stdio 或 HTTP）把它们的工具直接接入 agent 上下文；服务器每个工作目录只加载一次，stdio 服务器像 `bash` 一样被操作系统沙箱保护。
 
+
+## 生命周期 Hooks
+
+在固定时点运行你自己定义的 shell 命令（Claude Code 风格）：`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`。命令通过 stdin JSON 接收上下文，通过 stdout JSON 决定拦截或注入：
+
+```jsonc
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [{"type": "command", "command": "python .cluxmate/hooks/audit.py", "timeout": 30}]
+      }
+    ]
+  }
+}
+```
+
+- **拦截**：输出 `{"decision":"block","reason":"..."}` 或以退出码 2 结束 → 该工具/回复被阻止，模型收到 reason。
+- **注入**：输出 `{"hookSpecificOutput":{"additionalContext":"..."}}` → 额外上下文注入给模型。
+- **位置**：`~/.cluxmate/settings.json`（全局）与 `<项目>/.cluxmate/settings.json`（项目，后运行）合并生效。
+- **信任模型**：hooks 是你自己的受信配置，运行在普通子进程里（不进沙箱）；崩溃/超时一律降级为 no-op。
 
 ## 安装
 
@@ -145,7 +173,7 @@ git clone https://github.com/r1c7/CluxMate.git
 cd cluxmate
 
 pip install .            # 直接安装
-# 或开发模式——可编辑安装（改动即时生效）：
+# 或开发模式——可编辑安装（源码改动即时生效）：
 pip install -e .
 pip install pytest pytest-asyncio   # 开发依赖不在 pyproject.toml 中
 ```
@@ -169,10 +197,13 @@ npm install
   npm run dev
   ```
 
-- **打包运行** —— 编译并产出 Windows 安装包（`dist/`）：
+- **打包运行** —— 编译并产出当前平台的安装包（`dist/`）：
 
   ```bash
-  npm run package
+  npm run package          # 当前平台
+  npm run package:win      # Windows 安装包
+  npm run package:mac      # macOS DMG
+  npm run package:linux    # Linux AppImage / deb
   ```
 
 其他常用命令：
@@ -226,7 +257,7 @@ cluxmate agent stdio                                    # JSON-RPC stdio 服务�
 - **`max_tokens`** —— 输出预算；留空/`0` 时使用 32768 默认值。
 - **`reasoning_efforts`** —— 可选的每模型推理强度覆盖（系统内置各方言预设：DeepSeek / Qwen / GLM / OpenAI）。
 
-项目级状态（always-allow 权限、MCP 服务器、技能、沙箱授权，以及 hooks——在生命周期时点运行的用户自定义 shell 命令，配置在 `settings.json` 中）位于 `<项目>/.cluxmate/` 下——随项目走，不进home目录。
+项目级状态（always-allow 权限、MCP 服务器、技能、沙箱授权，以及 [生命周期 Hooks](#生命周期-hooks)）位于 `<项目>/.cluxmate/` 下——随项目走，不进 home 目录。
 
 ## 桌面端
 
