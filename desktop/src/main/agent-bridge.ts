@@ -1,6 +1,29 @@
 import { ChildProcess, spawn } from 'child_process'
 import * as readline from 'readline'
+import { app } from 'electron'
+import { delimiter, join } from 'path'
+import { existsSync } from 'fs'
 import type { StreamEvent } from '../shared/types'
+
+// Prefer the cluxmate source bundled with the app (electron-builder.yml
+// extraResources → <resources>/cluxmate/) over whatever the user may have
+// pip-installed, so the desktop shell and the agent core are version-locked
+// to the same release. Third-party deps (openai/jinja2/httpx) still come from
+// the user's Python env — full self-containment is the PyInstaller step, not
+// this one. Returns the PYTHONPATH entry to prepend, or null when not packaged
+// (dev runs against the source checkout via `python -m`).
+function bundledCluxmatePythonpath(): string | null {
+  if (!app.isPackaged) return null
+  const resources = process.resourcesPath
+  if (existsSync(join(resources, 'cluxmate', '__init__.py'))) {
+    return resources
+  }
+  // Defensive: allow the package to be nested one level deeper.
+  if (existsSync(join(resources, 'cluxmate', 'cluxmate', '__init__.py'))) {
+    return join(resources, 'cluxmate')
+  }
+  return null
+}
 
 export class AgentBridge {
   private proc: ChildProcess | null = null
@@ -35,9 +58,23 @@ export class AgentBridge {
 
     return new Promise((resolve, reject) => {
       const pythonCmd = process.platform === 'win32' ? 'python' : 'python3'
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+        PYTHONUNBUFFERED: '1',
+      }
+      const bundled = bundledCluxmatePythonpath()
+      if (bundled) {
+        // Prepend the bundled core so it wins over any pip-installed cluxmate,
+        // while still letting the user's env provide third-party deps.
+        env.PYTHONPATH = env.PYTHONPATH
+          ? `${bundled}${delimiter}${env.PYTHONPATH}`
+          : bundled
+      }
       this.proc = spawn(pythonCmd, ['-m', 'cluxmate', 'agent', 'stdio'], {
         cwd: cwd,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', PYTHONUNBUFFERED: '1' },
+        env,
         stdio: ['pipe', 'pipe', 'pipe'],
       })
 
