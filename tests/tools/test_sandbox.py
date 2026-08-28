@@ -510,3 +510,160 @@ def test_bashtool_no_hint_on_normal_failure():
         assert "[sandbox: access denied]" not in result
     finally:
         shutil.rmtree(ws, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Windows Low-IL: label-drift self-healing (unit level, icacls mocked)
+# ---------------------------------------------------------------------------
+
+def _fake_run_capture(monkeypatch, calls):
+    """Route subprocess.run through a recorder; icacls argv is logged."""
+    import types
+
+    import cluxmate.tools._sandbox as sb_mod
+
+    def fake_run(argv, **kw):
+        if argv and argv[0] == "icacls" and "/setintegritylevel" in argv:
+            calls.append(" ".join(argv))
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(sb_mod.subprocess, "run", fake_run)
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_setup_heals_drifted_workspace(monkeypatch, tmp_path):
+    """A stale marker must NOT mask a workspace re-labeled back to medium.
+
+    The marker is a hint; the real label is what matters. When the workspace
+    root is no longer LOW, _setup must re-label the tree and refresh the
+    marker even though the marker already exists (the old code trusted the
+    marker and skipped the workspace entirely — the exact drift that leaves a
+    low-IL child with nothing writable).
+    """
+    sb = WindowsLowILSandbox(str(tmp_path))
+    # Pre-seed the stale marker so the marker-exists branch is under test.
+    marker = tmp_path / ".cluxmate" / "sandbox-il-applied"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("stale\n", encoding="utf-8")
+
+    label_calls = []
+    icacls_calls = []
+
+    def fake_integrity(path):
+        # Workspace drifted to medium (unlabeled); scratch is healthy low.
+        return None if Path(path).name != "tmp-low" else "L"
+
+    monkeypatch.setattr(sb, "_integrity_level", fake_integrity)
+    monkeypatch.setattr(
+        sb, "_label_dirs_low",
+        lambda root, skip_state=False: label_calls.append((str(root), skip_state)),
+    )
+    _fake_run_capture(monkeypatch, icacls_calls)
+
+    sb._setup()
+
+    # The drifted workspace must be re-labeled despite the existing marker.
+    assert any(Path(r) == Path(tmp_path) and skip for r, skip in label_calls)
+    # The marker must be refreshed with fresh content.
+    assert "low-il setup complete" in marker.read_text(encoding="utf-8")
+    # The deny subtree must be re-raised to medium.
+    assert any("(OI)(CI)M" in c for c in icacls_calls)
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_setup_heals_drifted_scratch(monkeypatch, tmp_path):
+    """An existing-but-medium tmp-low must be re-labeled low.
+
+    The old code only labeled the scratch when it was MISSING; a scratch that
+    exists but was re-raised to medium stayed broken, so the child's TMP/TEMP
+    was unwritable and pytest died at tempfile discovery.
+    """
+    sb = WindowsLowILSandbox(str(tmp_path))
+    scratch = tmp_path / ".cluxmate" / "tmp-low"
+    scratch.mkdir(parents=True, exist_ok=True)  # exists, but drifted to medium
+
+    label_calls = []
+    icacls_calls = []
+
+    def fake_integrity(path):
+        # Workspace healthy low; the scratch drifted (unlabeled = medium).
+        return "L" if Path(path).name != "tmp-low" else None
+
+    monkeypatch.setattr(sb, "_integrity_level", fake_integrity)
+    monkeypatch.setattr(
+        sb, "_label_dirs_low",
+        lambda root, skip_state=False: label_calls.append(str(root)),
+    )
+    _fake_run_capture(monkeypatch, icacls_calls)
+
+    sb._setup()
+
+    # The healthy workspace must NOT be re-labeled.
+    assert label_calls == []
+    # The drifted scratch must be re-labeled low exactly once.
+    scratch_low = [c for c in icacls_calls if "tmp-low" in c and "(OI)(CI)L" in c]
+    assert len(scratch_low) == 1
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_setup_noop_when_labels_healthy(monkeypatch, tmp_path):
+    """When workspace + scratch are already LOW, _setup must not relabel.
+
+    Idempotence guard: no wasted icacls tree walk on every session start.
+    """
+    sb = WindowsLowILSandbox(str(tmp_path))
+
+    label_calls = []
+    icacls_calls = []
+
+    monkeypatch.setattr(sb, "_integrity_level", lambda path: "L")
+    monkeypatch.setattr(
+        sb, "_label_dirs_low",
+        lambda root, skip_state=False: label_calls.append(str(root)),
+    )
+    _fake_run_capture(monkeypatch, icacls_calls)
+
+    sb._setup()
+
+    assert label_calls == []      # workspace NOT re-labeled
+    assert icacls_calls == []     # no setintegritylevel at all
+
+
+@pytest.mark.parametrize("label,letter", [
+    ("Low", "L"), ("Medium", "M"), ("High", "H"), ("System", "S"),
+])
+def test_integrity_level_parses_icacls_label(monkeypatch, label, letter):
+    """_integrity_level reads the Mandatory Label line out of icacls output."""
+    import types
+
+    import cluxmate.tools._sandbox as sb_mod
+
+    def fake_run(argv, **kw):
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"{argv[1]} Mandatory Label\\{label} Mandatory Level:(OI)(CI)(NW)\n"
+                f"NT AUTHORITY\\SYSTEM:(I)(F)\n"
+            ).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(sb_mod.subprocess, "run", fake_run)
+    assert WindowsLowILSandbox._integrity_level(Path("C:/x")) == letter
+
+
+def test_integrity_level_none_when_unlabeled(monkeypatch):
+    """An unlabeled object (default medium) parses to None, signalling drift."""
+    import types
+
+    import cluxmate.tools._sandbox as sb_mod
+
+    def fake_run(argv, **kw):
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=b"BUILTIN\\Users:(I)(RX)\nNT AUTHORITY\\SYSTEM:(I)(F)\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(sb_mod.subprocess, "run", fake_run)
+    assert WindowsLowILSandbox._integrity_level(Path("C:/x")) is None

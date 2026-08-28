@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -521,15 +522,51 @@ class WindowsLowILSandbox(ShellSandbox):
                     capture_output=True, timeout=30,
                 )
 
+    @staticmethod
+    def _integrity_level(path: Path) -> str | None:
+        """Read a path's CURRENT mandatory integrity label, or None if absent.
+
+        Returns the label's first letter ("L"/"M"/"H"/"S"), or None when no
+        label is present (an unlabeled object defaults to Medium on Windows).
+        Used by _setup to VERIFY the real label instead of trusting the stale
+        marker: a re-label back to medium leaves the marker behind and silently
+        breaks the sandbox (the low-IL child can then write nothing).
+        """
+        try:
+            r = subprocess.run(
+                ["icacls", str(path)], capture_output=True, timeout=30,
+            )
+        except Exception:
+            return None
+        if r.returncode != 0:
+            return None
+        out = r.stdout.decode("utf-8", errors="replace")
+        m = re.search(
+            r"Mandatory Label\\(Low|Medium|High|System) Mandatory Level", out
+        )
+        if not m:
+            return None
+        return m.group(1)[0]
+
     def _setup(self) -> None:
-        """Label the workspace + grant folders low-IL (marker-cached for the
-        workspace; grants re-labeled idempotently on each setup)."""
+        """Label the workspace + grant folders low-IL (self-healing).
+
+        The marker is a HINT, not a guarantee. A re-label of the workspace
+        back to medium (restore_path, a re-clone, an outer harness re-ACLing
+        the tree) leaves the marker stale and silently breaks the sandbox —
+        the low-IL child can then write nothing and pytest dies at tempfile
+        discovery. So verify the REAL label and re-apply only on drift.
+        """
         if self._setup_done:
             return
-        if not self._marker().exists():
-            state = Path(self._workspace) / ".cluxmate"
-            state.mkdir(parents=True, exist_ok=True)
-            self._label_dirs_low(Path(self._workspace), skip_state=True)
+        ws = Path(self._workspace)
+        state = ws / ".cluxmate"
+        state.mkdir(parents=True, exist_ok=True)
+
+        # Workspace drift: unlabeled == medium == drifted. Re-label the tree,
+        # re-raise the deny subtree to medium, refresh the marker.
+        if self._integrity_level(ws) != "L":
+            self._label_dirs_low(ws, skip_state=True)
             r2 = subprocess.run(
                 ["icacls", str(state), "/setintegritylevel", "(OI)(CI)M",
                  "/C", "/Q"],
@@ -545,17 +582,21 @@ class WindowsLowILSandbox(ShellSandbox):
                     file=sys.stderr,
                 )
             self._marker().write_text("low-il setup complete\n", encoding="utf-8")
+
         # User-granted folders: label low on every setup (idempotent — a grant
         # added since the last build is picked up here).
         for g in self._grant_paths:
             gp = Path(g)
             if gp.is_dir():
                 self._label_dirs_low(gp)
-        # Scratch for the child's TMP/TEMP: created/labeled on every setup
-        # (idempotent; also heals markers written before the scratch existed).
+
+        # Scratch for the child's TMP/TEMP: must exist AND be low-labeled. Its
+        # label can drift like the workspace's (exists-but-medium), so verify
+        # it too rather than only creating when missing.
         scratch = self._scratch()
         if not scratch.exists():
             scratch.mkdir(parents=True, exist_ok=True)
+        if self._integrity_level(scratch) != "L":
             subprocess.run(
                 ["icacls", str(scratch), "/setintegritylevel", "(OI)(CI)L",
                  "/C", "/Q"],
