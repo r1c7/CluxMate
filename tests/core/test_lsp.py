@@ -131,7 +131,7 @@ def test_manager_definition_formats_location(tmp_path):
     try:
         out = mgr.definition("a.py", 1, "foo")
         assert "def.py" in out
-        assert "1:" in out
+        assert ":1" in out
     finally:
         mgr.shutdown()
 
