@@ -419,6 +419,9 @@ _WIN_TOKEN_PRIMARY = 1
 _WIN_STARTF_USESTDHANDLES = 0x00000100
 _WIN_CREATE_NO_WINDOW = 0x08000000
 _WIN_HANDLE_FLAG_INHERIT = 0x00000001
+_WIN_INFINITE = 0xFFFFFFFF               # WaitForSingleObject: wait forever
+_WIN_EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+_WIN_PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
 
 
 def _win_kernel32():
@@ -430,7 +433,37 @@ def _win_kernel32():
     k.SetHandleInformation.argtypes = [
         wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
     ]
+    # PROC_THREAD_ATTRIBUTE_LIST plumbing — argtypes are mandatory here: the
+    # pointer/size args are 64-bit and default (int) marshalling truncates
+    # them, silently corrupting the attribute list on Win64.
+    k.InitializeProcThreadAttributeList.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    k.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+    k.UpdateProcThreadAttribute.argtypes = [
+        ctypes.c_void_p,     # lpAttributeList
+        wintypes.DWORD,      # dwFlags
+        ctypes.c_size_t,     # Attribute (DWORD_PTR)
+        ctypes.c_void_p,     # lpValue
+        ctypes.c_size_t,     # cbSize
+        ctypes.c_void_p,     # lpPreviousValue
+        ctypes.c_void_p,     # lpReturnSize
+    ]
+    k.UpdateProcThreadAttribute.restype = wintypes.BOOL
+    k.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+    k.DeleteProcThreadAttributeList.restype = None
     return k
+
+
+def _handle_value(h) -> int:
+    """Normalize a handle (raw int from msvcrt.get_osfhandle, or a
+    ctypes HANDLE/c_void_p instance) to a plain int for a HANDLE array."""
+    import ctypes
+
+    if isinstance(h, ctypes.c_void_p):
+        return int(h.value or 0)
+    return int(h)
 
 
 def _win_advapi32():
@@ -683,9 +716,25 @@ class WindowsLowILSandbox(ShellSandbox):
         return new_token, sid
 
     def _startup(self, stdin_handle, out_handle, err_handle):
-        """STARTUPINFO with std handles wired to inherited handles."""
+        """Build a STARTUPINFOEXW wiring the three std handles AND constraining
+        inheritance to exactly those handles via PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
+
+        Without the handle list, ``CreateProcessAsUserW(bInheritHandles=True)``
+        leaks EVERY inheritable handle currently open in the process to the
+        child. Since bash runs and MCP/LSP spawns execute concurrently on the
+        executor thread pool, one spawn would inherit another's pipe/redirect
+        handles — breaking sandbox isolation and (for pipes) deadlocking the
+        parent's read because a stray child keeps the write end open past EOF.
+        The handle list makes inheritance deterministic per-spawn.
+
+        Returns ``(startupex, keepalive)``; the caller must keep ``keepalive``
+        referenced until CreateProcess returns and then call
+        ``_free_attr_list(keepalive)`` to release the attribute list.
+        """
         import ctypes
         from ctypes import wintypes
+
+        kernel32 = _win_kernel32()
 
         class STARTUPINFOW(ctypes.Structure):
             _fields_ = [
@@ -706,13 +755,67 @@ class WindowsLowILSandbox(ShellSandbox):
                 ("hStdError", wintypes.HANDLE),
             ]
 
-        si = STARTUPINFOW()
-        si.cb = ctypes.sizeof(STARTUPINFOW)
+        class STARTUPINFOEXW(ctypes.Structure):
+            _fields_ = [
+                ("StartupInfo", STARTUPINFOW),
+                ("lpAttributeList", ctypes.c_void_p),
+            ]
+
+        six = STARTUPINFOEXW()
+        si = six.StartupInfo
+        si.cb = ctypes.sizeof(STARTUPINFOEXW)
         si.dwFlags = _WIN_STARTF_USESTDHANDLES
         si.hStdInput = stdin_handle
         si.hStdOutput = out_handle
         si.hStdError = err_handle
-        return si
+
+        # Deduplicate: UpdateProcThreadAttribute rejects a handle list with
+        # repeats (e.g. stdout==stderr would fail the whole spawn).
+        seen: list[int] = []
+        for h in (stdin_handle, out_handle, err_handle):
+            v = _handle_value(h)
+            if v and v not in seen:
+                seen.append(v)
+        count = len(seen)
+        handle_arr = (wintypes.HANDLE * count)(*seen)
+
+        # Size probe: first call fails with ERROR_INSUFFICIENT_BUFFER and fills
+        # in the required size.
+        size = ctypes.c_size_t(0)
+        kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
+        buf = ctypes.create_string_buffer(size.value)
+        attr_list = ctypes.cast(buf, ctypes.c_void_p)
+        if not kernel32.InitializeProcThreadAttributeList(
+            attr_list, 1, 0, ctypes.byref(size)
+        ):
+            raise OSError(
+                f"InitializeProcThreadAttributeList failed "
+                f"(WinError {ctypes.get_last_error()})"
+            )
+        if not kernel32.UpdateProcThreadAttribute(
+            attr_list, 0, _WIN_PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            ctypes.cast(handle_arr, ctypes.c_void_p),
+            ctypes.sizeof(handle_arr), None, None,
+        ):
+            err = ctypes.get_last_error()
+            kernel32.DeleteProcThreadAttributeList(attr_list)
+            raise OSError(f"UpdateProcThreadAttribute failed (WinError {err})")
+        six.lpAttributeList = attr_list
+
+        # buf + handle_arr must outlive CreateProcess; attr_list must be freed.
+        keepalive = (buf, handle_arr, attr_list)
+        return six, keepalive
+
+    @staticmethod
+    def _free_attr_list(keepalive) -> None:
+        """Release the attribute list built in _startup (idempotent-safe)."""
+        if not keepalive:
+            return
+        attr_list = keepalive[2]
+        try:
+            _win_kernel32().DeleteProcThreadAttributeList(attr_list)
+        except Exception:
+            pass
 
     def run(
         self,
@@ -765,9 +868,8 @@ class WindowsLowILSandbox(ShellSandbox):
             out_h, err_h, null_h = handles
 
             new_token, sid = self._low_token()
+            startup, keepalive = self._startup(null_h, out_h, err_h)
             try:
-                startup = self._startup(null_h, out_h, err_h)
-
                 class PROCESS_INFORMATION(ctypes.Structure):
                     _fields_ = [
                         ("hProcess", wintypes.HANDLE),
@@ -778,7 +880,8 @@ class WindowsLowILSandbox(ShellSandbox):
 
                 pi = PROCESS_INFORMATION()
                 # Explicit unicode environment block (CREATE_UNICODE_ENVIRONMENT)
-                # so the TMP/TEMP overrides reach the child.
+                # so the TMP/TEMP overrides reach the child. EXTENDED_STARTUPINFO
+                # activates the handle-list attribute built in _startup.
                 env_block = ctypes.create_unicode_buffer(
                     "".join(f"{k}={v}\0" for k, v in env.items()) + "\0"
                 )
@@ -788,8 +891,9 @@ class WindowsLowILSandbox(ShellSandbox):
                     cmdline,
                     None,
                     None,
-                    True,                      # inherit handles
-                    _WIN_CREATE_NO_WINDOW | 0x00000400,  # NO_WINDOW | UNICODE_ENV
+                    True,                      # inherit handles (limited to the list)
+                    _WIN_CREATE_NO_WINDOW | 0x00000400  # NO_WINDOW | UNICODE_ENV
+                    | _WIN_EXTENDED_STARTUPINFO_PRESENT,
                     env_block,
                     cwd,
                     ctypes.byref(startup),
@@ -817,6 +921,7 @@ class WindowsLowILSandbox(ShellSandbox):
             finally:
                 advapi32.FreeSid(sid)
                 kernel32.CloseHandle(new_token)
+                self._free_attr_list(keepalive)
 
             out = Path(out_path).read_bytes()
             err = Path(err_path).read_bytes()
@@ -900,9 +1005,8 @@ class WindowsLowILSandbox(ShellSandbox):
                 raise OSError("SetHandleInformation failed")
 
         new_token, sid = self._low_token()
+        startup, keepalive = self._startup(in_r, out_w, null_h)
         try:
-            startup = self._startup(in_r, out_w, null_h)
-
             class PROCESS_INFORMATION(ctypes.Structure):
                 _fields_ = [
                     ("hProcess", wintypes.HANDLE),
@@ -921,8 +1025,9 @@ class WindowsLowILSandbox(ShellSandbox):
                 cmdline,
                 None,
                 None,
-                True,                      # inherit handles
-                _WIN_CREATE_NO_WINDOW | 0x00000400,
+                True,                      # inherit handles (limited to the list)
+                _WIN_CREATE_NO_WINDOW | 0x00000400
+                | _WIN_EXTENDED_STARTUPINFO_PRESENT,
                 env_block,
                 cwd,
                 ctypes.byref(startup),
@@ -937,6 +1042,7 @@ class WindowsLowILSandbox(ShellSandbox):
         finally:
             advapi32.FreeSid(sid)
             kernel32.CloseHandle(new_token)
+            self._free_attr_list(keepalive)
             # Parent closes the child-facing ends; the child holds its own
             # inherited copies. Keep only our communication ends.
             kernel32.CloseHandle(in_r)

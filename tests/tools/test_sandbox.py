@@ -169,6 +169,71 @@ def test_lowil_child_tmp_is_writable():
 
 
 @pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_wait_infinite_does_not_raise():
+    # Regression: _LowILProcess.wait(timeout=None) used an undefined
+    # _WIN_INFINITE and raised NameError. It must block-then-return the code.
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = WindowsLowILSandbox(str(ws))
+        proc = sb.spawn_popen(["cmd.exe", "/d", "/c", "echo done"],
+                              cwd=str(ws), env=os.environ.copy())
+        assert proc.stdout.readline().strip() == "done"
+        assert proc.wait(timeout=None) == 0  # no NameError, real exit code
+    finally:
+        import shutil
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_concurrent_spawn_no_handle_leak():
+    # Regression: CreateProcessAsUserW(bInheritHandles=True) without a
+    # PROC_THREAD_ATTRIBUTE_HANDLE_LIST leaks every inheritable handle to each
+    # child, so concurrent spawns inherit each other's stdout write-end and the
+    # parent's readline() never sees EOF (deadlock) — and sandbox isolation
+    # breaks. With the handle list, inheritance is per-spawn: each child's pipe
+    # closes on its own exit, so the second readline() returns '' (EOF).
+    import threading
+
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = WindowsLowILSandbox(str(ws))
+        sb._setup()  # one-time icacls labeling before the threads race
+        n = 8
+        results: list = [None] * n
+        errors: list = [None] * n
+
+        def worker(i):
+            try:
+                proc = sb.spawn_popen(
+                    ["cmd.exe", "/d", "/c", f"echo line-{i}"],
+                    cwd=str(ws), env=os.environ.copy(),
+                )
+                line = proc.stdout.readline().strip()
+                eof = proc.stdout.readline()  # '' only if no sibling holds the write end
+                rc = proc.wait(timeout=10)
+                results[i] = (line, eof, rc)
+            except Exception as e:  # noqa: BLE001
+                errors[i] = repr(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=25)
+
+        assert not any(t.is_alive() for t in threads), "spawn deadlocked (handle leak)"
+        for i in range(n):
+            assert errors[i] is None, f"worker {i}: {errors[i]}"
+            line, eof, rc = results[i]
+            assert line == f"line-{i}"
+            assert eof == "", f"worker {i} got no EOF -> inherited sibling's pipe: {eof!r}"
+            assert rc == 0
+    finally:
+        import shutil
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
 def test_bashtool_end_to_end_under_sandbox():
     ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
     try:
