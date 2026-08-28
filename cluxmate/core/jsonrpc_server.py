@@ -470,6 +470,7 @@ class JsonRpcServer:
         self._persister: IncrementalPersister | None = None
         self._line_queue: tqueue.Queue[str | None] = tqueue.Queue()
         atexit.register(self._shutdown_mcp)
+        atexit.register(self._shutdown_lsp)
 
     def run(self):
         # Daemon thread: read stdin into queue
@@ -614,6 +615,7 @@ class JsonRpcServer:
         # Re-init reuses one Python process; kill the previous builder's MCP
         # subprocesses before building a new one so they don't leak.
         self._shutdown_mcp()
+        self._shutdown_lsp()
         self._cwd = params.get("cwd", os.getcwd())
         self._session_id = params.get("session_id", "")
         # Rebind the approval policy to this workspace's permissions.json so a
@@ -733,6 +735,13 @@ class JsonRpcServer:
         if self._builder is not None:
             try:
                 self._builder.mcp_shutdown()
+            except Exception:
+                pass
+
+    def _shutdown_lsp(self):
+        if self._builder is not None:
+            try:
+                self._builder.lsp_shutdown()
             except Exception:
                 pass
 

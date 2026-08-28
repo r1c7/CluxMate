@@ -31,6 +31,8 @@ from cluxmate.tools.ask_user_question import AskUserQuestionTool
 from cluxmate.core.skills import SkillManager
 from cluxmate.core.memory import MemoryManager
 from cluxmate.core.mcp import MCPManager
+from cluxmate.core.lsp import LSPManager
+from cluxmate.tools.lsp_tool import LspTool
 from cluxmate.core.grants import GrantStore
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.session_log import SessionHeader, SessionLog
@@ -47,11 +49,11 @@ MAX_SUBAGENT_DEPTH = 4
 SUBAGENT_PROFILES: dict[str, dict[str, Any]] = {
     "general-purpose": {
         "description": "General-purpose agent for any sub-task.",
-        "tools": ["bash", "read_file", "search_replace", "multi_edit", "write_file", "delete_file", "multi_write", "grep", "list_dir", "web_fetch", "web_search"],
+        "tools": ["bash", "read_file", "search_replace", "multi_edit", "write_file", "delete_file", "multi_write", "grep", "list_dir", "web_fetch", "web_search", "lsp"],
     },
     "explore": {
         "description": "Read-only agent for code exploration and research.",
-        "tools": ["read_file", "grep", "list_dir", "web_fetch", "web_search"],
+        "tools": ["read_file", "grep", "list_dir", "web_fetch", "web_search", "lsp"],
     },
 }
 
@@ -163,6 +165,10 @@ class AgentBuilder:
         # every turn would be broken. Children inherit None and the depth
         # gate keeps them from ever constructing their own.
         self._mcp: MCPManager | None = None
+        # LSP manager — constructed lazily on first _get_tools (depth 0 only)
+        # and shared with subagents so children never re-spawn a language
+        # server for the same workspace.
+        self._lsp: LSPManager | None = None
         # When True, _get_tools constructs the MCP manager but does NOT load it
         # (load spawns npx/subprocesses and blocks). The caller drives load()
         # itself — the jsonrpc server does this in a background thread so the
@@ -394,6 +400,7 @@ class AgentBuilder:
                         ListDirTool(workdir=self._cwd),
                         WebFetchTool(plan_mode=True),
                         WebSearchTool(),
+                        LspTool(manager=self._lsp_manager()),
                     ) if t.name in readonly
                 ])
                 if self._depth == 0 and SkillManager(self._cwd).discover_enabled():
@@ -440,6 +447,7 @@ class AgentBuilder:
                 ListDirTool(workdir=self._cwd),
                 WebFetchTool(),
                 WebSearchTool(),
+                LspTool(manager=self._lsp_manager()),
             ])
             # Add TaskTool only when subagent types are configured AND we have
             # not hit the recursion cap. Withholding `task` at the cap is what
@@ -510,6 +518,18 @@ class AgentBuilder:
             self._mcp = None
         if mcp is not None:
             mcp.shutdown()
+
+    def _lsp_manager(self) -> "LSPManager":
+        """Lazy, cached LSP manager for this builder's cwd. Shared by children."""
+        if self._lsp is None:
+            self._lsp = LSPManager(self._cwd, sandbox=self._shell_sandbox())
+        return self._lsp
+
+    def lsp_shutdown(self) -> None:
+        """Kill lazily-spawned language servers. Idempotent."""
+        if self._lsp is not None:
+            self._lsp.shutdown()
+            self._lsp = None
 
     def _render_system_prompt(self, tools: list[BaseTool]) -> str:
         """Render the STABLE system prompt.
@@ -724,6 +744,7 @@ class AgentBuilder:
         child._mode = self._mode
         child._grants = self._grants
         child._hooks = self._hooks
+        child._lsp = self._lsp
         child._subagent_type = subagent_type
         if subagent_type == "general-purpose":
             child._subagent_types = list(self._subagent_types)
