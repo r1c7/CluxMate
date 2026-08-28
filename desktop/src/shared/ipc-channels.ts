@@ -27,6 +27,8 @@ export const IPC = {
 
   SANDBOX_GRANTS_GET: 'sandbox:grants-get',
   SANDBOX_GRANTS_SET: 'sandbox:grants-set',
+  SANDBOX_FORBID_READ_GET: 'sandbox:forbid-read-get',
+  SANDBOX_FORBID_READ_SET: 'sandbox:forbid-read-set',
 
   CHECKPOINT_LIST:    'checkpoint:list',
   CHECKPOINT_DIFF:    'checkpoint:diff',

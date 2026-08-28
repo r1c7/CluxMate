@@ -12,7 +12,7 @@ from typing import Any
 from cluxmate.core.providers.base import LLMProvider
 from cluxmate.tools.base import BaseTool, ToolBridge
 from cluxmate.tools.bash import BashTool, _bash_works, _is_wsl_bash
-from cluxmate.tools._fence import WriteFence
+from cluxmate.tools._fence import ReadFence, WriteFence
 from cluxmate.tools._sandbox import pick_sandbox, sandbox_disabled_by_env
 from cluxmate.tools.read_file import ReadFileTool
 from cluxmate.tools.search_replace import SearchReplaceTool
@@ -34,6 +34,7 @@ from cluxmate.core.mcp import MCPManager
 from cluxmate.core.lsp import LSPManager
 from cluxmate.tools.lsp_tool import LspTool
 from cluxmate.core.grants import GrantStore
+from cluxmate.core.read_denies import ReadDenyStore
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.session_log import SessionHeader, SessionLog
 from cluxmate.core.session_log_store import SessionLogStore
@@ -197,6 +198,9 @@ class AgentBuilder:
         # Writable-folder grants (sandbox-grants.json). Shared across rebuilds
         # and inherited by children; None → no extra granted folders.
         self._grants: GrantStore | None = None
+        # Read-denylist (forbid-read.json). Shared across rebuilds and inherited
+        # by children; None → empty deny set (no read restrictions).
+        self._read_denies: ReadDenyStore | None = None
         # Lifecycle hooks (settings.json). Lazy: constructed on first build when
         # the caller didn't inject one, then cached. Inherited by children so
         # subagent tool calls are hooked too.
@@ -209,6 +213,11 @@ class AgentBuilder:
     def with_grants(self, store: "GrantStore | None") -> "AgentBuilder":
         """Attach the writable-folder grant registry (shared across rebuilds)."""
         self._grants = store
+        return self
+
+    def with_read_denies(self, store: "ReadDenyStore | None") -> "AgentBuilder":
+        """Attach the read-denylist registry (shared across rebuilds)."""
+        self._read_denies = store
         return self
 
     def with_hooks(self, hooks: "HookManager | None") -> "AgentBuilder":
@@ -240,6 +249,11 @@ class AgentBuilder:
         if self._grants is None:
             return []
         return self._grants.snapshot()
+
+    def _forbid_read_paths(self) -> list[str]:
+        if self._read_denies is None:
+            return []
+        return self._read_denies.snapshot()
 
     def with_model(self, name: str) -> "AgentBuilder":
         self._model = name
@@ -385,6 +399,9 @@ class AgentBuilder:
     def _get_tools(self) -> list[BaseTool]:
         tools: list[BaseTool] = list(self._tools)
         if self._include_default_tools:
+            # Read denylist fence (read_file/grep/list_dir). Default empty → a
+            # no-op ReadFence; only paths in ~/.cluxmate/forbid-read.json block.
+            read_fence = ReadFence(deny_paths=self._forbid_read_paths())
             # Plan mode: hard isolation. Register only read-only tools so the
             # model literally cannot issue a write — no bash (can mutate files),
             # no edit/write/delete, no task (a subagent could write and bypass
@@ -395,9 +412,9 @@ class AgentBuilder:
                 readonly = set(SUBAGENT_PROFILES["explore"]["tools"]) | {"web_fetch", "web_search"}
                 tools.extend([
                     t for t in (
-                        ReadFileTool(workdir=self._cwd),
-                        GrepTool(workdir=self._cwd),
-                        ListDirTool(workdir=self._cwd),
+                        ReadFileTool(workdir=self._cwd, fence=read_fence),
+                        GrepTool(workdir=self._cwd, fence=read_fence),
+                        ListDirTool(workdir=self._cwd, fence=read_fence),
                         WebFetchTool(plan_mode=True),
                         WebSearchTool(),
                         LspTool(manager=self._lsp_manager()),
@@ -428,7 +445,11 @@ class AgentBuilder:
             # explicitly opted out via CLUXMATE_BASH_SANDBOX=off.
             sandbox_enabled = self._mode != "yolo" and not sandbox_disabled_by_env()
             sandbox = (
-                pick_sandbox(self._cwd, grant_paths=self._grant_paths())
+                pick_sandbox(
+                    self._cwd,
+                    grant_paths=self._grant_paths(),
+                    deny_read_paths=self._forbid_read_paths(),
+                )
                 if sandbox_enabled else None
             )
             tools.extend([
@@ -437,14 +458,14 @@ class AgentBuilder:
                     sandbox=sandbox,
                     sandbox_required=sandbox_enabled,
                 ),
-                ReadFileTool(workdir=self._cwd),
+                ReadFileTool(workdir=self._cwd, fence=read_fence),
                 SearchReplaceTool(workdir=self._cwd, fence=fence),
                 WriteFileTool(workdir=self._cwd, fence=fence),
                 DeleteFileTool(workdir=self._cwd, fence=fence),
                 MultiEditTool(workdir=self._cwd, fence=fence),
                 MultiWriteTool(workdir=self._cwd, fence=fence),
-                GrepTool(workdir=self._cwd),
-                ListDirTool(workdir=self._cwd),
+                GrepTool(workdir=self._cwd, fence=read_fence),
+                ListDirTool(workdir=self._cwd, fence=read_fence),
                 WebFetchTool(),
                 WebSearchTool(),
                 LspTool(manager=self._lsp_manager()),
@@ -492,7 +513,11 @@ class AgentBuilder:
         """
         if self._mode == "yolo" or sandbox_disabled_by_env():
             return None
-        return pick_sandbox(self._cwd, grant_paths=self._grant_paths())
+        return pick_sandbox(
+            self._cwd,
+            grant_paths=self._grant_paths(),
+            deny_read_paths=self._forbid_read_paths(),
+        )
 
     def _mcp_sandbox(self):
         """Best-effort sandbox for MCP stdio servers (None → bare Popen)."""
@@ -743,6 +768,7 @@ class AgentBuilder:
         child._log_store = self._log_store
         child._mode = self._mode
         child._grants = self._grants
+        child._read_denies = self._read_denies
         child._hooks = self._hooks
         child._lsp = self._lsp
         child._subagent_type = subagent_type

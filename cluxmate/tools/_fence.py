@@ -147,3 +147,77 @@ class WriteFence:
         except SandboxViolation as e:
             return str(e)
         return ""
+
+
+class ReadDenied(Exception):
+    """A read tool attempted to read a path inside a forbid_read subtree.
+
+    The message deliberately does NOT echo the denylist contents — the model
+    already knows which path it requested, and printing the configured hidden
+    folders would leak the very secrets the list is meant to protect.
+    """
+
+
+class ReadFence:
+    """Read-side denylist fence for the read tools (read_file / grep / list_dir).
+
+    This is the read sibling of :class:`WriteFence`, but it is a DENYLIST
+    (default empty → no-op), not an allowlist: a coding agent must be able to
+    read arbitrary files by default. Only paths the user explicitly listed in
+    ``~/.cluxmate/forbid-read.json`` are blocked.
+
+    Canonicalize-then-contain, same as WriteFence: ``resolve(strict=False)``
+    first so ``..`` and symlinks cannot dodge the deny list (a workspace link
+    pointing at ``~/.ssh`` resolves to the deny root and is rejected).
+
+    The deny roots are files OR directories: a file root blocks that exact
+    file; a directory root blocks the whole subtree.
+    """
+
+    def __init__(self, deny_paths: list[str] | None = None):
+        self._deny_paths: list[Path] = []
+        for p in deny_paths or []:
+            try:
+                self._deny_paths.append(Path(p).resolve())
+            except OSError:
+                continue
+
+    @property
+    def enabled(self) -> bool:
+        """True only when at least one deny root is configured."""
+        return bool(self._deny_paths)
+
+    def denyroots(self) -> list[Path]:
+        return list(self._deny_paths)
+
+    def is_denied(self, path: Path) -> bool:
+        """Non-raising: is ``path`` (or its resolved target) inside a deny root?
+
+        Used by grep's directory walk and list_dir's entry filtering, where a
+        single forbidden subtree should be skipped silently rather than fail
+        the whole operation.
+        """
+        if not self._deny_paths:
+            return False
+        try:
+            resolved = path.resolve(strict=False)
+        except OSError:
+            resolved = Path(path)
+        return any(
+            resolved == d or resolved.is_relative_to(d) for d in self._deny_paths
+        )
+
+    def check(self, path: Path) -> Path:
+        """Canonicalize ``path`` and raise :class:`ReadDenied` if it is denied.
+
+        Returns the resolved path (callers should read the resolved path so the
+        checked path and the read path cannot diverge via a symlink swap).
+        """
+        resolved = path.resolve(strict=False)
+        if any(
+            resolved == d or resolved.is_relative_to(d) for d in self._deny_paths
+        ):
+            raise ReadDenied(
+                f"reading this path is forbidden by the read-denylist: {path}"
+            )
+        return resolved

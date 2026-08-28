@@ -115,6 +115,30 @@ function restoreGrantMedium(p: string): void {
   )
 }
 
+// Read-denylist (forbid-read.json) — user-global, mirrors
+// cluxmate/core/read_denies.py + cluxmate/core/jsonrpc_server.py::
+// sandbox/forbid_read. Like grants, the desktop reads/writes the file directly
+// (no Python bridge needed) so the Settings UI works with zero live sessions.
+// Unlike grants there is NO Windows label reconcile on removal — a read deny
+// leaves no on-disk label to restore.
+function forbidReadPath(): string {
+  return path.join(app.getPath('home'), '.cluxmate', 'forbid-read.json')
+}
+
+function readForbidRead(): string[] {
+  try {
+    const data = JSON.parse(fs.readFileSync(forbidReadPath(), 'utf-8'))
+    return Array.isArray(data.paths) ? data.paths.filter((p: unknown) => typeof p === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeForbidRead(paths: string[]): void {
+  fs.mkdirSync(path.dirname(forbidReadPath()), { recursive: true })
+  fs.writeFileSync(forbidReadPath(), JSON.stringify({ paths }, null, 2), 'utf-8')
+}
+
 // Convert the legacy {providers, default_provider} schema to v2 {models,
 // active_model_id}. Mirrors ConfigManager._migrate in Python — ids are the old
 // provider keys verbatim so both migrators produce identical output. Returns
@@ -785,6 +809,25 @@ export function registerIpcHandlers() {
       }
     }
     return { paths: next, restored: removed }
+  })
+
+  ipcMain.handle(IPC.SANDBOX_FORBID_READ_GET, () => {
+    return { paths: readForbidRead() }
+  })
+
+  ipcMain.handle(IPC.SANDBOX_FORBID_READ_SET, (_, paths: string[]) => {
+    const next = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string' && p.trim() !== '') : []
+    writeForbidRead(next)
+    // Kill the active session's bridge so the next chat re-initializes the
+    // Python agent with the new read-denylist (mirrors grants + SAVE_MODELS).
+    if (activeSessionId) {
+      const b = bridges.get(activeSessionId)
+      if (b) {
+        bridges.delete(activeSessionId)
+        b.kill().catch(() => {})
+      }
+    }
+    return { paths: next }
   })
 
   ipcMain.handle(IPC.CHAT_SET_MODE, async (_, sid: string, mode: string) => {

@@ -5,13 +5,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTool
+from ._fence import ReadDenied, ReadFence
 
 
 class GrepTool(BaseTool):
     """Search for a pattern in files."""
 
-    def __init__(self, workdir: str | None = None):
+    def __init__(self, workdir: str | None = None, fence: ReadFence | None = None):
         self._workdir = workdir
+        self._fence = fence or ReadFence()
 
     @property
     def name(self) -> str:
@@ -62,10 +64,16 @@ class GrepTool(BaseTool):
 
         results = []
         if search_path.is_file():
+            try:
+                search_path = self._fence.check(search_path)
+            except ReadDenied as e:
+                return f"Error: {e}"
             self._search_file(search_path, regex, results)
         else:
             for file_path in search_path.rglob("*"):
                 if file_path.is_file():
+                    if self._fence.is_denied(file_path):
+                        continue
                     parts = set(file_path.parts)
                     if parts & skip_dirs:
                         continue

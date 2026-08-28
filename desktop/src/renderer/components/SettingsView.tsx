@@ -135,6 +135,36 @@ export default function SettingsView() {
     await commitGrants(grants.filter((g) => g !== p))
   }
 
+  // Sandbox read-denylist (forbid-read.json) — user-global, mirroring grants:
+  // read once on mount, committed immediately on add/remove (full replace).
+  const [forbidRead, setForbidRead] = useState<string[]>([])
+  const [forbidReadLoaded, setForbidReadLoaded] = useState(false)
+  useEffect(() => {
+    let alive = true
+    window.electronAPI.getForbidRead().then((r) => {
+      if (alive) { setForbidRead(r.paths); setForbidReadLoaded(true) }
+    }).catch(() => { if (alive) setForbidReadLoaded(true) })
+    return () => { alive = false }
+  }, [])
+
+  const commitForbidRead = async (next: string[]) => {
+    setForbidRead(next)
+    try {
+      const r = await window.electronAPI.setForbidRead(next)
+      setForbidRead(r.paths)
+    } catch { /* keep the optimistic list on failure */ }
+  }
+
+  const addForbidRead = async () => {
+    const dir = await window.electronAPI.selectDirectory()
+    if (!dir) return
+    if (!forbidRead.includes(dir)) await commitForbidRead([...forbidRead, dir])
+  }
+
+  const removeForbidRead = async (p: string) => {
+    await commitForbidRead(forbidRead.filter((f) => f !== p))
+  }
+
   const patch = (id: string, fields: Partial<ModelEntry>) =>
     setDraft((d) => d.map((m) => (m.id === id ? { ...m, ...fields } : m)))
 
@@ -446,6 +476,36 @@ export default function SettingsView() {
               >{t('settings.sandbox.addFolder')}</button>
 
               <p className="mt-3 text-[11px] text-ink-faint">{t('settings.sandbox.footnote')}</p>
+
+              <div className="mt-6 pt-4 border-t border-surface-border">
+                <p className="text-sm font-semibold text-ink mb-1">{t('settings.sandbox.forbidRead.title')}</p>
+                <p className="text-xs text-ink-faint mb-3">{t('settings.sandbox.forbidRead.hint')}</p>
+
+                {!forbidReadLoaded ? (
+                  <p className="text-sm text-ink-faint py-4 text-center">{t('common.loading')}</p>
+                ) : forbidRead.length === 0 ? (
+                  <p className="text-sm text-ink-faint py-4 text-center">{t('settings.sandbox.forbidRead.none')}</p>
+                ) : (
+                  <div className="space-y-2">
+                    {forbidRead.map((f) => (
+                      <div key={f} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-2">
+                        <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={f}>{f}</span>
+                        <button
+                          onClick={() => removeForbidRead(f)}
+                          className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0"
+                        >{t('settings.sandbox.remove')}</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <button
+                  onClick={addForbidRead}
+                  className="mt-3 w-full px-3 py-2 border border-dashed border-surface-border text-ink-soft hover:text-ink hover:border-ink-faint text-sm rounded-lg"
+                >{t('settings.sandbox.forbidRead.addFolder')}</button>
+
+                <p className="mt-3 text-[11px] text-ink-faint">{t('settings.sandbox.forbidRead.footnote')}</p>
+              </div>
             </>
           ) : (
             <>

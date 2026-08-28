@@ -4,13 +4,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTool
+from ._fence import ReadDenied, ReadFence
 
 
 class ReadFileTool(BaseTool):
     """Read the contents of a file."""
 
-    def __init__(self, workdir: str | None = None):
+    def __init__(self, workdir: str | None = None, fence: ReadFence | None = None):
         self._workdir = workdir
+        self._fence = fence or ReadFence()
 
     @property
     def name(self) -> str:
@@ -53,6 +55,11 @@ class ReadFileTool(BaseTool):
         file_path = Path(path)
         if not file_path.is_absolute():
             file_path = (Path(self._workdir) if self._workdir else Path.cwd()) / file_path
+
+        try:
+            file_path = self._fence.check(file_path)
+        except ReadDenied as e:
+            return f"Error: {e}"
 
         if not file_path.exists():
             return f"Error: file not found: {path}"

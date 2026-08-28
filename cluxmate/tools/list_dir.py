@@ -4,13 +4,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTool
+from ._fence import ReadDenied, ReadFence
 
 
 class ListDirTool(BaseTool):
     """List files and directories in a given path."""
 
-    def __init__(self, workdir: str | None = None):
+    def __init__(self, workdir: str | None = None, fence: ReadFence | None = None):
         self._workdir = workdir
+        self._fence = fence or ReadFence()
 
     @property
     def name(self) -> str:
@@ -44,6 +46,11 @@ class ListDirTool(BaseTool):
         if not dir_path.is_absolute():
             dir_path = (Path(self._workdir) if self._workdir else Path.cwd()) / dir_path
 
+        try:
+            dir_path = self._fence.check(dir_path)
+        except ReadDenied as e:
+            return f"Error: {e}"
+
         if not dir_path.exists():
             return f"Error: path not found: {dir_path_str}"
 
@@ -60,7 +67,9 @@ class ListDirTool(BaseTool):
 
         lines = []
         for entry in entries:
+            if self._fence.is_denied(entry):
+                continue
             prefix = "  " if entry.is_file() else "[dir] "
             lines.append(f"{prefix} {entry.name}")
 
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else "Directory is empty."

@@ -208,8 +208,14 @@ class BwrapSandbox(ShellSandbox):
     name = "bwrap"
     enforcement = "same-kernel"
 
-    def __init__(self, grant_paths: list[str] | None = None):
+    def __init__(self, grant_paths: list[str] | None = None,
+                 deny_read_paths: list[str] | None = None):
         self._grant_paths = grant_paths or []
+        # Read-denylist (~/.cluxmate/forbid-read.json): hide these subtrees from
+        # the sandboxed shell. Directories → empty tmpfs overlay (real contents
+        # invisible); files → read-only bind of /dev/null. Best-effort: a path
+        # that doesn't exist is skipped (nothing to hide).
+        self._deny_read_paths = deny_read_paths or []
 
     @classmethod
     def available(cls) -> bool:
@@ -247,6 +253,18 @@ class BwrapSandbox(ShellSandbox):
             argv += ["--bind", gp, gp]
         if state.is_dir():
             argv += ["--ro-bind", str(state), str(state)]
+        # Read-denylist mounts. These sit at non-workspace paths (~/.ssh,
+        # ~/.aws, …), so they don't interact with the writable-bind ordering
+        # above — they only stack over the read-only root. A directory deny is
+        # an empty tmpfs (the real contents become invisible); a file deny is a
+        # read-only bind of the HOST /dev/null (available before --dev). Skipped
+        # when the path doesn't exist (nothing to hide).
+        for d in self._deny_read_paths:
+            dp = Path(d).resolve()
+            if dp.is_dir():
+                argv += ["--tmpfs", str(dp)]
+            elif dp.exists():
+                argv += ["--ro-bind", "/dev/null", str(dp)]
         argv += [
             "--dev", "/dev",
             "--proc", "/proc",
@@ -327,8 +345,10 @@ class DarwinSeatbeltSandbox(ShellSandbox):
     name = "seatbelt"
     enforcement = "same-kernel"
 
-    def __init__(self, grant_paths: list[str] | None = None):
+    def __init__(self, grant_paths: list[str] | None = None,
+                 deny_read_paths: list[str] | None = None):
         self._grant_paths = grant_paths or []
+        self._deny_read_paths = deny_read_paths or []
 
     @classmethod
     def available(cls) -> bool:
@@ -339,12 +359,19 @@ class DarwinSeatbeltSandbox(ShellSandbox):
         allow_filters = ['(subpath (param "WS"))', '(subpath (param "TMP"))']
         for i in range(len(self._grant_paths)):
             allow_filters.append(f'(subpath (param "GRANT{i}"))')
+        # Read-denylist: last-match-wins makes each specific read deny beat the
+        # earlier ``(allow default)``, so a hidden subtree is unreadable while
+        # every other read stays allowed.
+        deny_read = ""
+        for i in range(len(self._deny_read_paths)):
+            deny_read += f'(deny file-read* (subpath (param "RDENY{i}")))\n'
         return (
             "(version 1)\n"
             "(allow default)\n"
             "(deny file-write*)\n"
             f'(allow file-write* {" ".join(allow_filters)})\n'
             '(deny file-write* (subpath (param "STATE")))\n'
+            f"{deny_read}"
         )
 
     def _profile_params(self, cwd: str) -> list[str]:
@@ -359,6 +386,8 @@ class DarwinSeatbeltSandbox(ShellSandbox):
         params = [f"WS={ws}", f"TMP={tmp}", f"STATE={state}"]
         for i, g in enumerate(self._grant_paths):
             params.append(f"GRANT{i}={str(Path(g).resolve())}")
+        for i, d in enumerate(self._deny_read_paths):
+            params.append(f"RDENY{i}={str(Path(d).resolve())}")
         return params
 
     def _prefix(self, cwd: str) -> list[str]:
@@ -1131,12 +1160,16 @@ def sandbox_disabled_by_env() -> bool:
     return os.environ.get(ENV_DISABLE, "").lower() in ("off", "0", "disabled", "false")
 
 
-def pick_sandbox(workspace: str, grant_paths: list[str] | None = None) -> ShellSandbox | None:
+def pick_sandbox(workspace: str, grant_paths: list[str] | None = None,
+                 deny_read_paths: list[str] | None = None) -> ShellSandbox | None:
     """Return the first AVAILABLE backend for this platform, or None.
 
     Probe order per platform (single-candidate today, chain-ready). Probing
     is read-only; per-workspace setup (icacls labeling) is deferred to run.
-    ``grant_paths`` are the user-granted extra writable folders.
+    ``grant_paths`` are the user-granted extra writable folders;
+    ``deny_read_paths`` are the user-configured read-denylist entries. The
+    Windows Low-IL backend is write-only by construction and does NOT accept
+    (or enforce) ``deny_read_paths`` — documented partial enforcement.
     """
     system = platform.system()
     candidates: list[Any] = []
@@ -1150,5 +1183,5 @@ def pick_sandbox(workspace: str, grant_paths: list[str] | None = None) -> ShellS
         if cls.available():
             if cls is WindowsLowILSandbox:
                 return cls(workspace, grant_paths=grant_paths)
-            return cls(grant_paths=grant_paths)
+            return cls(grant_paths=grant_paths, deny_read_paths=deny_read_paths)
     return None

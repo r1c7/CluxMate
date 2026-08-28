@@ -24,6 +24,7 @@ from cluxmate.core.agent import AgentCallbacks, AgentLoop, NETWORK_FALLBACK_TEXT
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.checkpoints import CheckpointManager
 from cluxmate.core.grants import GrantStore
+from cluxmate.core.read_denies import ReadDenyStore
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.permissions import PermissionPolicy
 from cluxmate.core.session_log import (
@@ -454,6 +455,8 @@ class JsonRpcServer:
         # Writable-folder grants (sandbox-grants.json). Lazily constructed at
         # first use — a read-only home or a headless process shouldn't force it.
         self._grants: GrantStore | None = None
+        # Read-denylist (forbid-read.json). Same lazy-construction rationale.
+        self._read_denies: ReadDenyStore | None = None
         # JSONL event-log persistence for the active session (Python owns history
         # now — the desktop no longer writes <id>.json). Loaded/created at
         # initialize; flushed after each turn; truncated on undo.
@@ -570,6 +573,11 @@ class JsonRpcServer:
         elif method in ("sandbox/grants/set", "sandbox:grants:set"):
             result = self._set_grants(params.get("paths", []))
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
+        elif method in ("sandbox/forbid_read", "sandbox/forbid_read/get", "sandbox:forbid_read"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._forbid_read_snapshot()})
+        elif method in ("sandbox/forbid_read/set", "sandbox:forbid_read:set"):
+            result = self._set_forbid_read(params.get("paths", []))
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
         elif method in ("chat/set_mode", "chat:set_mode"):
             self._set_mode(params.get("mode", "default"))
             if req_id is not None:
@@ -625,6 +633,9 @@ class JsonRpcServer:
         # and survive re-init; load once and share with the builder.
         if getattr(self, "_grants", None) is None:
             self._grants = GrantStore()
+        # Read-denylist is likewise user-global (~/.cluxmate/forbid-read.json).
+        if getattr(self, "_read_denies", None) is None:
+            self._read_denies = ReadDenyStore()
         model_id = params.get("model_id", "")
         # Development mode is per-session and not persisted; default unless the
         # desktop passes one on (re)initialize.
@@ -650,6 +661,7 @@ class JsonRpcServer:
         builder = AgentBuilder(self._cwd, provider)
         builder.with_default_tools()
         builder.with_grants(self._grants)
+        builder.with_read_denies(self._read_denies)
         # Lifecycle hooks (settings.json). One manager per session so the payload
         # carries the session id; the builder caches it and children inherit it.
         # The observer streams hook_start/hook_result events to the desktop.
@@ -1071,6 +1083,30 @@ class JsonRpcServer:
     def _grants_snapshot(self) -> dict[str, Any]:
         paths = self._grants.snapshot() if self._grants else []
         return {"paths": paths}
+
+    def _forbid_read_snapshot(self) -> dict[str, Any]:
+        paths = self._read_denies.snapshot() if self._read_denies else []
+        return {"paths": paths}
+
+    def _set_forbid_read(self, paths: list[str]) -> dict[str, Any]:
+        """Replace the read-denylist and rebuild the agent so the new set is
+        picked up by the read fence + shell sandbox on the next turn. Unlike
+        grants there is NO enforcement-side reconcile — a read deny leaves no
+        on-disk label to restore."""
+        if self._read_denies is None:
+            from cluxmate.core.read_denies import ReadDenyStore
+            self._read_denies = ReadDenyStore()
+        wanted = []
+        for p in paths:
+            if isinstance(p, str) and p.strip():
+                wanted.append(self._read_denies.add(p))
+        for d in self._read_denies.snapshot():
+            if d not in wanted:
+                self._read_denies.remove(d)
+        if self._builder is not None:
+            self._builder.with_read_denies(self._read_denies)
+            self._agent = self._builder.build(session_log=self._session_log)
+        return {"paths": self._read_denies.snapshot()}
 
     def _set_grants(self, paths: list[str]) -> dict[str, Any]:
         """Replace the grant set. Revoked folders are restored Low → Medium

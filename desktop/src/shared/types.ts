@@ -654,6 +654,13 @@ export interface ElectronAPI {
   getSandboxGrants: () => Promise<{ paths: string[] }>
   setSandboxGrants: (paths: string[]) => Promise<{ paths: string[]; restored: string[] }>
 
+  // Read-denylist (forbid-read.json) — user-global. Paths the read tools
+  // (read_file/grep/list_dir) refuse to read, and which bwrap/Seatbelt hide
+  // from the shell sandbox. Default empty = no restriction. set replaces the
+  // whole set (no Windows label reconcile needed).
+  getForbidRead: () => Promise<{ paths: string[] }>
+  setForbidRead: (paths: string[]) => Promise<{ paths: string[] }>
+
   listCheckpoints: (sessionId: string) => Promise<Checkpoint[]>
   diffCheckpoint: (sessionId: string, checkpointId: string) => Promise<CheckpointFileDiff[]>
   restoreCheckpoint: (sessionId: string, checkpointId: string) => Promise<RestoreResult>
