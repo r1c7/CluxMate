@@ -112,6 +112,38 @@ def test_lsp_client_initialize_and_request(tmp_path):
         client.shutdown()
 
 
+def test_lsp_client_answers_server_request_during_handshake(tmp_path):
+    # Regression: the fake server issues a workspace/configuration request
+    # mid-initialize (server id=1, colliding with the client's id space) and
+    # only completes the handshake once answered. A client that drops
+    # server→client requests deadlocks here; start() must return promptly.
+    import threading
+
+    client = _lsp_client(tmp_path)
+    done = threading.Event()
+
+    def _run():
+        try:
+            assert client.start() is True
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    assert done.wait(timeout=10), "start() deadlocked on a server-initiated request"
+    try:
+        # Handshake completed and id spaces stayed distinct: a normal request
+        # still round-trips correctly.
+        result = client.request(
+            "textDocument/definition",
+            {"textDocument": {"uri": _path_to_uri(str(tmp_path / "a.py"))},
+             "position": {"line": 0, "character": 0}},
+        )
+        assert result == [{"uri": "file:///fake/def.py", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}}}]
+    finally:
+        client.shutdown()
+
+
 from cluxmate.core.lsp import LSPManager
 
 
@@ -153,3 +185,52 @@ def test_manager_workspace_symbol_queries_running_clients(tmp_path):
         assert out == "no workspace symbols found"
     finally:
         mgr.shutdown()
+
+
+# --- wire-framing regression: LSP stdio is Content-Length framed, not NDJSON.
+# A naive readline() client blocks forever on a body that has no trailing
+# newline; these tests assert byte-exact framing directly (and non-ASCII
+# content, which readline/char-count based parsing gets wrong).
+
+import io
+
+from cluxmate.core.lsp import ServerSpec as _ServerSpec
+
+
+class _FakeStream:
+    def __init__(self, data: bytes = b""):
+        self.buffer = io.BytesIO(data)
+
+
+class _FakeProc:
+    def __init__(self, response: bytes = b""):
+        self.stdin = _FakeStream()
+        self.stdout = _FakeStream(response)
+
+
+def _framing_client() -> LSPClient:
+    spec = _ServerSpec(command="fake", extension_to_language={".py": "python"})
+    return LSPClient(spec, language_id="python", root=".")
+
+
+def test_write_uses_content_length_framing():
+    client = _framing_client()
+    client._proc = _FakeProc()
+    payload = {"jsonrpc": "2.0", "id": 1, "result": "中文"}
+    client._write(payload)
+    raw = client._proc.stdin.buffer.getvalue()
+    header, _, body = raw.partition(b"\r\n\r\n")
+    assert header.startswith(b"Content-Length: ")
+    assert int(header.split(b":", 1)[1].strip()) == len(body)
+    assert json.loads(body.decode("utf-8")) == payload
+
+
+def test_read_consumes_exact_bytes():
+    client = _framing_client()
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "中文"}).encode("utf-8")
+    frame = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body + b'{"trailing":1}'
+    client._proc = _FakeProc(frame)
+    msg = client._read()
+    assert msg == {"jsonrpc": "2.0", "id": 1, "result": "中文"}
+    # only the framed body was consumed; the next frame is still buffered.
+    assert client._proc.stdout.buffer.read() == b'{"trailing":1}'

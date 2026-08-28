@@ -233,13 +233,53 @@ class LSPClient:
         self._notify("initialized", {})
         return True
 
+    def _write(self, payload: dict) -> None:
+        """Write one message using LSP's Content-Length framing.
+
+        LSP stdio is NOT newline-delimited JSON: every message is prefixed
+        with a ``Content-Length: <byte-count>\\r\\n\\r\\n`` header and the body
+        is exactly that many UTF-8 bytes, with no trailing newline. We write
+        to the raw binary buffer so the byte count is exact regardless of
+        non-ASCII content.
+        """
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        frame = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+        stream = self._proc.stdin.buffer
+        stream.write(frame)
+        stream.flush()
+
+    def _read(self) -> dict | None:
+        """Read one Content-Length framed message; None if the server exited."""
+        stream = self._proc.stdout.buffer
+        content_length: int | None = None
+        while True:
+            raw = stream.readline()
+            if not raw:
+                return None
+            line = raw.rstrip(b"\r\n")
+            if line == b"":
+                break
+            if line.lower().startswith(b"content-length:"):
+                try:
+                    content_length = int(line.split(b":", 1)[1].strip())
+                except ValueError:
+                    content_length = None
+        if content_length is None:
+            return None
+        body = stream.read(content_length)
+        if not body:
+            return None
+        try:
+            return json.loads(body.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return None
+
     def _notify(self, method: str, params: dict) -> None:
         notif = {"jsonrpc": "2.0", "method": method, "params": params}
         try:
             with self._lock:
                 if self._proc and self._proc.stdin:
-                    self._proc.stdin.write(json.dumps(notif, ensure_ascii=False) + "\n")
-                    self._proc.stdin.flush()
+                    self._write(notif)
         except Exception:
             pass
 
@@ -268,21 +308,46 @@ class LSPClient:
         req = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
         assert self._proc is not None and self._proc.stdin and self._proc.stdout
         with self._lock:
-            self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
-            self._proc.stdin.flush()
+            self._write(req)
             while True:
-                raw = self._proc.stdout.readline()
-                if not raw:
+                msg = self._read()
+                if msg is None:
                     return None
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError:
+                # A message carrying BOTH id and method is a server→client
+                # request (workspace/configuration, client/registerCapability,
+                # window/workDoneProgress/create, ...). Real servers block
+                # until it is answered, so we must reply — dropping it deadlocks
+                # both sides. Its id lives in the SERVER's id space, which can
+                # collide with our req_id, so this check must come before the
+                # response match below.
+                if msg.get("method") is not None:
+                    if msg.get("id") is not None:
+                        self._respond_to_server_request(msg)
+                    # else: a notification ($/progress, publishDiagnostics, ...)
+                    # — nothing to answer, keep reading.
                     continue
                 if msg.get("id") == req_id:
                     return msg
+
+    def _respond_to_server_request(self, msg: dict) -> None:
+        """Answer a server-initiated request so the server can proceed.
+
+        We advertise no dynamic capabilities, so a minimal reply is correct:
+        workspace/configuration wants one settings object per requested item
+        (null = "use defaults"); everything else (registerCapability,
+        workDoneProgress/create, ...) is acknowledged with a null result.
+        Written directly (not via _notify) because we already hold _lock.
+        """
+        method = msg.get("method", "")
+        if method == "workspace/configuration":
+            items = (msg.get("params") or {}).get("items") or []
+            result: Any = [None] * len(items)
+        else:
+            result = None
+        try:
+            self._write({"jsonrpc": "2.0", "id": msg.get("id"), "result": result})
+        except Exception:
+            pass
 
     def ensure_synced(self, uri: str, path: str) -> None:
         """didOpen (first) / didChange (content changed) using stat(size, mtime)."""
@@ -462,7 +527,13 @@ class LSPManager:
             raw = client.request("textDocument/definition", {
                 "textDocument": {"uri": uri}, "position": pos,
             })
-            return _format_locations("definition", raw if isinstance(raw, list) else [raw], self.ws_root)
+            if raw is None:
+                locs: list[dict] = []
+            elif isinstance(raw, list):
+                locs = [loc for loc in raw if isinstance(loc, dict)]
+            else:
+                locs = [raw]
+            return _format_locations("definition", locs, self.ws_root)
         except ValueError as e:
             return f"Error: {e}"
         except RuntimeError as e:
@@ -540,3 +611,7 @@ class LSPManager:
             except Exception:
                 pass
         self._clients.clear()
+
+
+
+
