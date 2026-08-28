@@ -33,7 +33,6 @@ export default function ChatView() {
   const focusAgent = useStore((s) => s.focusAgent)
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
   const userScrolledAway = useRef(false)
 
   // Detect user scrolls — if they pull up away from the bottom, disable
@@ -45,10 +44,16 @@ export default function ChatView() {
     userScrolledAway.current = dist > SCROLL_NEAR_BOTTOM_PX
   }
 
-  // Auto-scroll on new content only when the user hasn't scrolled away.
+  // Auto-scroll on new content only when the user hasn't scrolled away. Pin the
+  // bottom INSTANTLY (scrollTop = scrollHeight) rather than scrollIntoView with
+  // 'smooth': that call restarts its ease-out animation on every streamed delta,
+  // and while an expanded thinking block is growing above the reply the two
+  // motions fight — the answer visibly jitters up and down. An instant pin keeps
+  // the bottom locked in place with no animation to restart.
   useEffect(() => {
     if (!userScrolledAway.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
     }
   }, [messages, isStreaming])
 
@@ -97,7 +102,6 @@ export default function ChatView() {
       ))}
       <PermissionCard />
       <BatchEditCard />
-      <div ref={bottomRef} />
     </div>
   )
 }
