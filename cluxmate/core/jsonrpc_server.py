@@ -578,6 +578,11 @@ class JsonRpcServer:
         elif method in ("sandbox/forbid_read/set", "sandbox:forbid_read:set"):
             result = self._set_forbid_read(params.get("paths", []))
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
+        elif method in ("ssrf/config", "ssrf/config/get", "ssrf:config"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._ssrf_snapshot()})
+        elif method in ("ssrf/config/set", "ssrf:config:set"):
+            result = self._set_ssrf_config(params)
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
         elif method in ("chat/set_mode", "chat:set_mode"):
             self._set_mode(params.get("mode", "default"))
             if req_id is not None:
@@ -636,6 +641,10 @@ class JsonRpcServer:
         # Read-denylist is likewise user-global (~/.cluxmate/forbid-read.json).
         if getattr(self, "_read_denies", None) is None:
             self._read_denies = ReadDenyStore()
+        # SSRF network-access config is likewise user-global (~/.cluxmate/ssrf.json).
+        if getattr(self, "_ssrf_config", None) is None:
+            from cluxmate.core.ssrf_config import SsrConfig
+            self._ssrf_config = SsrConfig()
         model_id = params.get("model_id", "")
         # Development mode is per-session and not persisted; default unless the
         # desktop passes one on (re)initialize.
@@ -662,6 +671,7 @@ class JsonRpcServer:
         builder.with_default_tools()
         builder.with_grants(self._grants)
         builder.with_read_denies(self._read_denies)
+        builder.with_ssrf(self._ssrf_config)
         # Lifecycle hooks (settings.json). One manager per session so the payload
         # carries the session id; the builder caches it and children inherit it.
         # The observer streams hook_start/hook_result events to the desktop.
@@ -1107,6 +1117,23 @@ class JsonRpcServer:
             self._builder.with_read_denies(self._read_denies)
             self._agent = self._builder.build(session_log=self._session_log)
         return {"paths": self._read_denies.snapshot()}
+
+    def _ssrf_snapshot(self) -> dict[str, Any]:
+        cfg = getattr(self, "_ssrf_config", None)
+        return cfg.snapshot() if cfg is not None else {"allow": [], "block_extra": []}
+
+    def _set_ssrf_config(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Replace the SSRF allow/block lists. Invalid entries raise ValueError
+        (→ error response). The config is mtime-cached per request, so NO agent
+        rebuild is needed — unlike grants, a network config change takes effect
+        on the next web_fetch without killing the session."""
+        if getattr(self, "_ssrf_config", None) is None:
+            from cluxmate.core.ssrf_config import SsrConfig
+            self._ssrf_config = SsrConfig()
+        return self._ssrf_config.set_rules(
+            [e for e in params.get("allow", []) if isinstance(e, str)],
+            [e for e in params.get("block_extra", []) if isinstance(e, str)],
+        )
 
     def _set_grants(self, paths: list[str]) -> dict[str, Any]:
         """Replace the grant set. Revoked folders are restored Low → Medium
