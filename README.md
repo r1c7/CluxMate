@@ -41,6 +41,7 @@ It speaks the **OpenAI-compatible API**, so it works with DeepSeek, Qwen, GLM, O
 - **Stable, cache-friendly context** — the system prompt never changes with your session: memory, skills, and mode are injected as tagged synthetic messages, so request prefixes stay stable and prompt caches stay hot — with per-turn cache-hit and latency metrics surfaced in the UI.
 - **Risk-tiered permissions** — every tool declares a risk level (`safe` / `write` / `dangerous`); four modes (`plan` / `default` / `acceptEdits` / `yolo`) plus a persistent always-allow list control approval. `plan` mode is read-only by construction; dangerous commands always prompt.
 - **A two-layer sandbox** — file write/delete tools are guarded by an in-process **WriteFence** (canonicalize-then-contain), and model-generated `bash` commands run inside an **OS-level sandbox** (Windows Low-integrity token, Linux bubblewrap, macOS Seatbelt). Sandboxing is *fail-closed* and only `yolo` mode — the explicit opt-out — disarms it. See [Security: sandbox](#security-sandbox).
+- **Network-access guard (SSRF)** — `web_fetch` / `web_search` pass through an SSRF guard in *every* mode (including `yolo`): internal/private addresses (RFC1918, loopback, link-local, cloud metadata, …) are denied by default, every redirect hop is re-validated, and DNS resolution failures close the request. Allow/block rules are configurable (`~/.cluxmate/ssrf.json`), managed from desktop Settings → Sandbox → Network access. See [Security: network access (SSRF guard)](#security-network-access-ssrf-guard).
 - **Checkpoints & rewind** — a shadow-git repository per working directory snapshots your files before and after every turn, so you can undo any turn — session-scoped, so other sessions' edits surface as conflicts, never clobbered.
 - **Subagent delegation** — delegate independent tasks to restricted subagents (`general-purpose`, read-only `explore`) with a depth cap of 4, each with its own replayable session log.
 - **Doom-loop guard** — if the agent starts repeating identical tool calls, escalating advisories nudge it back on track; `MAX_TURNS` remains the hard backstop.
@@ -116,6 +117,18 @@ Both boundaries are enabled in every mode **except `yolo`** — the one explicit
 <p align="center">
   <img src="snapshots/sandbox.png" alt="Sandbox & permissions in the desktop app" width="50%">
 </p>
+
+## Security: network access (SSRF guard)
+
+`web_fetch` / `web_search` run in the agent process at normal network privileges — a prompt-injected model could be steered into fetching internal services (loopback dev servers, RFC1918 hosts, the cloud metadata endpoint at `169.254.169.254`). The SSRF guard (`cluxmate/tools/_ssrf.py`) validates the destination *before the request is made*; it is a T1-class "value" constraint, in the same trust model as `WriteFence` — it constrains the URL the model supplies, not malicious code:
+
+- **Internal/private denied by default** — the built-in deny table covers RFC1918 (`10/8`, `172.16/12`, `192.168/16`), loopback, link-local, cloud metadata (`169.254.0.0/16`), CGNAT, multicast, and reserved ranges, plus IPv6 ULA / link-local / multicast / NAT64 — 17 networks in all, and they cannot be removed.
+- **Enforced in every mode, including `yolo`** — deliberate: it defends against remote prompt-injection, not model intent.
+- **Every redirect hop re-validated** — httpx `event_hooks` re-checks each hop of a redirect chain, so a redirect that tries to slip past is still blocked.
+- **DNS checked per-IP, fail-closed** — a hostname is resolved and every A/AAAA address is checked (a public name resolving to `127.0.0.1` is blocked); a resolution failure is treated as unsafe and refused.
+- **`allow` wins over every block** — rules live in `~/.cluxmate/ssrf.json`: `{"allow": [...], "block_extra": [...]}`, with entries of `host` / `host:port` / `[ipv6]:port` / IP / CIDR. The file sits inside the WriteFence non-writable `~/.cluxmate/`, so the model cannot edit its own network allowlist.
+- **Manage it from the desktop** — Settings → Sandbox → Network access; changes take effect immediately (re-read on every request, no restart).
+
 
 ## Subagents
 

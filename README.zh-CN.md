@@ -41,6 +41,7 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 - **稳定、缓存友好的上下文** —— 系统提示词不随会话变化：记忆、技能、模式以带标签的合成消息注入，请求前缀保持稳定，提示词缓存保持热度——UI 中还会展示每轮的缓存命中与延迟指标。
 - **分级风险权限** —— 每个工具声明风险等级（`safe` / `write` / `dangerous`）；四种模式（`plan` / `default` / `acceptEdits` / `yolo`）加上持久化的 always-allow 列表控制审批。`plan` 模式天然只读；危险命令永远需要确认。
 - **双层沙箱** —— 文件写入/删除工具由进程内 **WriteFence**（先规范化再包含性检查）守护；模型生成的 `bash` 命令在**操作系统级沙箱**内运行（Windows 低完整性令牌、Linux bubblewrap、macOS Seatbelt）。沙箱**默认失败即关闭（fail-closed）**，只有 `yolo` 模式——唯一的显式豁免——会解除它。参见 [安全：沙箱](#安全沙箱)。
+- **网络访问守卫（SSRF）** —— `web_fetch` / `web_search` 在*所有*模式下（包括 `yolo`）都经过 SSRF 守卫：默认拒绝内网/私网地址（RFC1918、loopback、link-local、云 metadata 等），重定向的每一跳都重新校验，DNS 解析失败即关闭。允许/封禁规则可配置（`~/.cluxmate/ssrf.json`），桌面端 Settings → 沙箱 → 网络访问直接管理。参见 [安全：网络访问（SSRF 守卫）](#安全网络访问ssrf-守卫)。
 - **检查点与回滚** —— 每个工作目录都有一个 shadow-git 仓库，在每轮前后快照你的文件，因此可以撤销任意一轮——且是会话级的，其他会话的修改会以冲突形式呈现，绝不会被覆盖。
 - **子 agent 委派** —— 把独立任务委派给受限子 agent（`general-purpose`、只读的 `explore`），递归深度上限 4，每个子 agent 都有自己可回放的会话日志。
 - **死循环防护** —— 如果 agent 开始重复相同的工具调用，逐级升级的提醒会把它拉回正轨；`MAX_TURNS` 仍是最终的硬兜底。
@@ -116,6 +117,18 @@ MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配�
 <p align="center">
   <img src="snapshots/sandbox.png" alt="桌面端的沙箱与权限视图" width="50%">
 </p>
+
+## 安全：网络访问（SSRF 守卫）
+
+`web_fetch` / `web_search` 在 agent 进程内以普通网络权限运行——一个被提示词注入的模型可能被诱导去抓取内网服务（loopback 开发服务器、RFC1918 内网主机、云 metadata 端点 `169.254.169.254`）。SSRF 守卫（`cluxmate/tools/_ssrf.py`）在*发起请求前*校验目标地址，是与 `WriteFence` 同级的 T1 类「值」约束——它约束的是模型提供的 URL，而不是拦截恶意代码：
+
+- **默认拒绝内网/私网** —— 内置封禁表覆盖 RFC1918（`10/8`、`172.16/12`、`192.168/16`）、loopback、link-local、云 metadata（`169.254.0.0/16`）、CGNAT、组播、保留段，以及 IPv6 ULA / link-local / 组播 / NAT64 等共 17 个网段，且不可移除。
+- **包括 `yolo` 在内的所有模式都生效** —— 这是刻意设计：它防的是远程提示词注入，而非模型意图。
+- **重定向每一跳都校验** —— 通过 httpx `event_hooks` 在重定向链的每一跳重新校验，试图绕过的重定向同样会被拦截。
+- **DNS 逐 IP 校验、解析失败即关闭** —— 主机名会被解析并检查其每一个 A/AAAA 地址（公网域名解析到 `127.0.0.1` 也会被拦截）；解析失败一律视为不安全而拒绝。
+- **allow 优先于一切封禁** —— 规则配置在 `~/.cluxmate/ssrf.json`：`{"allow": [...], "block_extra": [...]}`，条目支持 `host` / `host:port` / `[ipv6]:port` / IP / CIDR。该文件位于 WriteFence 不可写的 `~/.cluxmate/` 内，模型无法修改自己的网络白名单。
+- **桌面端可直接管理** —— Settings → 沙箱 → 网络访问；改动立即生效（每次请求重新读取，无需重启）。
+
 
 ## 子 agent
 
