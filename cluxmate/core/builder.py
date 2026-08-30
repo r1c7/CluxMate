@@ -201,6 +201,9 @@ class AgentBuilder:
         # Read-denylist (forbid-read.json). Shared across rebuilds and inherited
         # by children; None → empty deny set (no read restrictions).
         self._read_denies: ReadDenyStore | None = None
+        # SSRF network-access config (~/.cluxmate/ssrf.json). Shared across
+        # rebuilds and inherited by children; None → default deny (no allow).
+        self._ssrf: SsrConfig | None = None
         # Lifecycle hooks (settings.json). Lazy: constructed on first build when
         # the caller didn't inject one, then cached. Inherited by children so
         # subagent tool calls are hooked too.
@@ -218,6 +221,12 @@ class AgentBuilder:
     def with_read_denies(self, store: "ReadDenyStore | None") -> "AgentBuilder":
         """Attach the read-denylist registry (shared across rebuilds)."""
         self._read_denies = store
+        return self
+
+    def with_ssrf(self, config: "SsrConfig | None") -> "AgentBuilder":
+        """Attach the SSRF network-access config (shared across rebuilds and
+        inherited by children)."""
+        self._ssrf = config
         return self
 
     def with_hooks(self, hooks: "HookManager | None") -> "AgentBuilder":
@@ -415,8 +424,8 @@ class AgentBuilder:
                         ReadFileTool(workdir=self._cwd, fence=read_fence),
                         GrepTool(workdir=self._cwd, fence=read_fence),
                         ListDirTool(workdir=self._cwd, fence=read_fence),
-                        WebFetchTool(plan_mode=True),
-                        WebSearchTool(),
+                        WebFetchTool(plan_mode=True, ssrf=self._ssrf),
+                        WebSearchTool(ssrf=self._ssrf),
                         LspTool(manager=self._lsp_manager()),
                     ) if t.name in readonly
                 ])
@@ -466,8 +475,8 @@ class AgentBuilder:
                 MultiWriteTool(workdir=self._cwd, fence=fence),
                 GrepTool(workdir=self._cwd, fence=read_fence),
                 ListDirTool(workdir=self._cwd, fence=read_fence),
-                WebFetchTool(),
-                WebSearchTool(),
+                WebFetchTool(ssrf=self._ssrf),
+                WebSearchTool(ssrf=self._ssrf),
                 LspTool(manager=self._lsp_manager()),
             ])
             # Add TaskTool only when subagent types are configured AND we have
@@ -769,6 +778,7 @@ class AgentBuilder:
         child._mode = self._mode
         child._grants = self._grants
         child._read_denies = self._read_denies
+        child._ssrf = self._ssrf
         child._hooks = self._hooks
         child._lsp = self._lsp
         child._subagent_type = subagent_type
