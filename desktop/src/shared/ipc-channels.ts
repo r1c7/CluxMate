@@ -29,6 +29,8 @@ export const IPC = {
   SANDBOX_GRANTS_SET: 'sandbox:grants-set',
   SANDBOX_FORBID_READ_GET: 'sandbox:forbid-read-get',
   SANDBOX_FORBID_READ_SET: 'sandbox:forbid-read-set',
+  SANDBOX_BASH_GET: 'sandbox:bash-get',
+  SANDBOX_BASH_SET: 'sandbox:bash-set',
   SSRF_CONFIG_GET: 'ssrf:config-get',
   SSRF_CONFIG_SET: 'ssrf:config-set',
 

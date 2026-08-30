@@ -669,6 +669,13 @@ export interface ElectronAPI {
   getForbidRead: () => Promise<{ paths: string[] }>
   setForbidRead: (paths: string[]) => Promise<{ paths: string[] }>
 
+  // Bash/MCP OS sandbox toggle (~/.cluxmate/sandbox.json). get reads the current
+  // state (default true when the file is absent); set persists it and kills the
+  // active session's bridge so the next message re-initializes the Python agent
+  // with the new CLUXMATE_BASH_SANDBOX env. File tools + SSRF stay enforced.
+  getBashSandbox: () => Promise<{ enabled: boolean }>
+  setBashSandbox: (enabled: boolean) => Promise<{ enabled: boolean }>
+
   // Network-access rules for the SSRF guard (~/.cluxmate/ssrf.json). Entries
   // are host, host:port, [ipv6]:port, IP, or CIDR. allow wins over every block;
   // the default denied ranges (RFC1918/loopback/metadata/...) cannot be removed.

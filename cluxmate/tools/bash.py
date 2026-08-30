@@ -158,19 +158,26 @@ class BashTool(BaseTool):
 
     @property
     def input_schema(self) -> dict[str, Any]:
+        # The escalation params only make sense when there IS a shell sandbox to
+        # escape. With the sandbox off (CLUXMATE_BASH_SANDBOX=off or the desktop
+        # Settings toggle) bash already runs unsandboxed at normal integrity, so
+        # exposing sandbox_permissions just invites the model to request a
+        # pointless danger-full-access approval. Hide them when not sandboxed.
+        props: dict[str, Any] = {
+            "command": {
+                "type": "string",
+                "description": "The shell command to run.",
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Optional timeout in milliseconds.",
+            },
+        }
+        if self._sandbox is not None or self._sandbox_required:
+            props.update(ESCALATION_SCHEMA_FIELDS)
         return {
             "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to run.",
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "Optional timeout in milliseconds.",
-                },
-                **ESCALATION_SCHEMA_FIELDS,
-            },
+            "properties": props,
             "required": ["command"],
         }
 

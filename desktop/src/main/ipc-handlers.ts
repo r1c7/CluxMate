@@ -139,6 +139,28 @@ function writeForbidRead(paths: string[]): void {
   fs.writeFileSync(forbidReadPath(), JSON.stringify({ paths }, null, 2), 'utf-8')
 }
 
+// Bash/MCP OS sandbox toggle (sandbox.json) — user-global, mirrors the
+// CLUXMATE_BASH_SANDBOX env escape hatch. The desktop reads/writes the file
+// directly (no Python bridge needed); agent-bridge.ts injects the env at spawn
+// so the Python side's sandbox_disabled_by_env() honors it. Default = enabled.
+function bashSandboxPath(): string {
+  return path.join(app.getPath('home'), '.cluxmate', 'sandbox.json')
+}
+
+function readBashSandbox(): boolean {
+  try {
+    const data = JSON.parse(fs.readFileSync(bashSandboxPath(), 'utf-8'))
+    return data.bash_sandbox_enabled !== false
+  } catch {
+    return true
+  }
+}
+
+function writeBashSandbox(enabled: boolean): void {
+  fs.mkdirSync(path.dirname(bashSandboxPath()), { recursive: true })
+  fs.writeFileSync(bashSandboxPath(), JSON.stringify({ bash_sandbox_enabled: enabled }, null, 2), 'utf-8')
+}
+
 // SSRF network-access config (ssrf.json) — user-global, mirrors
 // cluxmate/core/ssrf_config.py + cluxmate/core/jsonrpc_server.py::ssrf/config.
 // Like grants/forbid-read the desktop reads/writes the file directly so the
@@ -854,6 +876,26 @@ export function registerIpcHandlers() {
       }
     }
     return { paths: next }
+  })
+
+  ipcMain.handle(IPC.SANDBOX_BASH_GET, () => {
+    return { enabled: readBashSandbox() }
+  })
+
+  ipcMain.handle(IPC.SANDBOX_BASH_SET, (_, enabled: boolean) => {
+    const next = enabled !== false
+    writeBashSandbox(next)
+    // Kill the active session's bridge so the next message re-initializes the
+    // Python agent with the new CLUXMATE_BASH_SANDBOX env (mirrors grants +
+    // forbid-read + SAVE_MODELS_CONFIG); the respawn is transparent.
+    if (activeSessionId) {
+      const b = bridges.get(activeSessionId)
+      if (b) {
+        bridges.delete(activeSessionId)
+        b.kill().catch(() => {})
+      }
+    }
+    return { enabled: next }
   })
 
   ipcMain.handle(IPC.SSRF_CONFIG_GET, () => readSsrConfig())

@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from 'child_process'
 import * as readline from 'readline'
 import { app } from 'electron'
 import { delimiter, join } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import type { StreamEvent } from '../shared/types'
 
 // Prefer the cluxmate source bundled with the app (electron-builder.yml
@@ -23,6 +23,20 @@ function bundledCluxmatePythonpath(): string | null {
     return join(resources, 'cluxmate')
   }
   return null
+}
+
+// Read the user's bash/MCP sandbox toggle (~/.cluxmate/sandbox.json). False
+// disables the OS shell sandbox by injecting CLUXMATE_BASH_SANDBOX=off into the
+// agent's spawn env — the Python core honors that at build (sandbox_disabled_by_env).
+// Default = enabled (sandbox on) when the file is absent or unreadable.
+function bashSandboxEnabled(): boolean {
+  try {
+    const p = join(app.getPath('home'), '.cluxmate', 'sandbox.json')
+    const data = JSON.parse(readFileSync(p, 'utf-8'))
+    return data.bash_sandbox_enabled !== false
+  } catch {
+    return true
+  }
 }
 
 export class AgentBridge {
@@ -63,6 +77,9 @@ export class AgentBridge {
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1',
         PYTHONUNBUFFERED: '1',
+      }
+      if (!bashSandboxEnabled()) {
+        env.CLUXMATE_BASH_SANDBOX = 'off'
       }
       const bundled = bundledCluxmatePythonpath()
       if (bundled) {

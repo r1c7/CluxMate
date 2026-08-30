@@ -38,6 +38,8 @@ const api: ElectronAPI = {
   setSandboxGrants: (paths: string[]) => ipcRenderer.invoke(IPC.SANDBOX_GRANTS_SET, paths),
   getForbidRead: () => ipcRenderer.invoke(IPC.SANDBOX_FORBID_READ_GET),
   setForbidRead: (paths: string[]) => ipcRenderer.invoke(IPC.SANDBOX_FORBID_READ_SET, paths),
+  getBashSandbox: () => ipcRenderer.invoke(IPC.SANDBOX_BASH_GET),
+  setBashSandbox: (enabled: boolean) => ipcRenderer.invoke(IPC.SANDBOX_BASH_SET, enabled),
   getSsrConfig: () => ipcRenderer.invoke(IPC.SSRF_CONFIG_GET),
   setSsrConfig: (cfg: SsrConfigPayload) => ipcRenderer.invoke(IPC.SSRF_CONFIG_SET, cfg),
 

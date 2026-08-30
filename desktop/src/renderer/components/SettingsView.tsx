@@ -145,6 +145,25 @@ export default function SettingsView() {
     await commitGrants(grants.filter((g) => g !== p))
   }
 
+  // Bash/MCP OS sandbox toggle (sandbox.json) — user-global, mirroring grants.
+  // Default enabled; the get round-trip corrects it if the file says otherwise.
+  const [bashSandbox, setBashSandbox] = useState<boolean>(true)
+  useEffect(() => {
+    let alive = true
+    window.electronAPI.getBashSandbox().then((r) => {
+      if (alive) setBashSandbox(r.enabled)
+    }).catch(() => { /* keep default on failure */ })
+    return () => { alive = false }
+  }, [])
+
+  const commitBashSandbox = async (enabled: boolean) => {
+    setBashSandbox(enabled)
+    try {
+      const r = await window.electronAPI.setBashSandbox(enabled)
+      setBashSandbox(r.enabled)
+    } catch { /* keep optimistic on failure */ }
+  }
+
   // Sandbox read-denylist (forbid-read.json) — user-global, mirroring grants:
   // read once on mount, committed immediately on add/remove (full replace).
   const [forbidRead, setForbidRead] = useState<string[]>([])
@@ -496,125 +515,138 @@ export default function SettingsView() {
               </div>
             </>
           ) : section === 'sandbox' ? (
-            <>
-              <p className="text-xs text-ink-faint mb-3">{t('settings.sandbox.hint')}</p>
-
-              {!grantsLoaded ? (
-                <p className="text-sm text-ink-faint py-4 text-center">{t('common.loading')}</p>
-              ) : grants.length === 0 ? (
-                <p className="text-sm text-ink-faint py-4 text-center">{t('settings.sandbox.none')}</p>
-              ) : (
-                <div className="space-y-2">
-                  {grants.map((g) => (
-                    <div key={g} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-2">
-                      <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={g}>{g}</span>
-                      <button
-                        onClick={() => removeGrant(g)}
-                        className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0"
-                      >{t('settings.sandbox.remove')}</button>
-                    </div>
-                  ))}
+            <div className="space-y-4">
+              {/* Bash & MCP sandbox — the master switch for the OS-level boundary. */}
+              <SectionCard
+                icon={<ShieldIcon className="w-4 h-4" />}
+                title={t('settings.sandbox.bash.title')}
+                badge={
+                  <button
+                    onClick={() => commitBashSandbox(!bashSandbox)}
+                    role="switch"
+                    aria-checked={bashSandbox}
+                    aria-label={t('settings.sandbox.bash.title')}
+                    className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 hover:opacity-80 ${
+                      bashSandbox ? 'bg-accent' : 'bg-surface-border'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${
+                        bashSandbox ? 'left-[22px]' : 'left-0.5'
+                      }`}
+                    />
+                  </button>
+                }
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${bashSandbox ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                  <span className={`text-xs font-medium ${bashSandbox ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {bashSandbox ? t('settings.sandbox.bash.on') : t('settings.sandbox.bash.off')}
+                  </span>
                 </div>
-              )}
+                <p className="text-xs text-ink-soft leading-relaxed">{t('settings.sandbox.bash.hint')}</p>
+                <p className="text-[11px] text-ink-faint">{t('settings.sandbox.bash.footnote')}</p>
+              </SectionCard>
 
-              <button
-                onClick={addGrant}
-                className="mt-3 w-full px-3 py-2 border border-dashed border-surface-border text-ink-soft hover:text-ink hover:border-ink-faint text-sm rounded-lg"
-              >{t('settings.sandbox.addFolder')}</button>
+              {/* Writable folders */}
+              <SectionCard
+                icon={<FolderIcon className="w-4 h-4" />}
+                title={t('settings.sandbox.writable.title')}
+                badge={grantsLoaded ? <CountBadge n={grants.length} /> : undefined}
+              >
+                <p className="text-xs text-ink-faint">{t('settings.sandbox.hint')}</p>
+                {!grantsLoaded ? (
+                  <p className="text-sm text-ink-faint py-2 text-center">{t('common.loading')}</p>
+                ) : grants.length === 0 ? (
+                  <EmptyState text={t('settings.sandbox.none')} />
+                ) : (
+                  <div className="space-y-2">
+                    {grants.map((g) => (
+                      <PathRow key={g} path={g} onRemove={() => removeGrant(g)} />
+                    ))}
+                  </div>
+                )}
+                <AddButton onClick={addGrant} label={t('settings.sandbox.addFolder')} />
+                <p className="text-[11px] text-ink-faint">{t('settings.sandbox.footnote')}</p>
+              </SectionCard>
 
-              <p className="mt-3 text-[11px] text-ink-faint">{t('settings.sandbox.footnote')}</p>
-
-              <div className="mt-6 pt-4 border-t border-surface-border">
-                <p className="text-sm font-semibold text-ink mb-1">{t('settings.sandbox.forbidRead.title')}</p>
-                <p className="text-xs text-ink-faint mb-3">{t('settings.sandbox.forbidRead.hint')}</p>
-
+              {/* Restricted read paths */}
+              <SectionCard
+                icon={<EyeOffIcon className="w-4 h-4" />}
+                title={t('settings.sandbox.forbidRead.title')}
+                badge={forbidReadLoaded ? <CountBadge n={forbidRead.length} /> : undefined}
+              >
+                <p className="text-xs text-ink-faint">{t('settings.sandbox.forbidRead.hint')}</p>
                 {!forbidReadLoaded ? (
-                  <p className="text-sm text-ink-faint py-4 text-center">{t('common.loading')}</p>
+                  <p className="text-sm text-ink-faint py-2 text-center">{t('common.loading')}</p>
                 ) : forbidRead.length === 0 ? (
-                  <p className="text-sm text-ink-faint py-4 text-center">{t('settings.sandbox.forbidRead.none')}</p>
+                  <EmptyState text={t('settings.sandbox.forbidRead.none')} />
                 ) : (
                   <div className="space-y-2">
                     {forbidRead.map((f) => (
-                      <div key={f} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-2">
-                        <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={f}>{f}</span>
-                        <button
-                          onClick={() => removeForbidRead(f)}
-                          className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0"
-                        >{t('settings.sandbox.remove')}</button>
-                      </div>
+                      <PathRow key={f} path={f} onRemove={() => removeForbidRead(f)} />
                     ))}
                   </div>
                 )}
+                <AddButton onClick={addForbidRead} label={t('settings.sandbox.forbidRead.addFolder')} />
+                <p className="text-[11px] text-ink-faint">{t('settings.sandbox.forbidRead.footnote')}</p>
+              </SectionCard>
 
-                <button
-                  onClick={addForbidRead}
-                  className="mt-3 w-full px-3 py-2 border border-dashed border-surface-border text-ink-soft hover:text-ink hover:border-ink-faint text-sm rounded-lg"
-                >{t('settings.sandbox.forbidRead.addFolder')}</button>
-
-                <p className="mt-3 text-[11px] text-ink-faint">{t('settings.sandbox.forbidRead.footnote')}</p>
-              </div>
-
-              <div className="mt-6 pt-4 border-t border-surface-border">
-                <p className="text-sm font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.title')}</p>
-                <p className="text-xs text-ink-faint mb-3">{t('settings.sandbox.ssrf.hint')}</p>
+              {/* Network access (SSRF guard) */}
+              <SectionCard icon={<GlobeIcon className="w-4 h-4" />} title={t('settings.sandbox.ssrf.title')}>
+                <p className="text-xs text-ink-faint">{t('settings.sandbox.ssrf.hint')}</p>
 
                 {/* Allowed hosts */}
-                <p className="text-xs font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.allow.title')}</p>
-                {!ssrfLoaded ? (
-                  <p className="text-sm text-ink-faint py-2">{t('common.loading')}</p>
-                ) : ssrfAllow.length === 0 ? (
-                  <p className="text-sm text-ink-faint py-2">{t('settings.sandbox.ssrf.allow.none')}</p>
-                ) : (
-                  <div className="space-y-1 mb-1">
-                    {ssrfAllow.map((a) => (
-                      <div key={a} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-1.5">
-                        <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={a}>{a}</span>
-                        {a.includes('169.254') && (
-                          <span className="text-[10px] text-amber-600 shrink-0">{t('settings.sandbox.ssrf.metadataWarning')}</span>
-                        )}
-                        {!isValidSsrEntry(a) && (
-                          <span className="text-[10px] text-amber-600 shrink-0">{t('settings.sandbox.ssrf.invalidFormat')}</span>
-                        )}
-                        <button onClick={() => commitSsr(ssrfAllow.filter((x) => x !== a), ssrfBlockExtra)}
-                          className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0">{t('settings.sandbox.ssrf.remove')}</button>
-                      </div>
-                    ))}
+                <div>
+                  <p className="text-xs font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.allow.title')}</p>
+                  {!ssrfLoaded ? (
+                    <p className="text-sm text-ink-faint py-2">{t('common.loading')}</p>
+                  ) : ssrfAllow.length === 0 ? (
+                    <EmptyState text={t('settings.sandbox.ssrf.allow.none')} />
+                  ) : (
+                    <div className="space-y-1 mb-2">
+                      {ssrfAllow.map((a) => (
+                        <SsrRow
+                          key={a}
+                          entry={a}
+                          onRemove={() => commitSsr(ssrfAllow.filter((x) => x !== a), ssrfBlockExtra)}
+                          showMetaWarning={a.includes('169.254')}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <input
+                      value={ssrfAllowInput}
+                      onChange={(e) => setSsrAllowInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') addSsrAllow() }}
+                      placeholder={t('settings.sandbox.ssrf.placeholder')}
+                      className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-surface-raised border border-surface-border rounded-lg text-ink outline-none focus:border-ink-faint"
+                    />
+                    <button onClick={addSsrAllow}
+                      className="px-3 py-1.5 text-sm border border-dashed border-surface-border rounded-lg text-ink-soft hover:text-ink hover:bg-surface-raised shrink-0 transition-colors">{t('settings.sandbox.ssrf.add')}</button>
                   </div>
-                )}
-                <div className="flex gap-2 mt-2">
-                  <input
-                    value={ssrfAllowInput}
-                    onChange={(e) => setSsrAllowInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') addSsrAllow() }}
-                    placeholder={t('settings.sandbox.ssrf.placeholder')}
-                    className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-surface-raised border border-surface-border rounded-lg text-ink outline-none focus:border-ink-faint"
-                  />
-                  <button onClick={addSsrAllow}
-                    className="px-3 py-1.5 text-sm border border-dashed border-surface-border rounded-lg text-ink-soft hover:text-ink shrink-0">{t('settings.sandbox.ssrf.add')}</button>
                 </div>
 
-                {/* block_extra — same pattern, state ssrfBlockExtra / ssrfBlockInput */}
-                <div className="mt-4">
+                {/* block_extra */}
+                <div>
                   <p className="text-xs font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.blockExtra.title')}</p>
                   {!ssrfLoaded ? (
                     <p className="text-sm text-ink-faint py-2">{t('common.loading')}</p>
                   ) : ssrfBlockExtra.length === 0 ? (
-                    <p className="text-sm text-ink-faint py-2">{t('settings.sandbox.ssrf.blockExtra.none')}</p>
+                    <EmptyState text={t('settings.sandbox.ssrf.blockExtra.none')} />
                   ) : (
-                    <div className="space-y-1 mb-1">
+                    <div className="space-y-1 mb-2">
                       {ssrfBlockExtra.map((b) => (
-                        <div key={b} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-1.5">
-                          <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={b}>{b}</span>
-                          {!isValidSsrEntry(b) && (
-                            <span className="text-[10px] text-amber-600 shrink-0">{t('settings.sandbox.ssrf.invalidFormat')}</span>
-                          )}
-                          <button onClick={() => commitSsr(ssrfAllow, ssrfBlockExtra.filter((x) => x !== b))}
-                            className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0">{t('settings.sandbox.ssrf.remove')}</button>
-                        </div>
+                        <SsrRow
+                          key={b}
+                          entry={b}
+                          onRemove={() => commitSsr(ssrfAllow, ssrfBlockExtra.filter((x) => x !== b))}
+                        />
                       ))}
                     </div>
                   )}
-                  <div className="flex gap-2 mt-2">
+                  <div className="flex gap-2">
                     <input
                       value={ssrfBlockInput}
                       onChange={(e) => setSsrBlockInput(e.target.value)}
@@ -623,12 +655,12 @@ export default function SettingsView() {
                       className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-surface-raised border border-surface-border rounded-lg text-ink outline-none focus:border-ink-faint"
                     />
                     <button onClick={addSsrBlockExtra}
-                      className="px-3 py-1.5 text-sm border border-dashed border-surface-border rounded-lg text-ink-soft hover:text-ink shrink-0">{t('settings.sandbox.ssrf.add')}</button>
+                      className="px-3 py-1.5 text-sm border border-dashed border-surface-border rounded-lg text-ink-soft hover:text-ink hover:bg-surface-raised shrink-0 transition-colors">{t('settings.sandbox.ssrf.add')}</button>
                   </div>
                 </div>
 
                 {/* Built-in denied ranges (read-only) */}
-                <div className="mt-4">
+                <div>
                   <p className="text-xs font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.defaults.title')}</p>
                   <div className="flex flex-wrap gap-1">
                     {DEFAULT_BLOCKED_NETS.map((n) => (
@@ -637,9 +669,9 @@ export default function SettingsView() {
                   </div>
                 </div>
 
-                <p className="mt-3 text-[11px] text-ink-faint">{t('settings.sandbox.ssrf.footnote')}</p>
-              </div>
-            </>
+                <p className="text-[11px] text-ink-faint">{t('settings.sandbox.ssrf.footnote')}</p>
+              </SectionCard>
+            </div>
           ) : (
             <>
               <p className="text-xs text-ink-faint mb-3">{t('settings.language.hint')}</p>
@@ -702,6 +734,136 @@ function PrettyNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
   return String(n)
+}
+
+// ── Sandbox section layout primitives ──────────────────────────────────
+// Consistent card / row / empty-state building blocks so the Sandbox page's
+// four sub-sections read as one coherent surface instead of three flat lists
+// separated by dividers.
+
+function SectionCard({ icon, title, badge, children }: {
+  icon: React.ReactNode
+  title: string
+  badge?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <section className="rounded-xl border border-surface-border bg-surface-raised/40 overflow-hidden">
+      <div className="flex items-center gap-2.5 px-4 py-3 border-b border-surface-border">
+        <span className="text-accent flex-shrink-0">{icon}</span>
+        <h3 className="text-sm font-semibold text-ink">{title}</h3>
+        {badge && <span className="ml-auto flex-shrink-0">{badge}</span>}
+      </div>
+      <div className="px-4 py-3.5 space-y-3">{children}</div>
+    </section>
+  )
+}
+
+function CountBadge({ n }: { n: number }) {
+  return (
+    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-border text-ink-soft tabular-nums">{n}</span>
+  )
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div className="border border-dashed border-surface-border rounded-lg px-3 py-4 text-center text-sm text-ink-faint">{text}</div>
+  )
+}
+
+function AddButton({ onClick, label }: { onClick: () => void; label: string }) {
+  return (
+    <button
+      onClick={onClick}
+      className="w-full px-3 py-2 border border-dashed border-surface-border text-ink-soft hover:text-ink hover:border-ink-faint hover:bg-surface-raised text-sm rounded-lg transition-colors"
+    >
+      {label}
+    </button>
+  )
+}
+
+function PathRow({ path, onRemove, icon }: {
+  path: string
+  onRemove: () => void
+  icon?: React.ReactNode
+}) {
+  const t = useT()
+  return (
+    <div className="flex items-center gap-2.5 bg-surface-raised rounded-lg border border-surface-border px-3 py-2">
+      {icon && <span className="flex-shrink-0">{icon}</span>}
+      <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={path}>{path}</span>
+      <button
+        onClick={onRemove}
+        className="text-xs text-ink-faint hover:text-red-600 px-2 py-1 shrink-0 rounded transition-colors"
+      >{t('settings.sandbox.remove')}</button>
+    </div>
+  )
+}
+
+function SsrRow({ entry, onRemove, showMetaWarning }: {
+  entry: string
+  onRemove: () => void
+  showMetaWarning?: boolean
+}) {
+  const t = useT()
+  const invalid = !isValidSsrEntry(entry)
+  return (
+    <div className="bg-surface-raised rounded-lg border border-surface-border px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={entry}>{entry}</span>
+        <button
+          onClick={onRemove}
+          className="text-xs text-ink-faint hover:text-red-600 px-2 py-0.5 shrink-0 rounded transition-colors"
+        >{t('settings.sandbox.ssrf.remove')}</button>
+      </div>
+      {(showMetaWarning || invalid) && (
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+          {showMetaWarning && (
+            <span className="text-[10px] text-amber-600">{t('settings.sandbox.ssrf.metadataWarning')}</span>
+          )}
+          {invalid && (
+            <span className="text-[10px] text-amber-600">{t('settings.sandbox.ssrf.invalidFormat')}</span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ShieldIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <path d="M9 12l2 2 4-4" />
+    </svg>
+  )
+}
+
+function FolderIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </svg>
+  )
+}
+
+function EyeOffIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
+  )
+}
+
+function GlobeIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M2 12h20" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </svg>
+  )
 }
 
 // Live hint under the reasoning-value editor: shows the preset that the current
