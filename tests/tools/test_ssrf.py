@@ -104,3 +104,8 @@ def test_allow_wins_over_block_extra():
         allow=["203.0.113.5"],
         block_extra=["203.0.113.0/24"],
     )
+
+
+def test_malformed_bracket_returns_message():
+    err = validate_url("http://[::1:80/")
+    assert isinstance(err, str) and err

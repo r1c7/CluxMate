@@ -189,18 +189,20 @@ def validate_url(
     [ipv6]:port / IP / CIDR). ``allow`` wins over every block; the default
     denied ranges always apply (block_extra only adds to them).
     """
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-    if scheme not in _SCHEMES:
-        return f"Blocked scheme '{parsed.scheme}': only http/https are allowed"
-    host = parsed.hostname
-    if not host:
-        return f"URL has no host: {url}"
-    host = host.lower()
+    # CPython raises ValueError for malformed bracket-IPv6 netlocs both eagerly
+    # in urlsplit() and lazily in .hostname/.port — catch all three so a bad
+    # URL returns an error message instead of aborting the request ungracefully.
     try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
         port = _effective_port(scheme, parsed.port)
     except ValueError:
-        return f"Invalid port in URL: {url}"
+        return f"Invalid URL: {url}"
+    if scheme not in _SCHEMES:
+        return f"Blocked scheme '{parsed.scheme}': only http/https are allowed"
+    if not host:
+        return f"URL has no host: {url}"
 
     ips = _resolve_ips(host)
     if ips is None:

@@ -179,3 +179,91 @@ async def test_tool_name_and_description(tool):
     assert tool.name == "web_fetch"
     assert "GET" in tool.description
     assert "POST" in tool.description
+
+
+# ── SSRF guard (no network: loopback literals + local HTTP server) ────
+
+import threading
+import http.server
+from cluxmate.core.ssrf_config import SsrConfig
+
+
+class _QuietHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"hello from ssrf-test"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """302 to another 127.0.0.1 port (which is NOT allow-listed)."""
+    target = ""
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def ssrf_tool(tmp_path):
+    def _make(allow):
+        cfg = SsrConfig(path=tmp_path / "ssrf.json")
+        cfg.set_rules(allow=allow, block_extra=[])
+        return WebFetchTool(ssrf=cfg)
+    return _make
+
+
+def _serve(handler_cls, **kwargs):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    if kwargs:
+        for k, v in kwargs.items():
+            setattr(handler_cls, k, v)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    return srv
+
+
+@pytest.mark.asyncio
+async def test_ssrf_blocks_internal_without_allow(ssrf_tool):
+    # 127.0.0.1 literal, no allow → blocked BEFORE any connection attempt.
+    tool = ssrf_tool(allow=[])
+    result = await tool.execute(url="http://127.0.0.1:1/")
+    assert "SSRF guard blocked" in result
+
+
+@pytest.mark.asyncio
+async def test_ssrf_allows_allowlisted_loopback(ssrf_tool):
+    srv = _serve(_QuietHandler)
+    try:
+        tool = ssrf_tool(allow=[f"127.0.0.1:{srv.server_port}"])
+        result = await tool.execute(url=f"http://127.0.0.1:{srv.server_port}/")
+        assert "Status: 200 OK" in result
+        assert "hello from ssrf-test" in result
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ssrf_blocks_redirect_hop(ssrf_tool):
+    # First hop allowed, redirect target NOT allowed → the hook must catch the
+    # second hop before connecting to it.
+    redirector = _serve(_RedirectHandler)
+    try:
+        tool = ssrf_tool(allow=[f"127.0.0.1:{redirector.server_port}"])
+        # Redirect to the same host on a different (not allowed) port.
+        _RedirectHandler.target = f"http://127.0.0.1:{redirector.server_port + 1}/"
+        result = await tool.execute(url=f"http://127.0.0.1:{redirector.server_port}/")
+        assert "SSRF guard blocked" in result
+    finally:
+        redirector.shutdown()

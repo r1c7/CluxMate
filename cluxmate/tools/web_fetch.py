@@ -7,6 +7,8 @@ import httpx
 
 from .base import BaseTool
 
+from ._ssrf import SSRFBlockedError, validate_url
+
 # Hard byte cap on response download — prevents memory exhaustion on large responses.
 # Applied during streaming (connection aborted if exceeded), before the global
 # MAX_OUTPUT_CHARS truncation in BaseTool.run_safe.
@@ -22,8 +24,9 @@ _READ_ONLY_METHODS = {"GET", "HEAD", "OPTIONS"}
 class WebFetchTool(BaseTool):
     """Fetch a URL and return its content with configurable format and limits."""
 
-    def __init__(self, plan_mode: bool = False):
+    def __init__(self, plan_mode: bool = False, ssrf: "SsrConfig | None" = None):
         self.plan_mode = plan_mode
+        self._ssrf = ssrf
 
     @property
     def name(self) -> str:
@@ -105,6 +108,11 @@ class WebFetchTool(BaseTool):
                 f"Allowed methods: {', '.join(sorted(_READ_ONLY_METHODS))}"
             )
 
+        # SSRF guard: refuse internal/private destinations before connecting.
+        err = self._check_ssrf(url)
+        if err:
+            return f"Error: {err}"
+
         method = method.upper()
         headers = headers or {}
         body = body or None
@@ -122,7 +130,10 @@ class WebFetchTool(BaseTool):
             pool=5.0,
         )
 
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True,
+            event_hooks={"request": [self._ssrf_hook]},
+        ) as client:
             try:
                 async with client.stream(
                     method, url, headers=headers, content=body
@@ -153,6 +164,8 @@ class WebFetchTool(BaseTool):
                     else:
                         return self._format_raw(response, raw_body, truncated)
 
+            except SSRFBlockedError as e:
+                return f"Error: {e}"
             except httpx.TimeoutException:
                 return f"Error: Request timed out after {timeout_ms}ms"
             except httpx.ConnectError as e:
@@ -205,3 +218,18 @@ class WebFetchTool(BaseTool):
         if truncated:
             raw += f"\n[Content truncated at {MAX_RESPONSE_BYTES} byte read limit]"
         return raw
+
+    def _check_ssrf(self, url: str) -> str | None:
+        """Error message if *url* is blocked by the SSRF guard, else None."""
+        if self._ssrf is None:
+            return validate_url(url)
+        cfg = self._ssrf.snapshot()
+        return validate_url(url, cfg["allow"], cfg["block_extra"])
+
+    async def _ssrf_hook(self, request: httpx.Request) -> None:
+        """httpx request hook — runs before EVERY request, including each
+        redirect hop of follow_redirects. Must be async: AsyncClient awaits
+        every event hook (httpx >= 0.28)."""
+        err = self._check_ssrf(str(request.url))
+        if err:
+            raise SSRFBlockedError(err)
