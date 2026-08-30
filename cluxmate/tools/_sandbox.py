@@ -506,10 +506,16 @@ def _win_advapi32():
     return a
 
 
+# Cooldown (seconds) between expensive full-tree re-label attempts after a
+# failed heal. A broken environment (icacls /setintegritylevel denied) must not
+# make every sandboxed command re-walk the whole workspace with O(dirs) icacls.
+_LABEL_RETRY_INTERVAL = 60.0
+
+
 class WindowsLowILSandbox(ShellSandbox):
     """Low-IL restricted token via Win32 (no admin required).
 
-    Per-workspace setup (idempotent, marker-cached under <ws>/.cluxmate):
+    Per-command setup (idempotent, self-healing; drift re-verified each run):
       1. icacls <ws> /setintegritylevel (OI)(CI)L /T   — workspace writable
          by the low-IL child (mandatory label inherits to new files).
       2. icacls <ws>/.cluxmate /setintegritylevel (OI)(CI)M /T — the agent's
@@ -531,7 +537,10 @@ class WindowsLowILSandbox(ShellSandbox):
     def __init__(self, workspace: str, grant_paths: list[str] | None = None):
         self._workspace = str(Path(workspace).resolve())
         self._grant_paths = grant_paths or []
-        self._setup_done = False
+        # monotonic() timestamp of the last FAILED label heal; back off the
+        # expensive tree walk for _LABEL_RETRY_INTERVAL seconds so a broken
+        # environment isn't re-walked on every command. None = no recent fail.
+        self._label_failed_at: float | None = None
 
     @classmethod
     def available(cls) -> bool:
@@ -611,50 +620,70 @@ class WindowsLowILSandbox(ShellSandbox):
         return m.group(1)[0]
 
     def _setup(self) -> None:
-        """Label the workspace + grant folders low-IL (self-healing).
+        """Ensure the workspace, grants, and scratch are low-IL (self-healing).
 
-        The marker is a HINT, not a guarantee. A re-label of the workspace
-        back to medium (restore_path, a re-clone, an outer harness re-ACLing
-        the tree) leaves the marker stale and silently breaks the sandbox —
-        the low-IL child can then write nothing and pytest dies at tempfile
-        discovery. So verify the REAL label and re-apply only on drift.
+        Runs before EVERY sandboxed command, not just the first. The marker is
+        a HINT, not a guarantee: an outer harness re-ACLing the tree, a
+        re-clone, or restore_path can re-label the workspace back to medium at
+        any time, leaving the low-IL child with nothing writable (pytest then
+        dies at tempfile discovery). So each call re-verifies the REAL labels.
+
+        The full-tree walk is expensive, so after a FAILED heal the walk backs
+        off for _LABEL_RETRY_INTERVAL seconds (a broken environment — icacls
+        denied — must not re-walk the tree on every command); the cheap label
+        verification keeps running. Failures are detected by re-reading the
+        label AFTER the attempt (icacls can exit 0 on denial) and surfaced as a
+        warning, not a fail-closed refusal.
         """
-        if self._setup_done:
-            return
+        import sys
+        import time
+
         ws = Path(self._workspace)
         state = ws / ".cluxmate"
         state.mkdir(parents=True, exist_ok=True)
 
+        now = time.monotonic()
+        in_backoff = (
+            self._label_failed_at is not None
+            and now - self._label_failed_at < _LABEL_RETRY_INTERVAL
+        )
+
         # Workspace drift: unlabeled == medium == drifted. Re-label the tree,
         # re-raise the deny subtree to medium, refresh the marker.
-        if self._integrity_level(ws) != "L":
+        if self._integrity_level(ws) != "L" and not in_backoff:
             self._label_dirs_low(ws, skip_state=True)
-            r2 = subprocess.run(
+            subprocess.run(
                 ["icacls", str(state), "/setintegritylevel", "(OI)(CI)M",
                  "/C", "/Q"],
                 capture_output=True, timeout=60,
             )
-            # r2 failing is not fatal — worst case the deny subtree keeps its
-            # inherited low label; surface it on stderr.
-            if r2.returncode != 0:
-                import sys
+            self._marker().write_text("low-il setup complete\n", encoding="utf-8")
+            if self._integrity_level(ws) != "L":
+                # Heal didn't stick (icacls denied/failed) — back off and warn.
+                self._label_failed_at = now
                 print(
-                    f"[sandbox] warning: could not re-raise {state} to medium IL: "
-                    f"{r2.stderr.decode(errors='replace').strip()}",
+                    f"[sandbox] warning: could not label workspace {ws} low-IL "
+                    f"(icacls /setintegritylevel denied or failed); the low-IL "
+                    f"child will have nothing writable. Rechecking in "
+                    f"{_LABEL_RETRY_INTERVAL:.0f}s.",
                     file=sys.stderr,
                 )
-            self._marker().write_text("low-il setup complete\n", encoding="utf-8")
+            else:
+                self._label_failed_at = None
 
-        # User-granted folders: label low on every setup (idempotent — a grant
-        # added since the last build is picked up here).
+        # User-granted folders: re-verify and re-label only on drift, within
+        # the same backoff window as the workspace (a grant added since the
+        # last build is picked up here; a drifted one is healed lazily).
         for g in self._grant_paths:
             gp = Path(g)
-            if gp.is_dir():
+            if gp.is_dir() and self._integrity_level(gp) != "L" and not in_backoff:
                 self._label_dirs_low(gp)
 
         # Scratch for the child's TMP/TEMP: must exist AND be low-labeled. Its
         # label can drift like the workspace's (exists-but-medium), so verify
-        # it too rather than only creating when missing.
+        # it too rather than only creating when missing. A single icacls is
+        # cheap, so attempt it every command; only the warning is de-duplicated
+        # by the backoff window.
         scratch = self._scratch()
         if not scratch.exists():
             scratch.mkdir(parents=True, exist_ok=True)
@@ -664,7 +693,14 @@ class WindowsLowILSandbox(ShellSandbox):
                  "/C", "/Q"],
                 capture_output=True, timeout=60,
             )
-        self._setup_done = True
+            if self._integrity_level(scratch) != "L" and not in_backoff:
+                self._label_failed_at = now
+                print(
+                    f"[sandbox] warning: could not label {scratch} low-IL "
+                    f"(icacls /setintegritylevel denied or failed); tempfile-based "
+                    f"tools (pytest/npm/pip) will fail under the low-IL child.",
+                    file=sys.stderr,
+                )
 
     @staticmethod
     def restore_path(path: str) -> bool:

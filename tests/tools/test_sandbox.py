@@ -694,6 +694,77 @@ def test_lowil_setup_noop_when_labels_healthy(monkeypatch, tmp_path):
     assert icacls_calls == []     # no setintegritylevel at all
 
 
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_setup_reverifies_after_first_call(monkeypatch, tmp_path):
+    """A drift that happens AFTER the first _setup must still be healed.
+
+    Regression: _setup short-circuited on a one-shot _setup_done flag, so a
+    workspace re-ACLed back to medium mid-session (outer harness, re-clone,
+    restore_path) was never re-detected — the low-IL child then had nothing
+    writable and every write forced a danger-full-access escalation. Each call
+    must re-verify the real labels instead of trusting the first setup.
+    """
+    sb = WindowsLowILSandbox(str(tmp_path))
+    (tmp_path / ".cluxmate" / "tmp-low").mkdir(parents=True, exist_ok=True)
+
+    label_calls = []
+    icacls_calls = []
+    monkeypatch.setattr(
+        sb, "_label_dirs_low",
+        lambda root, skip_state=False: label_calls.append((str(root), skip_state)),
+    )
+    _fake_run_capture(monkeypatch, icacls_calls)
+
+    # First call: everything already low — a pure no-op.
+    monkeypatch.setattr(sb, "_integrity_level", lambda path: "L")
+    sb._setup()
+    assert label_calls == []
+    assert icacls_calls == []
+
+    # Mid-session drift: the outer harness re-ACLs the whole tree to medium.
+    monkeypatch.setattr(sb, "_integrity_level", lambda path: None)
+    sb._setup()
+
+    # Workspace re-labeled low (skip_state=True), scratch re-labeled low, and
+    # the deny subtree re-raised to medium.
+    assert any(Path(r) == tmp_path and skip for r, skip in label_calls)
+    assert any("tmp-low" in c and "(OI)(CI)L" in c for c in icacls_calls)
+    assert any("(OI)(CI)M" in c for c in icacls_calls)
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_setup_backs_off_after_failed_heal(monkeypatch, tmp_path):
+    """A heal that fails (labels can't be set) must not re-walk every command.
+
+    icacls can exit 0 on denial, so _setup re-reads the label AFTER the
+    attempt. When it stays non-LOW, the expensive full-tree walk backs off for
+    _LABEL_RETRY_INTERVAL seconds instead of re-running on every sandboxed
+    command — a broken environment (icacls denied) would otherwise pay O(dirs)
+    icacls per command.
+    """
+    sb = WindowsLowILSandbox(str(tmp_path))
+    (tmp_path / ".cluxmate" / "tmp-low").mkdir(parents=True, exist_ok=True)
+
+    label_calls = []
+    icacls_calls = []
+    monkeypatch.setattr(
+        sb, "_label_dirs_low",
+        lambda root, skip_state=False: label_calls.append((str(root), skip_state)),
+    )
+    _fake_run_capture(monkeypatch, icacls_calls)
+
+    # Labels can never be set: every read reports medium (unlabeled).
+    monkeypatch.setattr(sb, "_integrity_level", lambda path: None)
+
+    sb._setup()
+    assert len(label_calls) == 1  # workspace walked once on the first heal
+    assert any("tmp-low" in c and "(OI)(CI)L" in c for c in icacls_calls)
+
+    # Second call within the backoff window: the workspace must NOT be re-walked.
+    sb._setup()
+    assert len(label_calls) == 1
+
+
 @pytest.mark.parametrize("label,letter", [
     ("Low", "L"), ("Medium", "M"), ("High", "H"), ("System", "S"),
 ])
