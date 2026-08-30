@@ -8,6 +8,8 @@ import httpx
 
 from .base import BaseTool
 
+from ._ssrf import SSRFBlockedError, validate_url
+
 # Patterns to extract results from DuckDuckGo Lite HTML. Lite uses a simple
 # table layout; patterns handle both single- and double-quoted attributes so
 # minor upstream changes don't silently return zero results.
@@ -62,6 +64,23 @@ def _parse_results(html: str, max_results: int) -> list[dict[str, str]]:
 class WebSearchTool(BaseTool):
     """Search the web and return results with titles, URLs, and snippets."""
 
+    def __init__(self, ssrf: "SsrConfig | None" = None):
+        self._ssrf = ssrf
+
+    def _check_ssrf(self, url: str) -> str | None:
+        if self._ssrf is None:
+            return validate_url(url)
+        cfg = self._ssrf.snapshot()
+        return validate_url(url, cfg["allow"], cfg["block_extra"])
+
+    async def _ssrf_hook(self, request: httpx.Request) -> None:
+        """httpx request hook — runs before EVERY request, including each
+        redirect hop of follow_redirects. Must be async: AsyncClient awaits
+        every event hook (httpx >= 0.28)."""
+        err = self._check_ssrf(str(request.url))
+        if err:
+            raise SSRFBlockedError(err)
+
     @property
     def name(self) -> str:
         return "web_search"
@@ -109,6 +128,7 @@ class WebSearchTool(BaseTool):
             timeout=_TIMEOUT,
             follow_redirects=True,
             headers={"User-Agent": "CluxMate/1.0"},
+            event_hooks={"request": [self._ssrf_hook]},
         ) as client:
             try:
                 # DuckDuckGo Lite uses POST for search (the form is method="post").
@@ -117,6 +137,8 @@ class WebSearchTool(BaseTool):
                     data={"q": query, "kl": ""},
                 )
                 response.raise_for_status()
+            except SSRFBlockedError as e:
+                return f"Error: {e}"
             except httpx.TimeoutException:
                 return f"Error: Search request timed out for query: {query}"
             except httpx.HTTPError as e:
