@@ -63,6 +63,15 @@ const SECTIONS: { id: Section; labelKey: MessageKey; icon: React.ReactNode }[] =
   },
 ]
 
+// Built-in denied networks (mirror of cluxmate/tools/_ssrf.py::DEFAULT_BLOCKED_NETS) —
+// displayed read-only; users can only ADD to block_extra, never remove these.
+const DEFAULT_BLOCKED_NETS = [
+  '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
+  '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16',
+  '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4',
+  '::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8', '64:ff9b::/96',
+]
+
 function newId(): string {
   return 'm_' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6)
 }
@@ -163,6 +172,43 @@ export default function SettingsView() {
 
   const removeForbidRead = async (p: string) => {
     await commitForbidRead(forbidRead.filter((f) => f !== p))
+  }
+
+  // SSRF network-access config (ssrf.json) — user-global, mirroring grants.
+  const [ssrfAllow, setSsrAllow] = useState<string[]>([])
+  const [ssrfBlockExtra, setSsrBlockExtra] = useState<string[]>([])
+  const [ssrfLoaded, setSsrLoaded] = useState(false)
+  const [ssrfAllowInput, setSsrAllowInput] = useState('')
+  const [ssrfBlockInput, setSsrBlockInput] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    window.electronAPI.getSsrConfig().then((r) => {
+      if (alive) { setSsrAllow(r.allow); setSsrBlockExtra(r.block_extra); setSsrLoaded(true) }
+    }).catch(() => { if (alive) setSsrLoaded(true) })
+    return () => { alive = false }
+  }, [])
+
+  const commitSsr = async (allow: string[], blockExtra: string[]) => {
+    setSsrAllow(allow); setSsrBlockExtra(blockExtra)
+    try {
+      const r = await window.electronAPI.setSsrConfig({ allow, block_extra: blockExtra })
+      setSsrAllow(r.allow); setSsrBlockExtra(r.block_extra)
+    } catch { /* keep the optimistic list on failure */ }
+  }
+
+  const addSsrAllow = () => {
+    const v = ssrfAllowInput.trim()
+    if (!v) return
+    if (!ssrfAllow.includes(v)) commitSsr([...ssrfAllow, v], ssrfBlockExtra)
+    setSsrAllowInput('')
+  }
+
+  const addSsrBlockExtra = () => {
+    const v = ssrfBlockInput.trim()
+    if (!v) return
+    if (!ssrfBlockExtra.includes(v)) commitSsr(ssrfAllow, [...ssrfBlockExtra, v])
+    setSsrBlockInput('')
   }
 
   const patch = (id: string, fields: Partial<ModelEntry>) =>
@@ -505,6 +551,86 @@ export default function SettingsView() {
                 >{t('settings.sandbox.forbidRead.addFolder')}</button>
 
                 <p className="mt-3 text-[11px] text-ink-faint">{t('settings.sandbox.forbidRead.footnote')}</p>
+              </div>
+
+              <div className="mt-6 pt-4 border-t border-surface-border">
+                <p className="text-sm font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.title')}</p>
+                <p className="text-xs text-ink-faint mb-3">{t('settings.sandbox.ssrf.hint')}</p>
+
+                {/* Allowed hosts */}
+                <p className="text-xs font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.allow.title')}</p>
+                {!ssrfLoaded ? (
+                  <p className="text-sm text-ink-faint py-2">{t('common.loading')}</p>
+                ) : ssrfAllow.length === 0 ? (
+                  <p className="text-sm text-ink-faint py-2">{t('settings.sandbox.ssrf.allow.none')}</p>
+                ) : (
+                  <div className="space-y-1 mb-1">
+                    {ssrfAllow.map((a) => (
+                      <div key={a} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-1.5">
+                        <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={a}>{a}</span>
+                        {a.includes('169.254') && (
+                          <span className="text-[10px] text-amber-600 shrink-0">{t('settings.sandbox.ssrf.metadataWarning')}</span>
+                        )}
+                        <button onClick={() => commitSsr(ssrfAllow.filter((x) => x !== a), ssrfBlockExtra)}
+                          className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0">{t('settings.sandbox.ssrf.remove')}</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="flex gap-2 mt-2">
+                  <input
+                    value={ssrfAllowInput}
+                    onChange={(e) => setSsrAllowInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') addSsrAllow() }}
+                    placeholder={t('settings.sandbox.ssrf.placeholder')}
+                    className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-surface-raised border border-surface-border rounded-lg text-ink outline-none focus:border-ink-faint"
+                  />
+                  <button onClick={addSsrAllow}
+                    className="px-3 py-1.5 text-sm border border-dashed border-surface-border rounded-lg text-ink-soft hover:text-ink shrink-0">{t('settings.sandbox.ssrf.add')}</button>
+                </div>
+
+                {/* block_extra — same pattern, state ssrfBlockExtra / ssrfBlockInput */}
+                <div className="mt-4">
+                  <p className="text-xs font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.blockExtra.title')}</p>
+                  {!ssrfLoaded ? (
+                    <p className="text-sm text-ink-faint py-2">{t('common.loading')}</p>
+                  ) : ssrfBlockExtra.length === 0 ? (
+                    <p className="text-sm text-ink-faint py-2">{t('settings.sandbox.ssrf.blockExtra.none')}</p>
+                  ) : (
+                    <div className="space-y-1 mb-1">
+                      {ssrfBlockExtra.map((b) => (
+                        <div key={b} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-1.5">
+                          <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={b}>{b}</span>
+                          <button onClick={() => commitSsr(ssrfAllow, ssrfBlockExtra.filter((x) => x !== b))}
+                            className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0">{t('settings.sandbox.ssrf.remove')}</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex gap-2 mt-2">
+                    <input
+                      value={ssrfBlockInput}
+                      onChange={(e) => setSsrBlockInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') addSsrBlockExtra() }}
+                      placeholder={t('settings.sandbox.ssrf.placeholder')}
+                      className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-surface-raised border border-surface-border rounded-lg text-ink outline-none focus:border-ink-faint"
+                    />
+                    <button onClick={addSsrBlockExtra}
+                      className="px-3 py-1.5 text-sm border border-dashed border-surface-border rounded-lg text-ink-soft hover:text-ink shrink-0">{t('settings.sandbox.ssrf.add')}</button>
+                  </div>
+                </div>
+
+                {/* Built-in denied ranges (read-only) */}
+                <div className="mt-4">
+                  <p className="text-xs font-semibold text-ink mb-1">{t('settings.sandbox.ssrf.defaults.title')}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {DEFAULT_BLOCKED_NETS.map((n) => (
+                      <span key={n} className="text-[10px] px-1.5 py-0.5 rounded bg-surface-raised border border-surface-border text-ink-faint font-mono">{n}</span>
+                    ))}
+                  </div>
+                </div>
+
+                <p className="mt-3 text-[11px] text-ink-faint">{t('settings.sandbox.ssrf.footnote')}</p>
               </div>
             </>
           ) : (
