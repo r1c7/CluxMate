@@ -264,7 +264,11 @@ def test_granted_folder_writable_then_restored():
         assert r.returncode == 0, r.stderr.decode(errors="replace")
         assert target.exists()
         # 2) restore_path raises it back to medium → low-IL child can't write.
+        #    Revocation removes the folder from the grant set BEFORE restore_path
+        #    (jsonrpc_server._set_grants), so the next _setup won't re-label it
+        #    low. Mirror that: drop the grant, then re-run.
         assert WindowsLowILSandbox.restore_path(str(granted)) is True
+        sb._grant_paths = []
         target2 = granted / "after-restore.txt"
         r2 = sb.run(argv=[], shell_cmd=f'echo no > {target2}', cwd=str(ws),
                     timeout=60, env=os.environ.copy())
