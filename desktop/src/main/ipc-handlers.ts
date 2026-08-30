@@ -3,7 +3,7 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { AgentBridge } from './agent-bridge'
 import * as sessionStore from './session-store'
@@ -137,6 +137,32 @@ function readForbidRead(): string[] {
 function writeForbidRead(paths: string[]): void {
   fs.mkdirSync(path.dirname(forbidReadPath()), { recursive: true })
   fs.writeFileSync(forbidReadPath(), JSON.stringify({ paths }, null, 2), 'utf-8')
+}
+
+// SSRF network-access config (ssrf.json) — user-global, mirrors
+// cluxmate/core/ssrf_config.py + cluxmate/core/jsonrpc_server.py::ssrf/config.
+// Like grants/forbid-read the desktop reads/writes the file directly so the
+// Settings UI works with zero live sessions. Unlike grants there is NO bridge
+// kill on change: the Python side re-reads the file per request (mtime cache),
+// so the next web_fetch picks it up immediately.
+function ssrfConfigPath(): string {
+  return path.join(app.getPath('home'), '.cluxmate', 'ssrf.json')
+}
+
+function readSsrConfig(): SsrConfigPayload {
+  try {
+    const data = JSON.parse(fs.readFileSync(ssrfConfigPath(), 'utf-8'))
+    const arr = (v: unknown) =>
+      Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+    return { allow: arr(data.allow), block_extra: arr(data.block_extra) }
+  } catch {
+    return { allow: [], block_extra: [] }
+  }
+}
+
+function writeSsrConfig(cfg: SsrConfigPayload): void {
+  fs.mkdirSync(path.dirname(ssrfConfigPath()), { recursive: true })
+  fs.writeFileSync(ssrfConfigPath(), JSON.stringify(cfg, null, 2), 'utf-8')
 }
 
 // Convert the legacy {providers, default_provider} schema to v2 {models,
@@ -828,6 +854,17 @@ export function registerIpcHandlers() {
       }
     }
     return { paths: next }
+  })
+
+  ipcMain.handle(IPC.SSRF_CONFIG_GET, () => readSsrConfig())
+
+  ipcMain.handle(IPC.SSRF_CONFIG_SET, (_, cfg: { allow?: string[]; block_extra?: string[] }) => {
+    const next: SsrConfigPayload = {
+      allow: Array.isArray(cfg?.allow) ? cfg.allow.filter((s): s is string => typeof s === 'string' && s.trim() !== '') : [],
+      block_extra: Array.isArray(cfg?.block_extra) ? cfg.block_extra.filter((s): s is string => typeof s === 'string' && s.trim() !== '') : [],
+    }
+    writeSsrConfig(next)
+    return next
   })
 
   ipcMain.handle(IPC.CHAT_SET_MODE, async (_, sid: string, mode: string) => {

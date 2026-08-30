@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import type {
   ElectronAPI, CreateSessionParams,
-  ChatResult, SessionStreamEvent,
+  ChatResult, SessionStreamEvent, SsrConfigPayload,
 } from '../shared/types'
 
 const api: ElectronAPI = {
@@ -38,6 +38,8 @@ const api: ElectronAPI = {
   setSandboxGrants: (paths: string[]) => ipcRenderer.invoke(IPC.SANDBOX_GRANTS_SET, paths),
   getForbidRead: () => ipcRenderer.invoke(IPC.SANDBOX_FORBID_READ_GET),
   setForbidRead: (paths: string[]) => ipcRenderer.invoke(IPC.SANDBOX_FORBID_READ_SET, paths),
+  getSsrConfig: () => ipcRenderer.invoke(IPC.SSRF_CONFIG_GET),
+  setSsrConfig: (cfg: SsrConfigPayload) => ipcRenderer.invoke(IPC.SSRF_CONFIG_SET, cfg),
 
   listCheckpoints: (sessionId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_LIST, sessionId),
   diffCheckpoint: (sessionId: string, checkpointId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_DIFF, sessionId, checkpointId),

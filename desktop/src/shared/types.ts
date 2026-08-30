@@ -589,6 +589,14 @@ export interface TurnContext {
   steps: TurnStep[]
 }
 
+// Network-access rules for the SSRF guard (~/.cluxmate/ssrf.json). Entries
+// are host, host:port, [ipv6]:port, IP, or CIDR. allow wins over every block;
+// the default denied ranges (RFC1918/loopback/metadata/...) cannot be removed.
+export interface SsrConfigPayload {
+  allow: string[]
+  block_extra: string[]
+}
+
 declare global {
   interface Window {
     electronAPI: ElectronAPI
@@ -660,6 +668,14 @@ export interface ElectronAPI {
   // whole set (no Windows label reconcile needed).
   getForbidRead: () => Promise<{ paths: string[] }>
   setForbidRead: (paths: string[]) => Promise<{ paths: string[] }>
+
+  // Network-access rules for the SSRF guard (~/.cluxmate/ssrf.json). Entries
+  // are host, host:port, [ipv6]:port, IP, or CIDR. allow wins over every block;
+  // the default denied ranges (RFC1918/loopback/metadata/...) cannot be removed.
+  // get reads the current set; set replaces it. Changes take effect on the next
+  // web request — no session restart.
+  getSsrConfig: () => Promise<SsrConfigPayload>
+  setSsrConfig: (cfg: SsrConfigPayload) => Promise<SsrConfigPayload>
 
   listCheckpoints: (sessionId: string) => Promise<Checkpoint[]>
   diffCheckpoint: (sessionId: string, checkpointId: string) => Promise<CheckpointFileDiff[]>
