@@ -33,11 +33,26 @@ DEFAULT_BLOCKED_NETS = [
         "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
         "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
         "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
-        "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96",
+        "::/128", "::/96", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96",
     )
 ]
 
 _SCHEMES = ("http", "https")
+
+
+def _idna_encode(text: str) -> str:
+    """IDNA-encode *text* so host handling matches httpx's own encoding.
+
+    httpx IDNA-encodes hostnames before connecting; the guard resolves the
+    encoded form so allow entries and DNS resolution agree with the wire.
+    ASCII hosts (IP literals, ``localhost``) are returned unchanged; a host
+    that cannot be encoded is returned raw and will fail resolution
+    (fail-closed).
+    """
+    try:
+        return text.encode("idna").decode("ascii")
+    except UnicodeError:
+        return text
 
 
 class SSRFBlockedError(Exception):
@@ -108,9 +123,9 @@ def parse_entry(entry: str) -> _Entry | None:
             try:
                 return _Entry("ip", ipaddress.ip_address(host_part), port)
             except ValueError:
-                return _Entry("host", host_part, port)
+                return _Entry("host", _idna_encode(host_part), port)
         return None
-    return _Entry("host", low, None)
+    return _Entry("host", _idna_encode(low), None)
 
 
 def _resolve_ips(host: str) -> list | None:
@@ -129,7 +144,7 @@ def _resolve_ips(host: str) -> list | None:
         pass
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror:
+    except OSError:
         return None
     out: list = []
     seen: set[str] = set()
@@ -148,6 +163,8 @@ def _resolve_ips(host: str) -> list | None:
         mapped = getattr(addr, "ipv4_mapped", None)
         if mapped is not None:
             out.append(mapped)
+    if not out:
+        return None  # empty resolution result → fail-closed
     return out
 
 
@@ -168,10 +185,10 @@ def _entry_matches(entry: _Entry, host: str, port: int, ips: list) -> bool:
     return any(ip in entry.value for ip in ips)  # network
 
 
-def _blocked_message(url: str, host: str, ips: list) -> str:
+def _blocked_message(host: str, ips: list) -> str:
     ip_txt = ", ".join(str(ip) for ip in ips)
     return (
-        f"SSRF guard blocked request to '{url}' — target resolves to an "
+        f"SSRF guard blocked request to '{host}' — target resolves to an "
         f"internal/private address ({ip_txt}). To allow it, add "
         f"'{host}' in Settings → Sandbox → Network access"
     )
@@ -203,11 +220,12 @@ def validate_url(
         return f"Blocked scheme '{parsed.scheme}': only http/https are allowed"
     if not host:
         return f"URL has no host: {url}"
+    host = _idna_encode(host)  # httpx connects to the IDNA-encoded form
 
     ips = _resolve_ips(host)
     if ips is None:
         return (
-            f"SSRF guard blocked request to '{url}' — DNS resolution failed "
+            f"SSRF guard blocked request to '{host}' — DNS resolution failed "
             f"(fail-closed). To allow it, add '{host}' in Settings → Sandbox → "
             f"Network access"
         )
@@ -217,8 +235,8 @@ def validate_url(
             return None  # allow wins over every block
 
     if any(any(ip in net for ip in ips) for net in DEFAULT_BLOCKED_NETS):
-        return _blocked_message(url, host, ips)
+        return _blocked_message(host, ips)
     for e in (parse_entry(b) for b in (block_extra or [])):
         if e is not None and _entry_matches(e, host, port, ips):
-            return _blocked_message(url, host, ips)
+            return _blocked_message(host, ips)
     return None

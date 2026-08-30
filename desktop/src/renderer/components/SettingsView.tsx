@@ -5,6 +5,7 @@ import { FONT_OPTIONS } from '../fonts'
 import { useT } from '../useI18n'
 import type { MessageKey } from '../i18n'
 import { reasoningValuesFor } from '../../shared/reasoning'
+import { isValidSsrEntry } from '../../shared/ssrf'
 import type { ModelEntry } from '../../shared/types'
 
 type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'language'
@@ -69,7 +70,7 @@ const DEFAULT_BLOCKED_NETS = [
   '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
   '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16',
   '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4',
-  '::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8', '64:ff9b::/96',
+  '::/128', '::/96', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8', '64:ff9b::/96',
 ]
 
 function newId(): string {
@@ -571,6 +572,9 @@ export default function SettingsView() {
                         {a.includes('169.254') && (
                           <span className="text-[10px] text-amber-600 shrink-0">{t('settings.sandbox.ssrf.metadataWarning')}</span>
                         )}
+                        {!isValidSsrEntry(a) && (
+                          <span className="text-[10px] text-amber-600 shrink-0">{t('settings.sandbox.ssrf.invalidFormat')}</span>
+                        )}
                         <button onClick={() => commitSsr(ssrfAllow.filter((x) => x !== a), ssrfBlockExtra)}
                           className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0">{t('settings.sandbox.ssrf.remove')}</button>
                       </div>
@@ -601,6 +605,9 @@ export default function SettingsView() {
                       {ssrfBlockExtra.map((b) => (
                         <div key={b} className="flex items-center gap-2 bg-surface-raised rounded-lg border border-surface-border px-3 py-1.5">
                           <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={b}>{b}</span>
+                          {!isValidSsrEntry(b) && (
+                            <span className="text-[10px] text-amber-600 shrink-0">{t('settings.sandbox.ssrf.invalidFormat')}</span>
+                          )}
                           <button onClick={() => commitSsr(ssrfAllow, ssrfBlockExtra.filter((x) => x !== b))}
                             className="text-xs text-red-600 hover:text-red-700 px-2 py-1 shrink-0">{t('settings.sandbox.ssrf.remove')}</button>
                         </div>

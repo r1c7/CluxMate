@@ -109,3 +109,42 @@ def test_allow_wins_over_block_extra():
 def test_malformed_bracket_returns_message():
     err = validate_url("http://[::1:80/")
     assert isinstance(err, str) and err
+
+
+# ── I1: IPv4-compatible IPv6 (::/96) is default-blocked ───────────────
+def test_ipv4_compatible_ipv6_blocked():
+    # RFC 4291 IPv4-compatible form of 127.0.0.1
+    assert blocked("http://[::127.0.0.1]:6379/")
+
+
+# ── I2: resolution failure is fail-closed, including OSError/empty ─────
+def test_dns_empty_result_fails_closed(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [])
+    assert blocked("http://example.invalid/")
+
+
+def test_dns_oserror_fails_closed(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("EAI_SYSTEM")
+    monkeypatch.setattr(socket, "getaddrinfo", boom)
+    assert blocked("http://example.invalid/")
+
+
+# ── I3: IDN (non-ASCII) hostnames are IDNA-encoded like httpx ─────────
+def test_idn_hostname_is_encoded(monkeypatch):
+    captured = {}
+    def fake_getaddrinfo(host, port, *a, **k):
+        captured["host"] = host
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    assert allowed("http://müller.example/")
+    assert captured["host"] == "xn--mller-kva.example"
+
+
+def test_idn_allow_entry_matches(monkeypatch):
+    # Resolve to an internal address so ONLY the IDN allow entry can rescue
+    # the request (a public IP would make the test pass even if allow failed).
+    def fake_getaddrinfo(host, port, *a, **k):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    assert allowed("http://müller.example/", allow=["müller.example"])
