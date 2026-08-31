@@ -2,7 +2,7 @@
 
 import threading
 
-from cluxmate.core.agent import AgentCallbacks, AgentLoop, AgentResult
+from cluxmate.core.agent import AgentCallbacks, AgentLoop, AgentResult, ToolDecision
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.config import ConfigManager
 from cluxmate.core.reasoning import default_for, options_for
@@ -323,7 +323,7 @@ class TuiController:
                     call_id: str,
                     risk_level: str,
                     categories: frozenset[str] = frozenset(),
-                ) -> bool:
+                ) -> ToolDecision:
                     # Auto-approved by the policy (mode + always_allow)? Then no
                     # user interaction needed — modes like acceptEdits/yolo are
                     # what make write/dangerous tools run without prompting.
@@ -332,15 +332,16 @@ class TuiController:
                     if policy is not None and policy.is_auto_approved(
                         name, risk_level, escalated=escalated, categories=categories
                     ):
-                        return True
+                        return ToolDecision(True, "auto")
                     # Otherwise hand off to the UI's interactive approval
                     # (TUI shows an inline y/n prompt; a None resolver means
                     # the tool can't be approved → deny).
                     if on_tool_approval is not None:
-                        return bool(await on_tool_approval(
+                        approved = bool(await on_tool_approval(
                             name, params, call_id, risk_level,
                         ))
-                    return False
+                        return ToolDecision(approved, "user" if approved else "denied")
+                    return ToolDecision(False, "denied")
 
                 async def ask_question(
                     self, questions: list[dict], call_id: str

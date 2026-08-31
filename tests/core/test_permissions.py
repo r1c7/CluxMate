@@ -268,13 +268,13 @@ async def test_subagent_dangerous_denied_outside_yolo(tmp_path):
     scoped = shared.scoped("child-1")
 
     # safe + write autonomously run even in default mode.
-    assert await scoped.on_tool_start("read_file", {}, "c1", "safe") is True
-    assert await scoped.on_tool_start("write_file", {}, "c2", "write") is True
+    assert (await scoped.on_tool_start("read_file", {}, "c1", "safe")).approved is True
+    assert (await scoped.on_tool_start("write_file", {}, "c2", "write")).approved is True
     # dangerous is denied (no prompt) outside yolo.
-    assert await scoped.on_tool_start("bash", {"command": "rm -rf /"}, "c3", "dangerous") is False
+    assert (await scoped.on_tool_start("bash", {"command": "rm -rf /"}, "c3", "dangerous")).approved is False
 
     policy.set_mode("acceptEdits")
-    assert await scoped.on_tool_start("delete_file", {}, "c4", "dangerous") is False
+    assert (await scoped.on_tool_start("delete_file", {}, "c4", "dangerous")).approved is False
 
 
 @pytest.mark.asyncio
@@ -287,5 +287,5 @@ async def test_subagent_dangerous_allowed_in_yolo(tmp_path):
     scoped = shared.scoped("child-1")
 
     # yolo: subagent dangerous runs, matching the root yolo semantics.
-    assert await scoped.on_tool_start("bash", {"command": "rm -rf x"}, "c1", "dangerous") is True
-    assert await scoped.on_tool_start("delete_file", {}, "c2", "dangerous") is True
+    assert (await scoped.on_tool_start("bash", {"command": "rm -rf x"}, "c1", "dangerous")).approved is True
+    assert (await scoped.on_tool_start("delete_file", {}, "c2", "dangerous")).approved is True

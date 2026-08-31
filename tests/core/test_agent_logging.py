@@ -145,6 +145,37 @@ async def test_request_header_records_envelope():
 
 
 @pytest.mark.asyncio
+async def test_request_header_records_sandbox_state():
+    log = make_log()
+    agent = AgentLoop(
+        model="test",
+        provider=RecordingProvider([LLMResponse(text="x", stop_reason="end_turn")]),
+        tools=ToolBridge(),
+        system_prompt="s",
+        session_log=log,
+        sandbox="bwrap",
+    )
+    await agent.run("Hi")
+    h = next(e for e in log.events if e.type == "request/header").data["header"]
+    assert h["config"]["sandbox"] == "bwrap"
+
+
+@pytest.mark.asyncio
+async def test_request_header_defaults_sandbox_off():
+    log = make_log()
+    agent = AgentLoop(
+        model="test",
+        provider=RecordingProvider([LLMResponse(text="x", stop_reason="end_turn")]),
+        tools=ToolBridge(),
+        system_prompt="s",
+        session_log=log,
+    )
+    await agent.run("Hi")
+    h = next(e for e in log.events if e.type == "request/header").data["header"]
+    assert h["config"]["sandbox"] == "off"
+
+
+@pytest.mark.asyncio
 async def test_request_header_change_when_system_prompt_changes():
     log = make_log()
     agent = AgentLoop(

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from cluxmate.core.agent import AgentCallbacks, AgentLoop
+from cluxmate.core.agent import AgentCallbacks, AgentLoop, ToolDecision
 from cluxmate.core.providers.base import LLMResponse, ToolCall
 from cluxmate.tools.base import BaseTool, ToolBridge
 from cluxmate.tools._sandbox import (
@@ -160,7 +160,7 @@ class _RiskRecorder(AgentCallbacks):
 
     async def on_tool_start(self, name, params, call_id, risk_level, categories=frozenset()):
         self.starts.append((name, risk_level))
-        return True
+        return ToolDecision(True, "auto")
 
 
 class _FakeProvider:

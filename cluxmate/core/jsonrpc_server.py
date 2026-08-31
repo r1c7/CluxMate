@@ -20,7 +20,7 @@ import time
 import traceback
 from typing import Any
 
-from cluxmate.core.agent import AgentCallbacks, AgentLoop, NETWORK_FALLBACK_TEXT
+from cluxmate.core.agent import AgentCallbacks, AgentLoop, NETWORK_FALLBACK_TEXT, ToolDecision
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.checkpoints import CheckpointManager
 from cluxmate.core.grants import GrantStore
@@ -135,6 +135,7 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._policy = policy
         self._tool_events: dict[str, threading.Event] = {}
         self._tool_decisions: dict[str, bool] = {}
+        self._tool_decision_kind: dict[str, str] = {}
         self._tool_selections: dict[str, list[int]] = {}
         self._pending_names: dict[str, str] = {}
         self._pending_risk: dict[str, str] = {}
@@ -170,6 +171,11 @@ class JsonRpcCallbacks(AgentCallbacks):
                 elif risk == "write":
                     self._policy.add_always_allow(name)
         self._tool_decisions[call_id] = approved
+        # Record HOW it was settled for the audit trail: "always" when the user
+        # clicked "总是允许", else "user" (approved) or "denied".
+        self._tool_decision_kind[call_id] = (
+            "always" if (always and approved) else ("user" if approved else "denied")
+        )
         if selected is not None:
             self._tool_selections[call_id] = selected
         evt = self._tool_events.get(call_id)
@@ -222,7 +228,7 @@ class JsonRpcCallbacks(AgentCallbacks):
         call_id: str,
         risk_level: str,
         categories: frozenset[str] = frozenset(),
-    ) -> bool:
+    ) -> ToolDecision:
         if self._cancelled:
             raise _CancelledError()
         # Safe (read-only) tools never prompt. Most stay hidden in the root UI
@@ -239,7 +245,7 @@ class JsonRpcCallbacks(AgentCallbacks):
                         "auto_approved": True, "visible": True,
                     },
                 })
-            return True
+            return ToolDecision(True, "auto")
 
         escalated = params.get("sandbox_permissions") == "danger-full-access"
         auto = self._policy.is_auto_approved(
@@ -265,7 +271,7 @@ class JsonRpcCallbacks(AgentCallbacks):
         })
 
         if auto:
-            return True
+            return ToolDecision(True, "auto")
 
         self._pending_names[call_id] = name
         self._pending_risk[call_id] = risk_level
@@ -285,7 +291,9 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._pending_categories.pop(call_id, None)
         if self._cancelled:
             raise _CancelledError()
-        return self._tool_decisions.pop(call_id, False)
+        approved = self._tool_decisions.pop(call_id, False)
+        kind = self._tool_decision_kind.pop(call_id, "denied")
+        return ToolDecision(approved, kind)
 
     async def on_tool_end(self, call_id: str, result: ToolResult) -> None:
         _write_dict({
@@ -392,7 +400,7 @@ class ScopedCallbacks(AgentCallbacks):
         call_id: str,
         risk_level: str,
         categories: frozenset[str] = frozenset(),
-    ) -> bool:
+    ) -> ToolDecision:
         # Honor a turn-level cancel even inside a subagent.
         if self._shared._cancelled:
             raise _CancelledError()
@@ -416,7 +424,7 @@ class ScopedCallbacks(AgentCallbacks):
                 "auto_approved": not denied, "agent_id": self._agent_id,
             },
         })
-        return not denied
+        return ToolDecision(not denied, "denied" if denied else "auto")
 
     async def on_tool_end(self, call_id: str, result: ToolResult) -> None:
         _write_dict({

@@ -173,6 +173,20 @@ def _dump_request(
     sys.stderr.flush()
 
 
+@dataclass(frozen=True)
+class ToolDecision:
+    """Outcome of a tool-approval prompt, recorded in the audit trail.
+
+    ``approved`` is whether the call runs. ``decision`` distinguishes HOW it was
+    settled: ``auto`` (no human — safe/yolo/acceptEdits/prior always-allow),
+    ``user`` (human approved), ``always`` (human chose "always allow"), or
+    ``denied``.
+    """
+
+    approved: bool
+    decision: str  # "auto" | "user" | "always" | "denied"
+
+
 class AgentCallbacks:
     """Callback hooks for the agent loop. All methods are optional no-ops by default."""
 
@@ -183,13 +197,13 @@ class AgentCallbacks:
         call_id: str,
         risk_level: str,
         categories: frozenset[str] = frozenset(),
-    ) -> bool:
-        """Called before tool execution. Return True to proceed, False to skip.
+    ) -> ToolDecision:
+        """Called before tool execution. Return a :class:`ToolDecision`.
 
         ``categories`` is the set of matched dangerous-category labels (bash
         only; empty for other tools) — used for category-scoped always-allow.
         """
-        return True
+        return ToolDecision(True, "auto")
 
     async def on_tool_end(
         self, call_id: str, result: "ToolResult"
@@ -311,6 +325,7 @@ class AgentLoop:
         context_window: int = 128_000,
         session_log: SessionLog | None = None,
         mode: str = "default",
+        sandbox: str = "off",
         hooks: HookManager | None = None,
     ):
         self.model = model
@@ -331,6 +346,11 @@ class AgentLoop:
         # in request/header.config so a mid-session mode switch is an explicit,
         # diffable change rather than only an opaque system-prompt text change.
         self.mode = mode
+        # Effective shell-sandbox state ("off" / "bwrap" / "seatbelt" /
+        # "windows-lowil" / "fail-closed") — recorded in request/header.config as
+        # audit metadata (NOT model-visible; the model learns the boundary only
+        # empirically from denials). The builder computes the real value.
+        self.sandbox = sandbox
         # Current turn/step, set only while a logged run() is in flight so the
         # per-step helpers know where to place assistant/tool events.
         self._log_turn: int | None = None
@@ -400,8 +420,21 @@ class AgentLoop:
         }
         if error is not None:
             data["error"] = error
-        self.session_log.append("tool/result", data, surface_op=APPEND)
+        # Audit metadata (NOT model-visible — the surface only reads `message`):
+        # the risk level + destructive categories (what was asked), and the
+        # decision (auto/user/always/denied) + escalation flag (how it was
+        # answered). These coexist with `message` as sibling fields.
         meta = self._log_tool_meta.get(call_id)
+        if meta is not None:
+            if meta.get("riskLevel") is not None:
+                data["riskLevel"] = meta["riskLevel"]
+            if meta.get("categories"):
+                data["categories"] = meta["categories"]
+            if meta.get("decision") is not None:
+                data["decision"] = meta["decision"]
+            if meta.get("escalated"):
+                data["escalated"] = True
+        self.session_log.append("tool/result", data, surface_op=APPEND)
         if meta is not None:
             meta["logged"] = True
 
@@ -766,6 +799,10 @@ class AgentLoop:
                         "max_tokens": self.provider.max_tokens(),
                         "context_window": self.context_window,
                         "mode": self.mode,
+                        # Effective shell-sandbox state — audit metadata only (see
+                        # AgentLoop.sandbox). A mode switch to/from yolo re-arms or
+                        # disarms the sandbox, so it surfaces as a `change` header.
+                        "sandbox": self.sandbox,
                         # Reasoning effort is model-visible (it changes the request
                         # the provider sends), so it belongs in the logged envelope
                         # — a switch mid-session then surfaces as a `change` header.
@@ -1048,13 +1085,14 @@ class AgentLoop:
                     )
 
                 # Assess risk for all tool calls
-                approvals: list[tuple[Any, str, frozenset[str]]] = []
+                approvals: list[tuple[Any, str, frozenset[str], bool]] = []
                 for tc in tool_calls:
                     if tc.id in malformed:
                         continue
                     tool = self.tools._tools.get(tc.name)
                     risk = getattr(tool, 'risk_level', 'safe')
                     categories: frozenset[str] = frozenset()
+                    escalated = False
                     if tc.name == "bash" and hasattr(tool, 'classify'):
                         cc = tool.classify(tc.input.get("command", ""))
                         risk = cc.level
@@ -1087,7 +1125,8 @@ class AgentLoop:
                         # call (format/mkfs/…) to plain dangerous.
                         if risk not in ("dangerous", "critical"):
                             risk = "dangerous"
-                    approvals.append((tc, risk, categories))
+                        escalated = True
+                    approvals.append((tc, risk, categories, escalated))
 
                 # Collect permissions sequentially (UI may block on each).
                 # Malformed calls never prompt — no valid params to show.
@@ -1098,15 +1137,20 @@ class AgentLoop:
                 hook_feedback: list[str] = []
                 if callbacks:
                     self._log_stage = STAGE_APPROVAL
-                    for tc, risk, categories in approvals:
+                    for tc, risk, categories, escalated in approvals:
                         if tc.id in malformed:
                             continue
-                        if not await callbacks.on_tool_start(
+                        decision = await callbacks.on_tool_start(
                             tc.name, tc.input, tc.id, risk, categories
-                        ):
+                        )
+                        meta = self._log_tool_meta[tc.id]
+                        meta["riskLevel"] = risk
+                        meta["categories"] = sorted(categories)
+                        meta["escalated"] = escalated
+                        if not decision.approved:
                             denied.add(tc.id)
-                            meta = self._log_tool_meta[tc.id]
                             meta["status"] = "denied"
+                            meta["decision"] = decision.decision
                             meta["result"] = ToolResult(
                                 tool_call_id=tc.id,
                                 name=tc.name,
@@ -1114,7 +1158,8 @@ class AgentLoop:
                                 is_error=True,
                             )
                         else:
-                            self._log_tool_meta[tc.id]["status"] = "approved"
+                            meta["status"] = "approved"
+                            meta["decision"] = decision.decision
 
                 # Execute approved tools in parallel, denied tools get error
                 # results. Each call fires its own on_tool_end the moment it

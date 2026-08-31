@@ -158,6 +158,9 @@ class AgentBuilder:
         # the toolset — it hard-isolates to read-only tools so writes can't be
         # issued at all. The other modes affect approval, not the tools present.
         self._mode = "default"
+        # Effective shell-sandbox state, computed in _get_tools and passed to the
+        # AgentLoop for request/header.config audit metadata.
+        self._sandbox_state = "off"
         # Per-turn tracker (an AgentCallbacks-like object exposing
         # on_agent_start/on_agent_end/scoped). Set by set_tracker each turn.
         self._tracker: Any = None
@@ -461,6 +464,15 @@ class AgentBuilder:
                 )
                 if sandbox_enabled else None
             )
+            # Effective state for the request/header audit field: off (yolo /
+            # env opt-out), the backend short name (bwrap/seatbelt/windows-lowil),
+            # or fail-closed (enabled but no backend → bash refuses to run).
+            if not sandbox_enabled:
+                self._sandbox_state = "off"
+            elif sandbox is None:
+                self._sandbox_state = "fail-closed"
+            else:
+                self._sandbox_state = sandbox.name
             tools.extend([
                 BashTool(
                     workdir=self._cwd,
@@ -756,6 +768,7 @@ class AgentBuilder:
             context_window=self._context_window(),
             session_log=session_log,
             mode=self._mode,
+            sandbox=self._sandbox_state,
             hooks=self._hooks_manager(),
         )
 
@@ -842,6 +855,7 @@ class AgentBuilder:
             context_window=self._context_window(),
             session_log=child._session_log,
             mode=self._mode,
+            sandbox=child._sandbox_state,
             hooks=child._hooks_manager(),
         )
 
