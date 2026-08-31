@@ -75,7 +75,7 @@ export interface ChatSendOptions {
   reasoningEffort: string | null
 }
 
-export type RiskLevel = 'safe' | 'write' | 'dangerous'
+export type RiskLevel = 'safe' | 'write' | 'dangerous' | 'critical'
 
 // agent_id tags which agent in the tree emitted the event. "root" (or absent,
 // for older streams) is the top-level agent; any other id is a subagent node.
@@ -88,6 +88,12 @@ export interface ToolStartEvent {
   // true when the server auto-approved (safe risk, or "always approve"
   // previously granted for this tool) — no permission prompt is shown.
   auto_approved?: boolean
+  // true when the "总是允许" button should be offered for this call — false for
+  // sandbox escalation and dangerous tools outside the always-allowable set.
+  always_allowable?: boolean
+  // Matched dangerous-category labels (bash only; e.g. ["rm"]) — the UI renders
+  // "总是允许 rm" so the grant is category-scoped, not whole-tool.
+  categories?: string[]
   // true when a safe (auto-approved, normally hidden) tool should still render
   // a running card in the root UI — e.g. web_search/web_fetch, so a multi-minute
   // network call shows progress instead of an empty spinner.
@@ -301,6 +307,11 @@ export interface PermissionRequest {
   tool_name: string
   params: Record<string, unknown>
   risk_level: RiskLevel
+  // Whether the "总是允许" button should render (server-computed; false for
+  // escalation and non-always-allowable dangerous tools).
+  always_allowable?: boolean
+  // Matched dangerous-category labels (bash only) shown in the always-allow button.
+  categories?: string[]
 }
 
 // A pending ask_user_question prompt shown by the QuestionCard.
@@ -317,12 +328,14 @@ export interface PendingQuestion {
 export type PermissionMode = 'plan' | 'default' | 'acceptEdits' | 'yolo'
 
 // Per-session tool-approval policy. `mode` is per-session (not persisted);
-// always_allow_tools is persisted per-project. accept_edits is a derived
-// backward-compat field (true iff mode === 'acceptEdits').
+// always_allow_tools (write tier) and always_allow_dangerous_tools (dangerous
+// tier) are persisted per-project. accept_edits is a derived backward-compat
+// field (true iff mode === 'acceptEdits').
 export interface Permissions {
   mode: PermissionMode
   accept_edits: boolean
   always_allow_tools: string[]
+  always_allow_dangerous_tools: string[]
 }
 
 // One active lifecycle hook, normalized from settings.json (global + project).

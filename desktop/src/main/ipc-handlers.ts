@@ -57,24 +57,27 @@ function sameCwd(a: string, b: string): boolean {
 // Lives at <cwd>/.cluxmate/permissions.json so "accept edits" is per-project
 // and does not follow the user to a different working directory.
 // mode is per-session (never persisted) — a cold bridge always reports
-// 'default'. Only always_allow_tools lives on disk.
-interface ProjectPermissions { mode: string; accept_edits: boolean; always_allow_tools: string[] }
+// 'default'. always_allow_tools (write tier) and always_allow_dangerous_tools
+// (dangerous tier) live on disk.
+interface ProjectPermissions { mode: string; accept_edits: boolean; always_allow_tools: string[]; always_allow_dangerous_tools: string[] }
 
 function permissionsPath(cwd: string): string {
   return path.join(cwd, '.cluxmate', 'permissions.json')
 }
 
 function readProjectPermissions(cwd: string): ProjectPermissions {
-  if (!cwd) return { mode: 'default', accept_edits: false, always_allow_tools: [] }
+  const empty = { mode: 'default', accept_edits: false, always_allow_tools: [], always_allow_dangerous_tools: [] }
+  if (!cwd) return empty
   try {
     const p = JSON.parse(fs.readFileSync(permissionsPath(cwd), 'utf-8'))
     return {
       mode: 'default',
       accept_edits: false,
       always_allow_tools: Array.isArray(p.always_allow_tools) ? p.always_allow_tools : [],
+      always_allow_dangerous_tools: Array.isArray(p.always_allow_dangerous_tools) ? p.always_allow_dangerous_tools : [],
     }
   } catch {
-    return { mode: 'default', accept_edits: false, always_allow_tools: [] }
+    return empty
   }
 }
 

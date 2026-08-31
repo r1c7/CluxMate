@@ -1066,7 +1066,7 @@ export const useStore = create<AppState>((set, get) => ({
             }
           } else {
             css.pendingPermission = !autoApproved
-              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level }
+              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level, always_allowable: event.always_allowable, categories: event.categories }
               : css.pendingPermission
           }
         }
@@ -1766,7 +1766,7 @@ export const useStore = create<AppState>((set, get) => ({
             css.pendingBatchEdit = { call_id: event.call_id, tool_name: event.name, edits, risk_level: event.risk_level }
           } else {
             css.pendingPermission = !autoApproved
-              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level }
+              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level, always_allowable: event.always_allowable, categories: event.categories }
               : css.pendingPermission
           }
         }

@@ -177,9 +177,18 @@ class AgentCallbacks:
     """Callback hooks for the agent loop. All methods are optional no-ops by default."""
 
     async def on_tool_start(
-        self, name: str, params: dict[str, Any], call_id: str, risk_level: str
+        self,
+        name: str,
+        params: dict[str, Any],
+        call_id: str,
+        risk_level: str,
+        categories: frozenset[str] = frozenset(),
     ) -> bool:
-        """Called before tool execution. Return True to proceed, False to skip."""
+        """Called before tool execution. Return True to proceed, False to skip.
+
+        ``categories`` is the set of matched dangerous-category labels (bash
+        only; empty for other tools) — used for category-scoped always-allow.
+        """
         return True
 
     async def on_tool_end(
@@ -1039,16 +1048,17 @@ class AgentLoop:
                     )
 
                 # Assess risk for all tool calls
-                approvals: list[tuple[Any, str]] = []
+                approvals: list[tuple[Any, str, frozenset[str]]] = []
                 for tc in tool_calls:
                     if tc.id in malformed:
                         continue
                     tool = self.tools._tools.get(tc.name)
                     risk = getattr(tool, 'risk_level', 'safe')
-                    if tc.name == "bash" and hasattr(tool, 'assess_command_risk'):
-                        risk = tool.assess_command_risk(
-                            tc.input.get("command", "")
-                        )
+                    categories: frozenset[str] = frozenset()
+                    if tc.name == "bash" and hasattr(tool, 'classify'):
+                        cc = tool.classify(tc.input.get("command", ""))
+                        risk = cc.level
+                        categories = cc.categories
                     # Sandbox escalation: `sandbox_permissions` + `justification`
                     # raise this call's risk to dangerous so the approval prompt
                     # fires BEFORE anything runs. A malformed pairing is rejected
@@ -1072,8 +1082,12 @@ class AgentLoop:
                                 is_error=True,
                             )
                             continue
-                        risk = "dangerous"
-                    approvals.append((tc, risk))
+                        # Escalation raises the call's risk to AT LEAST dangerous
+                        # so the approval prompt fires; never downgrade a critical
+                        # call (format/mkfs/…) to plain dangerous.
+                        if risk not in ("dangerous", "critical"):
+                            risk = "dangerous"
+                    approvals.append((tc, risk, categories))
 
                 # Collect permissions sequentially (UI may block on each).
                 # Malformed calls never prompt — no valid params to show.
@@ -1084,11 +1098,11 @@ class AgentLoop:
                 hook_feedback: list[str] = []
                 if callbacks:
                     self._log_stage = STAGE_APPROVAL
-                    for tc, risk in approvals:
+                    for tc, risk, categories in approvals:
                         if tc.id in malformed:
                             continue
                         if not await callbacks.on_tool_start(
-                            tc.name, tc.input, tc.id, risk
+                            tc.name, tc.input, tc.id, risk, categories
                         ):
                             denied.add(tc.id)
                             meta = self._log_tool_meta[tc.id]

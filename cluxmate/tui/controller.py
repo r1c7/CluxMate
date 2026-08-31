@@ -317,12 +317,21 @@ class TuiController:
                         on_progress({"type": "text_delta", "content": chunk})
 
                 async def on_tool_start(
-                    self, name: str, params: dict, call_id: str, risk_level: str
+                    self,
+                    name: str,
+                    params: dict,
+                    call_id: str,
+                    risk_level: str,
+                    categories: frozenset[str] = frozenset(),
                 ) -> bool:
                     # Auto-approved by the policy (mode + always_allow)? Then no
                     # user interaction needed — modes like acceptEdits/yolo are
                     # what make write/dangerous tools run without prompting.
-                    if policy is not None and policy.is_auto_approved(name, risk_level):
+                    # Escalation (danger-full-access) must never auto-approve.
+                    escalated = params.get("sandbox_permissions") == "danger-full-access"
+                    if policy is not None and policy.is_auto_approved(
+                        name, risk_level, escalated=escalated, categories=categories
+                    ):
                         return True
                     # Otherwise hand off to the UI's interactive approval
                     # (TUI shows an inline y/n prompt; a None resolver means

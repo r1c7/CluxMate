@@ -39,7 +39,7 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 - **无厂商锁定** —— 兼容任意 OpenAI 兼容 API：DeepSeek、Qwen、GLM、OpenAI、OpenRouter 或自建端点。可配置多个模型并随时切换；provider 故障不会让回合崩溃，超时、API 错误和网络故障都会被转译为优雅的、用户可见的消息。
 - **事件溯源会话，完全可追溯** —— 每个会话都是一个追加式事件日志；模型的对话历史*由它推导而来*，从不单独存储。每个 agent（主 agent *和*子 agent）的每一轮都被 `turn/start`/`turn/end` 包围，每一步都记录 `step/start`、`request/header` 和工具结果，因此任意一步实际发送的提示词都可以逐字重建、回放；上下文压缩只重写一个摘要区域，不会抹掉底层事件。参见下文 [可回放的会话](#可回放的会话)。
 - **稳定、缓存友好的上下文** —— 系统提示词不随会话变化：记忆、技能、模式以带标签的合成消息注入，请求前缀保持稳定，提示词缓存保持热度——UI 中还会展示每轮的缓存命中与延迟指标。
-- **分级风险权限** —— 每个工具声明风险等级（`safe` / `write` / `dangerous`）；四种模式（`plan` / `default` / `acceptEdits` / `yolo`）加上持久化的 always-allow 列表控制审批。`plan` 模式天然只读；危险命令永远需要确认。
+- **分级风险权限** —— 每个工具声明风险等级（`safe` / `write` / `dangerous` / `critical`）；四种模式（`plan` / `default` / `acceptEdits` / `yolo`）加上两套持久化的 always-allow 列表（write 级 + dangerous 级——`delete_file`，以及 `bash` 按类别如 `bash:rm` / `bash:python` / `bash:run`，不支持整体 `bash`）控制审批。运行代码（`python script.py`、`node app.js`、`npm run`、`./x.sh` 等）按 `dangerous` 处理，而不是 `safe`。`plan` 模式天然只读；危险命令除非显式"总是允许"，否则仍需确认，而高危命令（format/mkfs/dd 等）与沙箱提权永远需要逐次确认。
 - **双层沙箱** —— 文件写入/删除工具由进程内 **WriteFence**（先规范化再包含性检查）守护；模型生成的 `bash` 命令在**操作系统级沙箱**内运行（Windows 低完整性令牌、Linux bubblewrap、macOS Seatbelt）。沙箱**默认失败即关闭（fail-closed）**，只有 `yolo` 模式——唯一的显式豁免——会解除它。参见 [安全：沙箱](#安全沙箱)。
 - **网络访问守卫（SSRF）** —— `web_fetch` / `web_search` 在*所有*模式下（包括 `yolo`）都经过 SSRF 守卫：默认拒绝内网/私网地址（RFC1918、loopback、link-local、云 metadata 等），重定向的每一跳都重新校验，DNS 解析失败即关闭。允许/封禁规则可配置（`~/.cluxmate/ssrf.json`），桌面端 Settings → 沙箱 → 网络访问直接管理。参见 [安全：网络访问（SSRF 守卫）](#安全网络访问ssrf-守卫)。
 - **检查点与回滚** —— 每个工作目录都有一个 shadow-git 仓库，在每轮前后快照你的文件，因此可以撤销任意一轮——且是会话级的，其他会话的修改会以冲突形式呈现，绝不会被覆盖。
@@ -113,6 +113,7 @@ MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配�
 | `default` | `safe` 自动通过；`write` / `dangerous` 需确认 | 开启 |
 | `acceptEdits` | `write` 自动通过；`dangerous` 仍需确认 | 开启 |
 | `yolo` | 全部自动执行，包括 `dangerous` | **关闭**（豁免） |
+
 
 <p align="center">
   <img src="snapshots/sandbox.png" alt="桌面端的沙箱与权限视图" width="50%">

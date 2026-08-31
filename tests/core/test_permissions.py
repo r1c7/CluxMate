@@ -1,8 +1,9 @@
 """Tests for the project-scoped tool-approval policy.
 
-Safety-critical: 'dangerous' must never auto-approve, even under accept_edits or
-always-allow. Scope-critical: policy is per-cwd and must NOT leak across working
-directories."""
+Safety-critical: 'dangerous' must never auto-approve under accept_edits or the
+write-tier always-allow list; only an explicit dangerous-tier grant (delete_file
+/ bash) or yolo green-lights it, and sandbox escalation never auto-approves.
+Scope-critical: policy is per-cwd and must NOT leak across working directories."""
 
 import json
 
@@ -45,8 +46,113 @@ def test_always_allow_auto_approves_named_write_tool(tmp_path):
 def test_always_allow_does_not_cover_dangerous(tmp_path):
     p = PermissionPolicy(str(tmp_path))
     p.add_always_allow("bash")
-    # "always approve bash" must not green-light `rm -rf`.
+    # "always approve bash" at the WRITE tier must not green-light `rm -rf` —
+    # dangerous needs its own tier.
     assert p.is_auto_approved("bash", "dangerous") is False
+
+
+def test_always_allow_dangerous_covers_delete_file(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    p.add_always_allow_dangerous("delete_file")
+    assert p.is_auto_approved("delete_file", "dangerous") is True
+    # The dangerous grant is delete-specific: it must not leak to other tools.
+    assert p.is_auto_approved("bash", "dangerous") is False
+
+
+def test_bare_bash_grant_is_rejected_and_inert(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    # A bare "bash" is not a valid dangerous grant — only bash:<category> works.
+    p.add_always_allow_dangerous("bash")
+    assert p.snapshot()["always_allow_dangerous_tools"] == []
+    assert p.is_auto_approved("bash", "dangerous", categories=frozenset({"rm"})) is False
+    # The dangerous tier is separate from the write tier.
+    assert p.is_auto_approved("bash", "write") is False
+
+
+def test_bash_dangerous_category_scoped(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    p.add_always_allow_dangerous("bash:rm")
+    # Only the granted category auto-approves.
+    assert p.is_auto_approved("bash", "dangerous", categories=frozenset({"rm"})) is True
+    assert p.is_auto_approved("bash", "dangerous", categories=frozenset({"git-reset-hard"})) is False
+    # A multi-category command needs EVERY category granted.
+    assert p.is_auto_approved("bash", "dangerous", categories=frozenset({"rm", "git-reset-hard"})) is False
+    p.add_always_allow_dangerous("bash:git-reset-hard")
+    assert p.is_auto_approved("bash", "dangerous", categories=frozenset({"rm", "git-reset-hard"})) is True
+
+
+def test_add_always_allow_dangerous_accepts_bash_category(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    p.add_always_allow_dangerous("bash:rm")
+    assert p.snapshot()["always_allow_dangerous_tools"] == ["bash:rm"]
+
+
+def test_escalation_never_auto_approved_even_when_dangerous_allowed(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    p.add_always_allow_dangerous("bash:rm")
+    p.add_always_allow_dangerous("delete_file")
+    # danger-full-access bypasses the sandbox/fence: always prompts, regardless
+    # of the dangerous-tier grant.
+    assert p.is_auto_approved("bash", "dangerous", escalated=True, categories=frozenset({"rm"})) is False
+    assert p.is_auto_approved("delete_file", "dangerous", escalated=True) is False
+    # yolo still disarms everything, escalation included.
+    p.set_mode("yolo")
+    assert p.is_auto_approved("bash", "dangerous", escalated=True) is True
+
+
+def test_critical_never_auto_approved(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    p.add_always_allow_dangerous("bash")
+    # Device/system-level destruction (format/mkfs/dd/…) is never auto-approved,
+    # even when bash's dangerous tier is always-allowed.
+    assert p.is_auto_approved("bash", "critical") is False
+    assert p.is_auto_approved("bash", "critical", escalated=True) is False
+
+
+def test_critical_never_always_allowable(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    assert p.is_always_allowable("bash", "critical") is False
+    assert p.is_always_allowable("bash", "critical", escalated=True) is False
+
+
+def test_yolo_auto_approves_critical(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    p.set_mode("yolo")
+    assert p.is_auto_approved("bash", "critical") is True
+
+
+def test_add_always_allow_dangerous_rejects_unknown_tool(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    p.add_always_allow_dangerous("some_mcp_dangerous_tool")
+    assert p.is_auto_approved("some_mcp_dangerous_tool", "dangerous") is False
+    assert p.snapshot()["always_allow_dangerous_tools"] == []
+
+
+def test_is_always_allowable_matrix(tmp_path):
+    p = PermissionPolicy(str(tmp_path))
+    assert p.is_always_allowable("write_file", "write") is True
+    assert p.is_always_allowable("bash", "write") is True
+    assert p.is_always_allowable("delete_file", "dangerous") is True
+    assert p.is_always_allowable("bash", "dangerous") is True
+    # Escalation is never always-allowable.
+    assert p.is_always_allowable("bash", "dangerous", escalated=True) is False
+    assert p.is_always_allowable("write_file", "write", escalated=True) is False
+    # Non-allowable dangerous tools (e.g. MCP) and safe tools → no button.
+    assert p.is_always_allowable("some_mcp_tool", "dangerous") is False
+    assert p.is_always_allowable("read_file", "safe") is False
+    # Critical (device/system-level destruction) → never a button.
+    assert p.is_always_allowable("bash", "critical") is False
+
+
+def test_always_allow_dangerous_persists_across_reload(tmp_path):
+    p1 = PermissionPolicy(str(tmp_path))
+    p1.add_always_allow_dangerous("bash")
+    p1.add_always_allow_dangerous("delete_file")
+
+    p2 = PermissionPolicy(str(tmp_path))
+    assert p2.is_auto_approved("bash", "dangerous") is True
+    assert p2.is_auto_approved("delete_file", "dangerous") is True
+    assert p2.mode == "default"  # mode still resets; the grant persists.
 
 
 def test_only_always_allow_persists_not_mode(tmp_path):
@@ -60,6 +166,7 @@ def test_only_always_allow_persists_not_mode(tmp_path):
     assert "accept_edits" not in data
     assert "mode" not in data
     assert "write_file" in data["always_allow_tools"]
+    assert data["always_allow_dangerous_tools"] == []
 
 
 def test_mode_not_persisted_across_reload(tmp_path):
@@ -99,7 +206,7 @@ def test_store_handles_corrupt_file(tmp_path):
     (d / "permissions.json").write_text("{not json", "utf-8")
     # Corrupt file → defaults, no crash.
     state = PermissionStore(str(tmp_path)).load()
-    assert state == {"always_allow_tools": []}
+    assert state == {"always_allow_tools": [], "always_allow_dangerous_tools": []}
 
 
 # ── development-mode truth table ──────────────────────────────────────────

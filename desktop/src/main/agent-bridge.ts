@@ -257,9 +257,9 @@ export class AgentBridge {
     await this.request('question/answer', { call_id: callId, answers })
   }
 
-  async getPermissions(): Promise<{ mode: string; accept_edits: boolean; always_allow_tools: string[] }> {
+  async getPermissions(): Promise<{ mode: string; accept_edits: boolean; always_allow_tools: string[]; always_allow_dangerous_tools: string[] }> {
     return (await this.request('permissions/get', {})) as {
-      mode: string; accept_edits: boolean; always_allow_tools: string[]
+      mode: string; accept_edits: boolean; always_allow_tools: string[]; always_allow_dangerous_tools: string[]
     }
   }
 
@@ -273,10 +273,10 @@ export class AgentBridge {
     return { hooks: r?.hooks ?? [] }
   }
 
-  async setMode(mode: string): Promise<{ mode: string; accept_edits: boolean; always_allow_tools: string[] }> {
+  async setMode(mode: string): Promise<{ mode: string; accept_edits: boolean; always_allow_tools: string[]; always_allow_dangerous_tools: string[] }> {
     this._mode = mode
     return (await this.request('chat/set_mode', { mode })) as {
-      mode: string; accept_edits: boolean; always_allow_tools: string[]
+      mode: string; accept_edits: boolean; always_allow_tools: string[]; always_allow_dangerous_tools: string[]
     }
   }
 

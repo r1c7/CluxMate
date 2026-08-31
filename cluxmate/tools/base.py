@@ -35,7 +35,7 @@ class BaseTool(ABC):
 
     @property
     def risk_level(self) -> str:
-        """Return 'safe', 'write', or 'dangerous'. Override per tool."""
+        """Return 'safe', 'write', 'dangerous', or 'critical'. Override per tool."""
         return "safe"
 
     @abstractmethod

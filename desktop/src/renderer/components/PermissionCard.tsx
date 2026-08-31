@@ -8,6 +8,7 @@ const RISK_STYLE: Record<RiskLevel, { border: string; badge: string; labelKey: s
   safe: { border: 'border-surface-border', badge: 'bg-emerald-500/15 text-emerald-700', labelKey: 'permission.safe' },
   write: { border: 'border-accent/50', badge: 'bg-accent/20 text-accent', labelKey: 'permission.modifies' },
   dangerous: { border: 'border-red-500/50', badge: 'bg-red-500/15 text-red-700', labelKey: 'permission.dangerous' },
+  critical: { border: 'border-fuchsia-600/60', badge: 'bg-fuchsia-600/15 text-fuchsia-700', labelKey: 'permission.critical' },
 }
 
 // Human-readable body for a pending tool call, replacing a raw JSON dump. Known
@@ -112,6 +113,12 @@ export default function PermissionCard() {
   if (!pending) return null
   const style = RISK_STYLE[pending.risk_level]
   const isEscalation = (pending.params as Record<string, unknown> | undefined)?.sandbox_permissions === 'danger-full-access'
+  // Single matched category → name it in the button ("总是允许 rm"); otherwise
+  // fall back to the generic label (multi-category or non-bash).
+  const cats = pending.categories || []
+  const alwaysLabel = cats.length === 1
+    ? t('permission.alwaysApproveCat', { cat: cats[0] })
+    : t('permission.alwaysApprove')
 
   return (
     <div className={`mx-4 mb-4 border rounded-lg bg-surface-raised ${style.border}`}>
@@ -133,10 +140,12 @@ export default function PermissionCard() {
           onClick={() => approve(pending.call_id, false)}
           className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink text-xs rounded font-medium transition-colors"
         >{t('permission.approve')}</button>
-        <button
-          onClick={() => approve(pending.call_id, true)}
-          className="px-3 py-1.5 bg-surface-border hover:bg-ink-faint/40 text-ink text-xs rounded font-medium transition-colors"
-        >{t('permission.alwaysApprove')}</button>
+        {pending.always_allowable !== false && (
+          <button
+            onClick={() => approve(pending.call_id, true)}
+            className="px-3 py-1.5 bg-surface-border hover:bg-ink-faint/40 text-ink text-xs rounded font-medium transition-colors"
+          >{alwaysLabel}</button>
+        )}
         <button
           onClick={() => deny(pending.call_id)}
           className="px-3 py-1.5 bg-transparent hover:bg-red-500/10 text-ink-soft hover:text-red-600 text-xs rounded font-medium transition-colors ml-auto"

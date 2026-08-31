@@ -126,6 +126,168 @@ def _decode(data: bytes) -> str:
     return _ANSI_RE.sub("", text)
 
 
+# ── shell command risk classification ──────────────────────────────────────
+# The destructive shell commands are split into NAMED categories so the user can
+# "always allow" a specific operation (e.g. `rm`) rather than every dangerous
+# bash command. The category label is what gets persisted as `bash:<label>` in
+# always_allow_dangerous_tools and shown in the desktop's "总是允许 rm" button.
+#
+# Two tiers:
+#   * critical  — device/system-level destruction (format/mkfs/dd/`> /dev/`/
+#                 chmod 777): NEVER auto-approved, never always-allowable.
+#   * dangerous — workspace-bounded destruction, each with a NAMED category that
+#                 the user may opt into always-allowing individually.
+_DESTRUCTIVE_CATEGORIES: dict[str, str] = {
+    "rm": r'(?<!git )\brm\b',
+    "git-push-force": r'\bgit\s+push\s+.*--force',
+    "git-reset-hard": r'\bgit\s+reset\s+--hard',
+    "del": r'\bdel\b',
+    "rmdir": r'\brmdir\b',
+}
+_CRITICAL_PATTERNS: list[str] = [
+    r'\bformat\b', r'\bmkfs\b', r'\bdd\b',
+    r'>\s*/dev/', r'\bchmod\s+777\b',
+]
+_WRITE_PATTERNS: list[str] = [
+    r'\b(git\s+commit|git\s+push|git\s+add)\b',
+    r'\b(npm|pip|yarn|pnpm)\s+install\b',
+    r'\bmkdir\b', r'\btouch\b', r'\bmv\b', r'\bcp\b',
+    r'\bwget\b', r'\bcurl\b.*\s(--output|-o)\b',
+    r'(?<![12])>>?\s*\S(?!&)',
+]
+
+# ── code-runner detection ───────────────────────────────────────────────────
+# Running an interpreter / build tool / script executes code the shell regexes
+# can't see, so it is ALWAYS at least `dangerous` (never `safe`), authorized per
+# runner category via `bash:<category>`. The fallback category `run` covers
+# executable paths / script files with no preset entry, so the category set stays
+# finite and stable regardless of how a command is spelled.
+
+# Canonical runner labels. Keys are normalized command words; values are the
+# stable category persisted as `bash:<label>`. Aliases collapse onto one label.
+_RUNNERS: dict[str, str] = {
+    "python": "python", "python2": "python", "python3": "python",
+    "node": "node", "nodejs": "node", "deno": "deno", "bun": "bun",
+    "ruby": "ruby", "php": "php", "perl": "perl",
+    "lua": "lua", "luajit": "lua",
+    "r": "r", "rscript": "r", "julia": "julia",
+    "bash": "shell", "sh": "shell", "zsh": "shell", "dash": "shell",
+    "powershell": "powershell", "pwsh": "powershell",
+    "go": "go", "cargo": "cargo", "dotnet": "dotnet",
+    "java": "java", "scala": "scala", "kotlin": "kotlin", "groovy": "groovy",
+    "make": "make", "cmake": "cmake", "ninja": "make",
+    "gradle": "gradle", "gradlew": "gradle", "mvn": "mvn", "mvnw": "mvn",
+    "sbt": "sbt", "lein": "lein", "leiningen": "lein", "mix": "mix", "rake": "rake",
+    "npx": "npm",
+}
+
+# npm-family SCRIPT runners (dangerous) vs `install` (write): `npm run/exec/
+# test/start`, `yarn run`, `pnpm run/exec` run arbitrary package scripts; `npx`
+# (in _RUNNERS) always executes. `npm install` stays `write` via _WRITE_PATTERNS.
+_NPM_SCRIPT_SUBCOMMANDS = frozenset({"run", "exec", "test", "start"})
+
+# A leading ./ ../ / ~/ path, or a script/binary filename → fallback `run`.
+_SCRIPT_EXT_RE = re.compile(
+    r'\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|jsx|tsx|rb|pl|php|lua|r|jl|bat|cmd|ps1)$',
+    re.IGNORECASE,
+)
+
+_WRAPPER_WORDS = frozenset({"sudo", "env", "nice", "nohup", "time", "command"})
+_ENV_ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def _segment_words(segment: str) -> list[str]:
+    """Command words of one top-level segment, with wrappers (sudo/env/…) and
+    ``VAR=val`` prefixes stripped."""
+    return [
+        w for w in segment.split()
+        if w not in _WRAPPER_WORDS and not _ENV_ASSIGN_RE.match(w)
+    ]
+
+
+def _normalize_command_word(word: str) -> str:
+    w = word
+    if "/" in w:
+        w = w.rsplit("/", 1)[-1]
+    if "\\" in w:
+        w = w.rsplit("\\", 1)[-1]
+    w = re.sub(r'\.(?:exe|cmd|bat|com)$', '', w, flags=re.IGNORECASE)
+    w = re.sub(r'^python\d+(?:\.\d+)?$', 'python', w)  # python3.11 → python
+    return w.lower()
+
+
+def _looks_like_executable(word: str) -> bool:
+    return (
+        word.startswith(("./", "../", "/", "~/"))
+        or bool(_SCRIPT_EXT_RE.search(word))
+    )
+
+
+def _runner_categories(command: str) -> frozenset[str]:
+    """All code-runner categories present across EVERY top-level segment.
+
+    Splits on ``&&``/``;``/``||``/``|`` so a runner buried in a compound command
+    (e.g. ``git commit && python x.py``) is still classified dangerous — matching
+    the whole-string destructive/write scans. Only reaches here after critical +
+    destructive patterns, so a command that also carries a destructive marker is
+    already classified by that more-specific category.
+    """
+    cats: set[str] = set()
+    for segment in re.split(r'(?:&&|\|\||;|\|)', command):
+        words = _segment_words(segment)
+        if not words:
+            continue
+        first = words[0]
+        norm = _normalize_command_word(first)
+        if norm in _RUNNERS:
+            cats.add(_RUNNERS[norm])
+        elif norm in ("npm", "yarn", "pnpm") and len(words) >= 2 and words[1] in _NPM_SCRIPT_SUBCOMMANDS:
+            cats.add("npm")
+        elif _looks_like_executable(first):
+            cats.add("run")
+    return frozenset(cats)
+
+
+class _CommandClass:
+    """Result of classifying a shell command's risk.
+
+    ``level`` is 'safe' | 'write' | 'dangerous' | 'critical'; ``categories`` is
+    the set of matched DANGEROUS category labels (empty unless level is
+    'dangerous'). Critical commands have no authorizable categories — they never
+    get a "总是允许" button.
+    """
+
+    __slots__ = ("level", "categories")
+
+    def __init__(self, level: str, categories: frozenset[str]):
+        self.level = level
+        self.categories = categories
+
+
+def classify_command(command: str) -> _CommandClass:
+    """Classify a shell command into its risk level + matched destructive
+    categories. This is a heuristic (regex), not a security boundary — the OS
+    sandbox is what actually contains the command."""
+    for pat in _CRITICAL_PATTERNS:
+        if re.search(pat, command):
+            return _CommandClass("critical", frozenset())
+    cats = frozenset(
+        label for label, pat in _DESTRUCTIVE_CATEGORIES.items()
+        if re.search(pat, command)
+    )
+    if cats:
+        return _CommandClass("dangerous", cats)
+    # Running an interpreter/script/binary executes unseen code → dangerous,
+    # authorized per runner category (python / node / … / run).
+    runner_cats = _runner_categories(command)
+    if runner_cats:
+        return _CommandClass("dangerous", runner_cats)
+    for pat in _WRITE_PATTERNS:
+        if re.search(pat, command):
+            return _CommandClass("write", frozenset())
+    return _CommandClass("safe", frozenset())
+
+
 class BashTool(BaseTool):
     """Execute a shell command and return its output."""
 
@@ -186,25 +348,11 @@ class BashTool(BaseTool):
         return "safe"
 
     def assess_command_risk(self, command: str) -> str:
-        _destructive = [
-            r'(?<!git )\brm\b', r'\bgit\s+push\s+.*--force', r'\bgit\s+reset\s+--hard',
-            r'\bdel\b', r'\brmdir\b', r'\bformat\b', r'\bchmod\s+777\b',
-            r'>\s*/dev/', r'\bdd\b', r'\bmkfs\b',
-        ]
-        _write = [
-            r'\b(git\s+commit|git\s+push|git\s+add)\b',
-            r'\b(npm|pip|yarn|pnpm)\s+install\b',
-            r'\bmkdir\b', r'\btouch\b', r'\bmv\b', r'\bcp\b',
-            r'\bwget\b', r'\bcurl\b.*\s(--output|-o)\b',
-            r'(?<![12])>>?\s*\S(?!&)',
-        ]
-        for pat in _destructive:
-            if re.search(pat, command):
-                return "dangerous"
-        for pat in _write:
-            if re.search(pat, command):
-                return "write"
-        return "safe"
+        return classify_command(command).level
+
+    def classify(self, command: str) -> _CommandClass:
+        """Full classification: risk level + matched destructive categories."""
+        return classify_command(command)
 
     async def execute(
         self,

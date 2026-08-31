@@ -247,6 +247,7 @@ const en = {
   'permission.safe': 'Safe',
   'permission.modifies': 'Modifies files',
   'permission.dangerous': 'Dangerous',
+  'permission.critical': 'Critical',
   'permission.deleteFile': 'Will permanently delete file',
   'permission.runCommand': 'Will run command',
   'permission.willWriteOne': 'Will write 1 file',
@@ -259,6 +260,7 @@ const en = {
   'permission.escalationBadge': 'Escalation',
   'permission.approve': 'Approve (y)',
   'permission.alwaysApprove': 'Always approve (a)',
+  'permission.alwaysApproveCat': 'Always allow {cat} (a)',
   'permission.deny': 'Deny (n)',
 
   // ── question card ──
@@ -726,6 +728,7 @@ const zh: Record<keyof typeof en, string> = {
   'permission.safe': '安全',
   'permission.modifies': '修改文件',
   'permission.dangerous': '危险',
+  'permission.critical': '高危',
   'permission.deleteFile': '将永久删除文件',
   'permission.runCommand': '将要执行命令',
   'permission.willWriteOne': '将写入 1 个文件',
@@ -738,6 +741,7 @@ const zh: Record<keyof typeof en, string> = {
   'permission.escalationBadge': '提权',
   'permission.approve': '批准 (y)',
   'permission.alwaysApprove': '总是批准 (a)',
+  'permission.alwaysApproveCat': '总是允许 {cat} (a)',
   'permission.deny': '拒绝 (n)',
 
   // ── question card ──

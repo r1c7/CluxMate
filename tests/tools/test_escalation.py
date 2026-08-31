@@ -158,7 +158,7 @@ class _RiskRecorder(AgentCallbacks):
     def __init__(self):
         self.starts = []
 
-    async def on_tool_start(self, name, params, call_id, risk_level):
+    async def on_tool_start(self, name, params, call_id, risk_level, categories=frozenset()):
         self.starts.append((name, risk_level))
         return True
 

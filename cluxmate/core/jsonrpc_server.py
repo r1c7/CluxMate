@@ -137,6 +137,8 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._tool_decisions: dict[str, bool] = {}
         self._tool_selections: dict[str, list[int]] = {}
         self._pending_names: dict[str, str] = {}
+        self._pending_risk: dict[str, str] = {}
+        self._pending_categories: dict[str, frozenset[str]] = {}
         self._question_events: dict[str, threading.Event] = {}
         self._question_answers: dict[str, dict[str, Any]] = {}
         self._cancelled = False
@@ -152,7 +154,21 @@ class JsonRpcCallbacks(AgentCallbacks):
         if always and approved:
             name = self._pending_names.get(call_id)
             if name:
-                self._policy.add_always_allow(name)
+                # Persist into the tier the call actually ran at: a dangerous
+                # call goes to the dangerous list (bash category-scoped as
+                # `bash:<category>`), a write call to the write list. Escalation
+                # and critical never reach here (the UI hides "always" for them).
+                risk = self._pending_risk.get(call_id)
+                if risk == "dangerous":
+                    if name == "bash":
+                        # Category-scoped: persist one `bash:<category>` grant per
+                        # matched destructive category (never a bare "bash").
+                        for c in (self._pending_categories.get(call_id) or frozenset()):
+                            self._policy.add_always_allow_dangerous(f"bash:{c}")
+                    else:
+                        self._policy.add_always_allow_dangerous(name)
+                elif risk == "write":
+                    self._policy.add_always_allow(name)
         self._tool_decisions[call_id] = approved
         if selected is not None:
             self._tool_selections[call_id] = selected
@@ -200,7 +216,12 @@ class JsonRpcCallbacks(AgentCallbacks):
         return self._question_answers.pop(call_id, None)
 
     async def on_tool_start(
-        self, name: str, params: dict[str, Any], call_id: str, risk_level: str
+        self,
+        name: str,
+        params: dict[str, Any],
+        call_id: str,
+        risk_level: str,
+        categories: frozenset[str] = frozenset(),
     ) -> bool:
         if self._cancelled:
             raise _CancelledError()
@@ -220,17 +241,26 @@ class JsonRpcCallbacks(AgentCallbacks):
                 })
             return True
 
-        auto = self._policy.is_auto_approved(name, risk_level)
+        escalated = params.get("sandbox_permissions") == "danger-full-access"
+        auto = self._policy.is_auto_approved(
+            name, risk_level, escalated=escalated, categories=categories
+        )
+        always_allowable = self._policy.is_always_allowable(
+            name, risk_level, escalated=escalated
+        )
 
         # Emit tool_start so the UI renders the tool card. auto_approved tells it
         # whether a permission prompt follows: when true the card goes straight to
-        # "running" with no approve/deny buttons.
+        # "running" with no approve/deny buttons. always_allowable tells it whether
+        # to render the "总是允许" button (false for escalation / other dangerous).
+        # categories lets the UI show "总是允许 rm" instead of a coarse "bash".
         _write_dict({
             "jsonrpc": "2.0", "method": "chat/stream",
             "params": {
                 "type": "tool_start", "call_id": call_id,
                 "name": name, "input": params, "risk_level": risk_level,
-                "auto_approved": auto,
+                "auto_approved": auto, "always_allowable": always_allowable,
+                "categories": sorted(categories),
             },
         })
 
@@ -238,6 +268,8 @@ class JsonRpcCallbacks(AgentCallbacks):
             return True
 
         self._pending_names[call_id] = name
+        self._pending_risk[call_id] = risk_level
+        self._pending_categories[call_id] = categories
         evt = threading.Event()
         self._tool_events[call_id] = evt
 
@@ -249,6 +281,8 @@ class JsonRpcCallbacks(AgentCallbacks):
         await loop.run_in_executor(None, evt.wait)
         self._tool_events.pop(call_id, None)
         self._pending_names.pop(call_id, None)
+        self._pending_risk.pop(call_id, None)
+        self._pending_categories.pop(call_id, None)
         if self._cancelled:
             raise _CancelledError()
         return self._tool_decisions.pop(call_id, False)
@@ -352,7 +386,12 @@ class ScopedCallbacks(AgentCallbacks):
         self._agent_id = agent_id
 
     async def on_tool_start(
-        self, name: str, params: dict[str, Any], call_id: str, risk_level: str
+        self,
+        name: str,
+        params: dict[str, Any],
+        call_id: str,
+        risk_level: str,
+        categories: frozenset[str] = frozenset(),
     ) -> bool:
         # Honor a turn-level cancel even inside a subagent.
         if self._shared._cancelled:
@@ -365,7 +404,7 @@ class ScopedCallbacks(AgentCallbacks):
         # DENIED here (no prompt), and the loop feeds a denied result back so the
         # subagent picks another path. safe + write always run (write autonomy is
         # intentional — the parent already had to reach this mode to spawn at all).
-        denied = risk_level == "dangerous" and self._shared._policy.mode != "yolo"
+        denied = risk_level in ("dangerous", "critical") and self._shared._policy.mode != "yolo"
 
         # Emit for EVERY tool (incl. safe/read-only) so the subagent tree is
         # complete. auto_approved reflects whether it will actually run.

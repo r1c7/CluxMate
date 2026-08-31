@@ -9,6 +9,7 @@ const RISK_STYLE: Record<RiskLevel, { border: string; badge: string; labelKey: s
   safe: { border: 'border-surface-border', badge: 'bg-emerald-500/15 text-emerald-700', labelKey: 'permission.safe' },
   write: { border: 'border-accent/50', badge: 'bg-accent/20 text-accent', labelKey: 'permission.modifies' },
   dangerous: { border: 'border-red-500/50', badge: 'bg-red-500/15 text-red-700', labelKey: 'permission.dangerous' },
+  critical: { border: 'border-fuchsia-600/60', badge: 'bg-fuchsia-600/15 text-fuchsia-700', labelKey: 'permission.critical' },
 }
 
 export default function BatchEditCard() {
