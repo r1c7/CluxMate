@@ -146,11 +146,11 @@ def test_is_always_allowable_matrix(tmp_path):
 
 def test_always_allow_dangerous_persists_across_reload(tmp_path):
     p1 = PermissionPolicy(str(tmp_path))
-    p1.add_always_allow_dangerous("bash")
+    p1.add_always_allow_dangerous("bash:rm")
     p1.add_always_allow_dangerous("delete_file")
 
     p2 = PermissionPolicy(str(tmp_path))
-    assert p2.is_auto_approved("bash", "dangerous") is True
+    assert p2.is_auto_approved("bash", "dangerous", categories=frozenset({"rm"})) is True
     assert p2.is_auto_approved("delete_file", "dangerous") is True
     assert p2.mode == "default"  # mode still resets; the grant persists.
 
