@@ -297,6 +297,7 @@ class BashTool(BaseTool):
         workdir: str | None = None,
         sandbox: ShellSandbox | None = None,
         sandbox_required: bool = False,
+        egress_mode: str = "shared",
     ):
         self._timeout_ms = timeout_ms
         self._workdir = workdir
@@ -305,6 +306,7 @@ class BashTool(BaseTool):
         # no backend available, so commands are refused, never run bare.
         self._sandbox = sandbox
         self._sandbox_required = sandbox_required
+        self._egress_mode = egress_mode
 
     @property
     def name(self) -> str:
@@ -361,6 +363,13 @@ class BashTool(BaseTool):
         sandbox_permissions: str | None = None,
         justification: str | None = None,
     ) -> str:
+        if self._egress_mode == "off" and platform.system() == "Windows":
+            return (
+                "Error: command refused — network egress mode 'off' is not "
+                "supported on Windows (Low-IL cannot restrict the network). "
+                "Use 'proxy' mode, or wait for AppContainer-based off in "
+                "sandbox phase 2."
+            )
         timeout = (timeout_ms or self._timeout_ms) / 1000.0
         cwd = self._workdir or os.getcwd()
         env = _subprocess_env()
