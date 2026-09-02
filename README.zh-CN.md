@@ -42,6 +42,7 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 - **分级风险权限** —— 每个工具声明风险等级（`safe` / `write` / `dangerous` / `critical`）；四种模式（`plan` / `default` / `acceptEdits` / `yolo`）加上两套持久化的 always-allow 列表（write 级 + dangerous 级——`delete_file`，以及 `bash` 按类别如 `bash:rm` / `bash:python` / `bash:run`，不支持整体 `bash`）控制审批。运行代码（`python script.py`、`node app.js`、`npm run`、`./x.sh` 等）按 `dangerous` 处理，而不是 `safe`。`plan` 模式天然只读；危险命令除非显式"总是允许"，否则仍需确认，而高危命令（format/mkfs/dd 等）与沙箱提权永远需要逐次确认。
 - **双层沙箱** —— 文件写入/删除工具由进程内 **WriteFence**（先规范化再包含性检查）守护；模型生成的 `bash` 命令在**操作系统级沙箱**内运行（Windows 低完整性令牌、Linux bubblewrap、macOS Seatbelt）。沙箱**默认失败即关闭（fail-closed）**，只有 `yolo` 模式——唯一的显式豁免——会解除它。参见 [安全：沙箱](#安全沙箱)。
 - **网络访问守卫（SSRF）** —— `web_fetch` / `web_search` 在*所有*模式下（包括 `yolo`）都经过 SSRF 守卫：默认拒绝内网/私网地址（RFC1918、loopback、link-local、云 metadata 等），重定向的每一跳都重新校验，DNS 解析失败即关闭。允许/封禁规则可配置（`~/.cluxmate/ssrf.json`），桌面端 Settings → 沙箱 → 网络访问直接管理。参见 [安全：网络访问（SSRF 守卫）](#安全网络访问ssrf-守卫)。
+- **网络出口控制（bash/MCP）** —— bash 与 MCP stdio 子进程的出网可以被锁定：`shared`（不受限）、`off`（内核级断网——bwrap `--unshare-net` / Seatbelt `deny network*`）、或 `proxy`（仅白名单可出网，经本地过滤代理）。默认 `shared`；Windows 的 `off` 目前为失败即关闭。参见 [安全：网络出口（bash/MCP）](#安全网络出口bash-mcp)。
 - **检查点与回滚** —— 每个工作目录都有一个 shadow-git 仓库，在每轮前后快照你的文件，因此可以撤销任意一轮——且是会话级的，其他会话的修改会以冲突形式呈现，绝不会被覆盖。
 - **子 agent 委派** —— 把独立任务委派给受限子 agent（`general-purpose`、只读的 `explore`），递归深度上限 4，每个子 agent 都有自己可回放的会话日志。
 - **死循环防护** —— 如果 agent 开始重复相同的工具调用，逐级升级的提醒会把它拉回正轨；`MAX_TURNS` 仍是最终的硬兜底。
@@ -129,6 +130,17 @@ MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配�
 - **DNS 逐 IP 校验、解析失败即关闭** —— 主机名会被解析并检查其每一个 A/AAAA 地址（公网域名解析到 `127.0.0.1` 也会被拦截）；解析失败一律视为不安全而拒绝。
 - **allow 优先于一切封禁** —— 规则配置在 `~/.cluxmate/ssrf.json`：`{"allow": [...], "block_extra": [...]}`，条目支持 `host` / `host:port` / `[ipv6]:port` / IP / CIDR。该文件位于 WriteFence 不可写的 `~/.cluxmate/` 内，模型无法修改自己的网络白名单。
 - **桌面端可直接管理** —— Settings → 沙箱 → 网络访问；改动立即生效（每次请求重新读取，无需重启）。
+
+
+## 安全：网络出口（bash / MCP）
+
+`web_fetch` / `web_search` 由上面的 SSRF 守卫负责；这里是与它互补的边界，作用于 **bash 与 MCP stdio 子进程**——它们的出网流量原本不被 OS 沙箱约束。出口模式默认 `shared`（opt-in），保存在 `~/.cluxmate/egress.json`：
+
+- **`shared`**（默认）——网络不受限，即引入出口控制之前的行为。
+- **`off`** —— 内核级网络隔离：Linux bwrap 追加 `--unshare-net`（全新网络命名空间，仅 loopback）；macOS Seatbelt 追加 `(deny network*)`。Windows 无法用低完整性令牌实现这一点，因此 `off` 在 Windows 上**失败即关闭**（`bash` 拒绝运行），而不是假装已断网——真正的按进程断网留给阶段 2 的 AppContainer 沙箱。
+- **`proxy`** —— 强制流量走一个本地白名单过滤代理（仅绑定 loopback）。白名单**就是** `~/.cluxmate/ssrf.json` 的 `allow` 列表（列表为空则全断，未列出的主机一律拒绝）。代理通过 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 注入，因此是 **best-effort**：只约束遵循代理环境变量的客户端。
+
+可在桌面端 Settings → 沙箱 → 网络出口切换，或通过 `egress/config/set` JSON-RPC 方法修改；模式变更会重建 agent，让新模式烘焙进沙箱后端。与其它边界一样，egress 在 `yolo` 模式下关闭。
 
 
 ## 子 agent

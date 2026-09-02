@@ -42,6 +42,7 @@ It speaks the **OpenAI-compatible API**, so it works with DeepSeek, Qwen, GLM, O
 - **Risk-tiered permissions** — every tool declares a risk level (`safe` / `write` / `dangerous` / `critical`); four modes (`plan` / `default` / `acceptEdits` / `yolo`) plus two persistent always-allow lists (write tier + dangerous tier — `delete_file`, and `bash` per category like `bash:rm` / `bash:python` / `bash:run`, never whole-tool) control approval. Running code (`python script.py`, `node app.js`, `npm run`, `./x.sh`, …) is `dangerous`, not `safe`. `plan` mode is read-only by construction; dangerous commands prompt unless explicitly always-allowed, and critical commands (format/mkfs/dd, etc.) and sandbox escalation always prompt.
 - **A two-layer sandbox** — file write/delete tools are guarded by an in-process **WriteFence** (canonicalize-then-contain), and model-generated `bash` commands run inside an **OS-level sandbox** (Windows Low-integrity token, Linux bubblewrap, macOS Seatbelt). Sandboxing is *fail-closed* and only `yolo` mode — the explicit opt-out — disarms it. See [Security: sandbox](#security-sandbox).
 - **Network-access guard (SSRF)** — `web_fetch` / `web_search` pass through an SSRF guard in *every* mode (including `yolo`): internal/private addresses (RFC1918, loopback, link-local, cloud metadata, …) are denied by default, every redirect hop is re-validated, and DNS resolution failures close the request. Allow/block rules are configurable (`~/.cluxmate/ssrf.json`), managed from desktop Settings → Sandbox → Network access. See [Security: network access (SSRF guard)](#security-network-access-ssrf-guard).
+- **Network egress control (bash/MCP)** — bash and MCP stdio subprocesses can have their outbound traffic locked down: `shared` (unrestricted), `off` (kernel-level deny — bwrap `--unshare-net` / Seatbelt `deny network*`), or `proxy` (allowlist-only via a local filtering proxy). Default `shared`; Windows `off` is fail-closed for now. See [Security: network egress (bash/MCP)](#security-network-egress-bash-mcp).
 - **Checkpoints & rewind** — a shadow-git repository per working directory snapshots your files before and after every turn, so you can undo any turn — session-scoped, so other sessions' edits surface as conflicts, never clobbered.
 - **Subagent delegation** — delegate independent tasks to restricted subagents (`general-purpose`, read-only `explore`) with a depth cap of 4, each with its own replayable session log.
 - **Doom-loop guard** — if the agent starts repeating identical tool calls, escalating advisories nudge it back on track; `MAX_TURNS` remains the hard backstop.
@@ -129,6 +130,17 @@ Both boundaries are enabled in every mode **except `yolo`** — the one explicit
 - **DNS checked per-IP, fail-closed** — a hostname is resolved and every A/AAAA address is checked (a public name resolving to `127.0.0.1` is blocked); a resolution failure is treated as unsafe and refused.
 - **`allow` wins over every block** — rules live in `~/.cluxmate/ssrf.json`: `{"allow": [...], "block_extra": [...]}`, with entries of `host` / `host:port` / `[ipv6]:port` / IP / CIDR. The file sits inside the WriteFence non-writable `~/.cluxmate/`, so the model cannot edit its own network allowlist.
 - **Manage it from the desktop** — Settings → Sandbox → Network access; changes take effect immediately (re-read on every request, no restart).
+
+
+## Security: network egress (bash / MCP)
+
+`web_fetch` / `web_search` are guarded by the SSRF guard above; this is the complementary boundary for **bash and MCP stdio subprocesses**, whose outbound traffic the OS sandbox otherwise leaves unrestricted. Egress is opt-in (`shared` by default) and lives in `~/.cluxmate/egress.json`:
+
+- **`shared`** (default) — network unrestricted, exactly the pre-egress behavior.
+- **`off`** — kernel-level network isolation: Linux bwrap adds `--unshare-net` (a fresh network namespace, loopback only); macOS Seatbelt adds `(deny network*)`. Windows cannot do this with a Low-integrity token, so `off` on Windows **fails closed** (`bash` refuses to run) rather than pretending to be offline — real per-process denial is deferred to the phase-2 AppContainer sandbox.
+- **`proxy`** — forces traffic through a local allowlist-filtering proxy (loopback-only). The allowlist **is** the `allow` list from `~/.cluxmate/ssrf.json` (an empty list blocks everything, and unlisted hosts are denied). The proxy is injected via `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`, so it's **best-effort**: only proxy-honoring clients are constrained.
+
+Change it from desktop Settings → Sandbox → Network egress, or via the `egress/config/set` JSON-RPC method; a mode change rebuilds the agent so the new mode is baked into the sandbox backend. Like the other boundaries, egress is off in `yolo` mode.
 
 
 ## Subagents
