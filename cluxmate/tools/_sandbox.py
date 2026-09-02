@@ -209,13 +209,17 @@ class BwrapSandbox(ShellSandbox):
     enforcement = "same-kernel"
 
     def __init__(self, grant_paths: list[str] | None = None,
-                 deny_read_paths: list[str] | None = None):
+                 deny_read_paths: list[str] | None = None,
+                 egress_mode: str = "shared",
+                 proxy_addr: tuple[str, int] | None = None):
         self._grant_paths = grant_paths or []
         # Read-denylist (~/.cluxmate/forbid-read.json): hide these subtrees from
         # the sandboxed shell. Directories → empty tmpfs overlay (real contents
         # invisible); files → read-only bind of /dev/null. Best-effort: a path
         # that doesn't exist is skipped (nothing to hide).
         self._deny_read_paths = deny_read_paths or []
+        self._egress_mode = egress_mode
+        self._proxy_addr = proxy_addr
 
     @classmethod
     def available(cls) -> bool:
@@ -265,6 +269,8 @@ class BwrapSandbox(ShellSandbox):
                 argv += ["--tmpfs", str(dp)]
             elif dp.exists():
                 argv += ["--ro-bind", "/dev/null", str(dp)]
+        if self._egress_mode == "off":
+            argv += ["--unshare-net"]
         argv += [
             "--dev", "/dev",
             "--proc", "/proc",
@@ -289,6 +295,7 @@ class BwrapSandbox(ShellSandbox):
             full = prefix + ["--", "/bin/sh", "-c", shell_cmd]
         else:
             full = prefix + ["--"] + argv
+        env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
         proc = subprocess.run(
             full, capture_output=True, stdin=subprocess.DEVNULL,
             timeout=timeout, cwd=cwd, env=env,
@@ -299,6 +306,7 @@ class BwrapSandbox(ShellSandbox):
         resolved = str(Path(cwd).resolve())
         self._ensure_state_dir(resolved)
         prefix = self._bwrap_argv(resolved)
+        env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
         return subprocess.Popen(
             prefix + ["--"] + argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -346,9 +354,13 @@ class DarwinSeatbeltSandbox(ShellSandbox):
     enforcement = "same-kernel"
 
     def __init__(self, grant_paths: list[str] | None = None,
-                 deny_read_paths: list[str] | None = None):
+                 deny_read_paths: list[str] | None = None,
+                 egress_mode: str = "shared",
+                 proxy_addr: tuple[str, int] | None = None):
         self._grant_paths = grant_paths or []
         self._deny_read_paths = deny_read_paths or []
+        self._egress_mode = egress_mode
+        self._proxy_addr = proxy_addr
 
     @classmethod
     def available(cls) -> bool:
@@ -365,12 +377,14 @@ class DarwinSeatbeltSandbox(ShellSandbox):
         deny_read = ""
         for i in range(len(self._deny_read_paths)):
             deny_read += f'(deny file-read* (subpath (param "RDENY{i}")))\n'
+        network_deny = "(deny network*)\n" if self._egress_mode == "off" else ""
         return (
             "(version 1)\n"
             "(allow default)\n"
             "(deny file-write*)\n"
             f'(allow file-write* {" ".join(allow_filters)})\n'
             '(deny file-write* (subpath (param "STATE")))\n'
+            f"{network_deny}"
             f"{deny_read}"
         )
 
@@ -419,6 +433,7 @@ class DarwinSeatbeltSandbox(ShellSandbox):
             full = prefix + ["/bin/sh", "-c", shell_cmd]
         else:
             full = prefix + argv
+        env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
         proc = subprocess.run(
             full, capture_output=True, stdin=subprocess.DEVNULL,
             timeout=timeout, cwd=cwd, env=env,
@@ -427,6 +442,7 @@ class DarwinSeatbeltSandbox(ShellSandbox):
 
     def spawn_popen(self, argv: list[str], *, cwd: str, env: dict[str, str]):
         prefix = self._prefix(str(Path(cwd).resolve()))
+        env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
         return subprocess.Popen(
             prefix + argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -534,9 +550,13 @@ class WindowsLowILSandbox(ShellSandbox):
     name = "windows-lowil"
     enforcement = "partial"
 
-    def __init__(self, workspace: str, grant_paths: list[str] | None = None):
+    def __init__(self, workspace: str, grant_paths: list[str] | None = None,
+                 egress_mode: str = "shared",
+                 proxy_addr: tuple[str, int] | None = None):
         self._workspace = str(Path(workspace).resolve())
         self._grant_paths = grant_paths or []
+        self._egress_mode = egress_mode
+        self._proxy_addr = proxy_addr
         # monotonic() timestamp of the last FAILED label heal; back off the
         # expensive tree walk for _LABEL_RETRY_INTERVAL seconds so a broken
         # environment isn't re-walked on every command. None = no recent fail.
@@ -947,6 +967,7 @@ class WindowsLowILSandbox(ShellSandbox):
                 # Explicit unicode environment block (CREATE_UNICODE_ENVIRONMENT)
                 # so the TMP/TEMP overrides reach the child. EXTENDED_STARTUPINFO
                 # activates the handle-list attribute built in _startup.
+                env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
                 env_block = ctypes.create_unicode_buffer(
                     "".join(f"{k}={v}\0" for k, v in env.items()) + "\0"
                 )
@@ -1081,6 +1102,7 @@ class WindowsLowILSandbox(ShellSandbox):
                 ]
 
             pi = PROCESS_INFORMATION()
+            env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
             env_block = ctypes.create_unicode_buffer(
                 "".join(f"{k}={v}\0" for k, v in env.items()) + "\0"
             )
@@ -1196,8 +1218,32 @@ def sandbox_disabled_by_env() -> bool:
     return os.environ.get(ENV_DISABLE, "").lower() in ("off", "0", "disabled", "false")
 
 
+def apply_egress_env(
+    env: dict[str, str],
+    egress_mode: str,
+    proxy_addr: tuple[str, int] | None,
+) -> dict[str, str]:
+    """Return env with proxy vars injected when egress_mode == "proxy".
+
+    proxy mode is best-effort: only proxy-honoring clients are constrained.
+    NO_PROXY is cleared so a pre-existing env value cannot bypass the proxy.
+    """
+    if egress_mode != "proxy" or proxy_addr is None:
+        return env
+    url = f"http://{proxy_addr[0]}:{proxy_addr[1]}"
+    env = dict(env)
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+              "http_proxy", "https_proxy", "all_proxy"):
+        env[k] = url
+    env["NO_PROXY"] = ""
+    env["no_proxy"] = ""
+    return env
+
+
 def pick_sandbox(workspace: str, grant_paths: list[str] | None = None,
-                 deny_read_paths: list[str] | None = None) -> ShellSandbox | None:
+                 deny_read_paths: list[str] | None = None,
+                 egress_mode: str = "shared",
+                 proxy_addr: tuple[str, int] | None = None) -> ShellSandbox | None:
     """Return the first AVAILABLE backend for this platform, or None.
 
     Probe order per platform (single-candidate today, chain-ready). Probing
@@ -1218,6 +1264,8 @@ def pick_sandbox(workspace: str, grant_paths: list[str] | None = None,
     for cls in candidates:
         if cls.available():
             if cls is WindowsLowILSandbox:
-                return cls(workspace, grant_paths=grant_paths)
-            return cls(grant_paths=grant_paths, deny_read_paths=deny_read_paths)
+                return cls(workspace, grant_paths=grant_paths,
+                           egress_mode=egress_mode, proxy_addr=proxy_addr)
+            return cls(grant_paths=grant_paths, deny_read_paths=deny_read_paths,
+                       egress_mode=egress_mode, proxy_addr=proxy_addr)
     return None
