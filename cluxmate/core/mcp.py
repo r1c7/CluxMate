@@ -26,6 +26,7 @@ import asyncio
 import atexit
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -411,12 +412,15 @@ class MCPClient:
         # internal MCPConfig.transport keeps the spec name for use in
         # start()/shutdown() branching; only the JSON-RPC output is mapped.
         transport_label = "local" if self.config.transport == "stdio" else "remote"
+        egress = self._egress_mode
+        if egress == "off" and platform.system() == "Windows":
+            egress = "off (ineffective on Windows)"
         return {
             "name": self.config.name,
             "transport": transport_label,
             "status": status,
             "disabled": self.config.disabled,
-            "egress": self._egress_mode,
+            "egress": egress,
             "error": self._error,
             "tools": [
                 {

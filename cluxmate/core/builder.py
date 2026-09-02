@@ -215,6 +215,10 @@ class AgentBuilder:
         # on rebuild-away or shutdown.
         self._egress: EgressConfig | None = None
         self._egress_proxy: LocalFilteringProxy | None = None
+        # Allowlist snapshot the running proxy was built with, so an ssrf.json
+        # allow change can be detected and the proxy restarted (revocation must
+        # not be silently ignored). Shared with children alongside _egress_proxy.
+        self._egress_proxy_allow: tuple[str, ...] | None = None
         # Lifecycle hooks (settings.json). Lazy: constructed on first build when
         # the caller didn't inject one, then cached. Inherited by children so
         # subagent tool calls are hooked too.
@@ -289,21 +293,38 @@ class AgentBuilder:
     def _ensure_egress_proxy(self) -> tuple[str, int] | None:
         """Start/stop the allowlist proxy to match the current egress mode.
 
-        proxy → ensure running and return its (host, port); any other mode →
-        stop a previously-running proxy and return None. Idempotent.
+        proxy → ensure running (restarting it when the ssrf.json allow list
+        changed) and return its (host, port); any other mode → stop a
+        previously-running proxy and return None. Idempotent.
         """
         mode = self._egress_mode()
         if mode != "proxy":
             if self._egress_proxy is not None:
                 self._egress_proxy.stop()
                 self._egress_proxy = None
+                self._egress_proxy_allow = None
             return None
+        allow = self._ssrf.snapshot()["allow"] if self._ssrf is not None else []
+        allow_key = tuple(allow)
+        if self._egress_proxy is not None and self._egress_proxy_allow != allow_key:
+            self._egress_proxy.stop()
+            self._egress_proxy = None
+            self._egress_proxy_allow = None
         if self._egress_proxy is None:
-            allow = self._ssrf.snapshot()["allow"] if self._ssrf is not None else []
             self._egress_proxy = LocalFilteringProxy(allow=allow)
+            self._egress_proxy_allow = allow_key
         return self._egress_proxy.start()
 
+    def _sandbox_enabled(self) -> bool:
+        """True when the shell-sandbox boundary is active (not yolo / env off)."""
+        return self._mode != "yolo" and not sandbox_disabled_by_env()
+
     def _egress_sandbox_kwargs(self) -> dict[str, Any]:
+        if not self._sandbox_enabled():
+            # Boundary off (yolo / env opt-out): egress must not apply, and no
+            # proxy may linger from a prior mode.
+            self.shutdown_egress()
+            return {"egress_mode": "shared", "proxy_addr": None}
         return {
             "egress_mode": self._egress_mode(),
             "proxy_addr": self._ensure_egress_proxy(),
@@ -314,6 +335,7 @@ class AgentBuilder:
         if self._egress_proxy is not None:
             self._egress_proxy.stop()
             self._egress_proxy = None
+            self._egress_proxy_allow = None
 
     def with_model(self, name: str) -> "AgentBuilder":
         self._model = name
@@ -506,7 +528,7 @@ class AgentBuilder:
             # backend is available, sandbox_required=True makes BashTool
             # FAIL CLOSED (refuse) instead of running bare — unless the user
             # explicitly opted out via CLUXMATE_BASH_SANDBOX=off.
-            sandbox_enabled = self._mode != "yolo" and not sandbox_disabled_by_env()
+            sandbox_enabled = self._sandbox_enabled()
             egress_kw = self._egress_sandbox_kwargs()
             sandbox = (
                 pick_sandbox(
@@ -868,6 +890,8 @@ class AgentBuilder:
         child._read_denies = self._read_denies
         child._ssrf = self._ssrf
         child._egress = self._egress
+        child._egress_proxy = self._egress_proxy
+        child._egress_proxy_allow = self._egress_proxy_allow
         child._hooks = self._hooks
         child._lsp = self._lsp
         child._subagent_type = subagent_type
