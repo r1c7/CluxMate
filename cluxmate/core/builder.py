@@ -36,6 +36,8 @@ from cluxmate.tools.lsp_tool import LspTool
 from cluxmate.core.grants import GrantStore
 from cluxmate.core.read_denies import ReadDenyStore
 from cluxmate.core.hooks import HookManager
+from cluxmate.core.egress_config import EgressConfig
+from cluxmate.tools._egress_proxy import LocalFilteringProxy
 from cluxmate.core.session_log import SessionHeader, SessionLog
 from cluxmate.core.session_log_store import SessionLogStore
 from cluxmate.templates.loader import render_system_prompt, render_child_prompt
@@ -207,6 +209,12 @@ class AgentBuilder:
         # SSRF network-access config (~/.cluxmate/ssrf.json). Shared across
         # rebuilds and inherited by children; None → default deny (no allow).
         self._ssrf: SsrConfig | None = None
+        # Network-egress config (~/.cluxmate/egress.json). Shared across
+        # rebuilds and inherited by children; None → "shared" (no egress
+        # restriction). The running proxy is owned by this builder and stopped
+        # on rebuild-away or shutdown.
+        self._egress: EgressConfig | None = None
+        self._egress_proxy: LocalFilteringProxy | None = None
         # Lifecycle hooks (settings.json). Lazy: constructed on first build when
         # the caller didn't inject one, then cached. Inherited by children so
         # subagent tool calls are hooked too.
@@ -230,6 +238,12 @@ class AgentBuilder:
         """Attach the SSRF network-access config (shared across rebuilds and
         inherited by children)."""
         self._ssrf = config
+        return self
+
+    def with_egress(self, config: "EgressConfig | None") -> "AgentBuilder":
+        """Attach the network-egress config (shared across rebuilds and
+        inherited by children)."""
+        self._egress = config
         return self
 
     def with_hooks(self, hooks: "HookManager | None") -> "AgentBuilder":
@@ -266,6 +280,40 @@ class AgentBuilder:
         if self._read_denies is None:
             return []
         return self._read_denies.snapshot()
+
+    def _egress_mode(self) -> str:
+        if self._egress is None:
+            return "shared"
+        return self._egress.snapshot()["mode"]
+
+    def _ensure_egress_proxy(self) -> tuple[str, int] | None:
+        """Start/stop the allowlist proxy to match the current egress mode.
+
+        proxy → ensure running and return its (host, port); any other mode →
+        stop a previously-running proxy and return None. Idempotent.
+        """
+        mode = self._egress_mode()
+        if mode != "proxy":
+            if self._egress_proxy is not None:
+                self._egress_proxy.stop()
+                self._egress_proxy = None
+            return None
+        if self._egress_proxy is None:
+            allow = self._ssrf.snapshot()["allow"] if self._ssrf is not None else []
+            self._egress_proxy = LocalFilteringProxy(allow=allow)
+        return self._egress_proxy.start()
+
+    def _egress_sandbox_kwargs(self) -> dict[str, Any]:
+        return {
+            "egress_mode": self._egress_mode(),
+            "proxy_addr": self._ensure_egress_proxy(),
+        }
+
+    def shutdown_egress(self) -> None:
+        """Stop the running egress proxy (idempotent)."""
+        if self._egress_proxy is not None:
+            self._egress_proxy.stop()
+            self._egress_proxy = None
 
     def with_model(self, name: str) -> "AgentBuilder":
         self._model = name
@@ -394,7 +442,10 @@ class AgentBuilder:
             if self._mcp_closed:
                 return False
             if self._mcp is None:
-                self._mcp = MCPManager(self._cwd, sandbox=self._mcp_sandbox())
+                self._mcp = MCPManager(
+                    self._cwd, sandbox=self._mcp_sandbox(),
+                    egress_mode=self._egress_mode(),
+                )
             mcp = self._mcp
         # load() spawns subprocesses and blocks — run it OUTSIDE the lock so a
         # concurrent mcp_shutdown isn't held off for the whole handshake. load()
@@ -456,11 +507,13 @@ class AgentBuilder:
             # FAIL CLOSED (refuse) instead of running bare — unless the user
             # explicitly opted out via CLUXMATE_BASH_SANDBOX=off.
             sandbox_enabled = self._mode != "yolo" and not sandbox_disabled_by_env()
+            egress_kw = self._egress_sandbox_kwargs()
             sandbox = (
                 pick_sandbox(
                     self._cwd,
                     grant_paths=self._grant_paths(),
                     deny_read_paths=self._forbid_read_paths(),
+                    **egress_kw,
                 )
                 if sandbox_enabled else None
             )
@@ -472,12 +525,19 @@ class AgentBuilder:
             elif sandbox is None:
                 self._sandbox_state = "fail-closed"
             else:
-                self._sandbox_state = sandbox.name
+                mode = egress_kw["egress_mode"]
+                if mode == "shared":
+                    self._sandbox_state = sandbox.name
+                elif mode == "off" and sandbox.name == "windows-lowil":
+                    self._sandbox_state = "windows-lowil:off(fail-closed)"
+                else:
+                    self._sandbox_state = f"{sandbox.name}:{mode}"
             tools.extend([
                 BashTool(
                     workdir=self._cwd,
                     sandbox=sandbox,
                     sandbox_required=sandbox_enabled,
+                    egress_mode=egress_kw["egress_mode"],
                 ),
                 ReadFileTool(workdir=self._cwd, fence=read_fence),
                 SearchReplaceTool(workdir=self._cwd, fence=fence),
@@ -515,7 +575,10 @@ class AgentBuilder:
             # (refresh_system_prompt calls _get_tools each turn).
             if self._depth == 0:
                 if self._mcp is None:
-                    self._mcp = MCPManager(self._cwd, sandbox=self._mcp_sandbox())
+                    self._mcp = MCPManager(
+                        self._cwd, sandbox=self._mcp_sandbox(),
+                        egress_mode=self._egress_mode(),
+                    )
                     # Deferred mode: construct but don't load here (load spawns
                     # subprocesses and blocks). The caller loads it off the
                     # critical path and rebuilds. list_tools() is empty until
@@ -541,8 +604,20 @@ class AgentBuilder:
         )
 
     def _mcp_sandbox(self):
-        """Best-effort sandbox for MCP stdio servers (None → bare Popen)."""
-        return self._shell_sandbox()
+        """Best-effort sandbox for MCP stdio servers (None → bare Popen).
+
+        Unlike LSP (which reuses the non-egress _shell_sandbox), MCP stdio
+        servers honor the egress mode — they run user-configured commands that
+        may reach the network, so off/proxy applies here.
+        """
+        if self._mode == "yolo" or sandbox_disabled_by_env():
+            return None
+        return pick_sandbox(
+            self._cwd,
+            grant_paths=self._grant_paths(),
+            deny_read_paths=self._forbid_read_paths(),
+            **self._egress_sandbox_kwargs(),
+        )
 
     def mcp_status(self) -> list[dict[str, Any]]:
         """Live status of all configured MCP servers. Empty if not loaded."""
@@ -792,6 +867,7 @@ class AgentBuilder:
         child._grants = self._grants
         child._read_denies = self._read_denies
         child._ssrf = self._ssrf
+        child._egress = self._egress
         child._hooks = self._hooks
         child._lsp = self._lsp
         child._subagent_type = subagent_type
