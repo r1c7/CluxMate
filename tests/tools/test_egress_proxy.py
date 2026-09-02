@@ -2,10 +2,12 @@
 
 import http.client
 import http.server
+import socket
 import socketserver
 import threading
+import time
 
-from cluxmate.tools._egress_proxy import LocalFilteringProxy, allowlist_matches
+from cluxmate.tools._egress_proxy import LocalFilteringProxy, _ProxyHandler, allowlist_matches
 
 
 class _Upstream(http.server.BaseHTTPRequestHandler):
@@ -83,3 +85,39 @@ def test_proxy_denies_unlisted_host():
     finally:
         upstream.shutdown()
         upstream.server_close()
+
+
+def test_pump_relays_after_peer_half_close():
+    a1, a2 = socket.socketpair()
+    b1, b2 = socket.socketpair()
+    handler = _ProxyHandler.__new__(_ProxyHandler)
+
+    def run_pump():
+        handler._pump(a1, b1)
+
+    t = threading.Thread(target=run_pump, daemon=True)
+    t.start()
+    try:
+        b2.sendall(b"first-")
+        a2.settimeout(5)
+        first = a2.recv(len(b"first-"))
+        assert first == b"first-"
+        a2.shutdown(socket.SHUT_WR)
+
+        time.sleep(0.05)
+        b2.sendall(b"second")
+        b2.close()
+
+        received = bytearray(first)
+        while len(received) < len(b"first-second"):
+            chunk = a2.recv(4096)
+            if not chunk:
+                break
+            received.extend(chunk)
+        t.join(timeout=5)
+        assert received == b"first-second"
+    finally:
+        a1.close()
+        a2.close()
+        b1.close()
+        b2.close()

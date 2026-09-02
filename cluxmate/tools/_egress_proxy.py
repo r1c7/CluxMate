@@ -137,15 +137,25 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _pump(self, a, b):
         try:
+            closed = set()
             while True:
-                r, _, _ = select.select([a, b], [], [], 30)
+                readable = [s for s in (a, b) if s not in closed]
+                if not readable:
+                    return
+                r, _, _ = select.select(readable, [], [], 30)
                 if not r:
-                    break
+                    return
                 for s in r:
                     data = s.recv(65536)
+                    peer = b if s is a else a
                     if not data:
-                        return
-                    (b if s is a else a).sendall(data)
+                        closed.add(s)
+                        try:
+                            peer.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                    else:
+                        peer.sendall(data)
         except OSError:
             pass
 
