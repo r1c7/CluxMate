@@ -186,10 +186,12 @@ class MCPClient:
     run_in_executor from the agent loop — see module docstring.
     """
 
-    def __init__(self, config: MCPConfig, sandbox=None, cwd: str | None = None):
+    def __init__(self, config: MCPConfig, sandbox=None, cwd: str | None = None,
+                 egress_mode: str = "shared"):
         self.config = config
         self._sandbox = sandbox  # ShellSandbox | None (stdio servers only)
         self._cwd = cwd or os.getcwd()
+        self._egress_mode = egress_mode
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         self._http: httpx.Client | None = None
@@ -414,6 +416,7 @@ class MCPClient:
             "transport": transport_label,
             "status": status,
             "disabled": self.config.disabled,
+            "egress": self._egress_mode,
             "error": self._error,
             "tools": [
                 {
@@ -492,9 +495,10 @@ class MCPManager:
     JSON-RPC method.
     """
 
-    def __init__(self, cwd: str, sandbox=None):
+    def __init__(self, cwd: str, sandbox=None, egress_mode: str = "shared"):
         self._cwd = cwd
         self._sandbox = sandbox  # ShellSandbox | None — passed to stdio clients
+        self._egress_mode = egress_mode
         self._configs: dict[str, MCPConfig] = {}
         self._clients: dict[str, MCPClient] = {}
         self._tools: list[MCPToolWrapper] = []
@@ -514,7 +518,8 @@ class MCPManager:
 
         for cfg in self._configs.values():
             self._clients[cfg.name] = MCPClient(
-                cfg, sandbox=self._sandbox, cwd=self._cwd
+                cfg, sandbox=self._sandbox, cwd=self._cwd,
+                egress_mode=self._egress_mode,
             )
 
         if not self._clients:
