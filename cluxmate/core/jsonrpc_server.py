@@ -630,6 +630,11 @@ class JsonRpcServer:
         elif method in ("ssrf/config/set", "ssrf:config:set"):
             result = self._set_ssrf_config(params)
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
+        elif method in ("egress/config", "egress/config/get", "egress:config"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._egress_snapshot()})
+        elif method in ("egress/config/set", "egress:config:set"):
+            result = self._set_egress_config(params)
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
         elif method in ("chat/set_mode", "chat:set_mode"):
             self._set_mode(params.get("mode", "default"))
             if req_id is not None:
@@ -676,6 +681,7 @@ class JsonRpcServer:
         # subprocesses before building a new one so they don't leak.
         self._shutdown_mcp()
         self._shutdown_lsp()
+        self._shutdown_egress()
         self._cwd = params.get("cwd", os.getcwd())
         self._session_id = params.get("session_id", "")
         # Rebind the approval policy to this workspace's permissions.json so a
@@ -692,6 +698,10 @@ class JsonRpcServer:
         if getattr(self, "_ssrf_config", None) is None:
             from cluxmate.core.ssrf_config import SsrConfig
             self._ssrf_config = SsrConfig()
+        # Network-egress config is likewise user-global (~/.cluxmate/egress.json).
+        if getattr(self, "_egress_config", None) is None:
+            from cluxmate.core.egress_config import EgressConfig
+            self._egress_config = EgressConfig()
         model_id = params.get("model_id", "")
         # Development mode is per-session and not persisted; default unless the
         # desktop passes one on (re)initialize.
@@ -719,6 +729,7 @@ class JsonRpcServer:
         builder.with_grants(self._grants)
         builder.with_read_denies(self._read_denies)
         builder.with_ssrf(self._ssrf_config)
+        builder.with_egress(self._egress_config)
         # Lifecycle hooks (settings.json). One manager per session so the payload
         # carries the session id; the builder caches it and children inherit it.
         # The observer streams hook_start/hook_result events to the desktop.
@@ -811,6 +822,13 @@ class JsonRpcServer:
         if self._builder is not None:
             try:
                 self._builder.lsp_shutdown()
+            except Exception:
+                pass
+
+    def _shutdown_egress(self):
+        if self._builder is not None:
+            try:
+                self._builder.shutdown_egress()
             except Exception:
                 pass
 
@@ -1181,6 +1199,23 @@ class JsonRpcServer:
             [e for e in params.get("allow", []) if isinstance(e, str)],
             [e for e in params.get("block_extra", []) if isinstance(e, str)],
         )
+
+    def _egress_snapshot(self) -> dict[str, Any]:
+        cfg = getattr(self, "_egress_config", None)
+        return cfg.snapshot() if cfg is not None else {"mode": "shared"}
+
+    def _set_egress_config(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Replace the egress mode and rebuild the agent (the mode is baked
+        into the sandbox backend at build time). Invalid mode raises ValueError
+        (→ error response)."""
+        if getattr(self, "_egress_config", None) is None:
+            from cluxmate.core.egress_config import EgressConfig
+            self._egress_config = EgressConfig()
+        result = self._egress_config.set_mode(params.get("mode", "shared"))
+        if self._builder is not None:
+            self._builder.with_egress(self._egress_config)
+            self._agent = self._builder.build(session_log=self._session_log)
+        return result
 
     def _set_grants(self, paths: list[str]) -> dict[str, Any]:
         """Replace the grant set. Revoked folders are restored Low → Medium
