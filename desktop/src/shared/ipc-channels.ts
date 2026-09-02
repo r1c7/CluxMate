@@ -33,6 +33,8 @@ export const IPC = {
   SANDBOX_BASH_SET: 'sandbox:bash-set',
   SSRF_CONFIG_GET: 'ssrf:config-get',
   SSRF_CONFIG_SET: 'ssrf:config-set',
+  EGRESS_CONFIG_GET: 'egress:config-get',
+  EGRESS_CONFIG_SET: 'egress:config-set',
 
   CHECKPOINT_LIST:    'checkpoint:list',
   CHECKPOINT_DIFF:    'checkpoint:diff',

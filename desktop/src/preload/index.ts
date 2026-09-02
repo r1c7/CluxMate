@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import type {
   ElectronAPI, CreateSessionParams,
-  ChatResult, SessionStreamEvent, SsrConfigPayload,
+  ChatResult, SessionStreamEvent, SsrConfigPayload, EgressConfigPayload,
 } from '../shared/types'
 
 const api: ElectronAPI = {
@@ -42,6 +42,8 @@ const api: ElectronAPI = {
   setBashSandbox: (enabled: boolean) => ipcRenderer.invoke(IPC.SANDBOX_BASH_SET, enabled),
   getSsrConfig: () => ipcRenderer.invoke(IPC.SSRF_CONFIG_GET),
   setSsrConfig: (cfg: SsrConfigPayload) => ipcRenderer.invoke(IPC.SSRF_CONFIG_SET, cfg),
+  getEgressConfig: () => ipcRenderer.invoke(IPC.EGRESS_CONFIG_GET),
+  setEgressConfig: (mode: EgressConfigPayload['mode']) => ipcRenderer.invoke(IPC.EGRESS_CONFIG_SET, mode),
 
   listCheckpoints: (sessionId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_LIST, sessionId),
   diffCheckpoint: (sessionId: string, checkpointId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_DIFF, sessionId, checkpointId),

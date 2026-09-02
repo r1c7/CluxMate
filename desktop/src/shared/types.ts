@@ -610,6 +610,13 @@ export interface SsrConfigPayload {
   block_extra: string[]
 }
 
+// Network-egress mode for the bash + MCP stdio sandbox (~/.cluxmate/egress.json).
+// shared = unrestricted (default); off = kernel-level deny (Windows fail-closed);
+// proxy = force traffic through the local allowlist proxy.
+export interface EgressConfigPayload {
+  mode: 'shared' | 'off' | 'proxy'
+}
+
 declare global {
   interface Window {
     electronAPI: ElectronAPI
@@ -696,6 +703,13 @@ export interface ElectronAPI {
   // web request — no session restart.
   getSsrConfig: () => Promise<SsrConfigPayload>
   setSsrConfig: (cfg: SsrConfigPayload) => Promise<SsrConfigPayload>
+
+  // Network-egress mode (~/.cluxmate/egress.json). get reads the file directly;
+  // set persists it and kills the active bridge so the next message re-builds
+  // the sandbox backend with the new mode. White list for 'proxy' comes from
+  // ssrf.json's allow list.
+  getEgressConfig: () => Promise<EgressConfigPayload>
+  setEgressConfig: (mode: EgressConfigPayload['mode']) => Promise<EgressConfigPayload>
 
   listCheckpoints: (sessionId: string) => Promise<Checkpoint[]>
   diffCheckpoint: (sessionId: string, checkpointId: string) => Promise<CheckpointFileDiff[]>

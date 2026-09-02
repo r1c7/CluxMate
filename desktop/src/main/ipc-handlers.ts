@@ -3,7 +3,7 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { AgentBridge } from './agent-bridge'
 import * as sessionStore from './session-store'
@@ -188,6 +188,27 @@ function readSsrConfig(): SsrConfigPayload {
 function writeSsrConfig(cfg: SsrConfigPayload): void {
   fs.mkdirSync(path.dirname(ssrfConfigPath()), { recursive: true })
   fs.writeFileSync(ssrfConfigPath(), JSON.stringify(cfg, null, 2), 'utf-8')
+}
+
+// Network-egress mode (egress.json) — user-global, mirrors the SSRF config
+// file layout. get reads the file directly; set writes it + kills the active
+// bridge so the next message rebuilds the sandbox backend with the new mode.
+function egressConfigPath(): string {
+  return path.join(app.getPath('home'), '.cluxmate', 'egress.json')
+}
+
+function readEgressConfig(): EgressConfigPayload {
+  try {
+    const data = JSON.parse(fs.readFileSync(egressConfigPath(), 'utf-8'))
+    return { mode: data.mode === 'off' || data.mode === 'proxy' ? data.mode : 'shared' }
+  } catch {
+    return { mode: 'shared' }
+  }
+}
+
+function writeEgressConfig(mode: EgressConfigPayload['mode']): void {
+  fs.mkdirSync(path.dirname(egressConfigPath()), { recursive: true })
+  fs.writeFileSync(egressConfigPath(), JSON.stringify({ mode }, null, 2), 'utf-8')
 }
 
 // Convert the legacy {providers, default_provider} schema to v2 {models,
@@ -910,6 +931,24 @@ export function registerIpcHandlers() {
     }
     writeSsrConfig(next)
     return next
+  })
+
+  ipcMain.handle(IPC.EGRESS_CONFIG_GET, () => readEgressConfig())
+
+  ipcMain.handle(IPC.EGRESS_CONFIG_SET, (_, mode: string) => {
+    const next: EgressConfigPayload['mode'] = mode === 'off' || mode === 'proxy' ? mode : 'shared'
+    writeEgressConfig(next)
+    // The mode is baked into the sandbox backend at build time, so kill the
+    // active bridge (mirrors grants + forbid-read + SANDBOX_BASH_SET); the next
+    // message re-initializes the Python agent with the new egress.json.
+    if (activeSessionId) {
+      const b = bridges.get(activeSessionId)
+      if (b) {
+        bridges.delete(activeSessionId)
+        b.kill().catch(() => {})
+      }
+    }
+    return { mode: next }
   })
 
   ipcMain.handle(IPC.CHAT_SET_MODE, async (_, sid: string, mode: string) => {

@@ -217,6 +217,26 @@ export default function SettingsView() {
     } catch { /* keep the optimistic list on failure */ }
   }
 
+  // Network-egress mode (egress.json) — user-global, mirroring the bash sandbox
+  // toggle: read once on mount, committed immediately on change.
+  const [egressMode, setEgressMode] = useState<'shared' | 'off' | 'proxy'>('shared')
+  const [egressLoaded, setEgressLoaded] = useState(false)
+  useEffect(() => {
+    let alive = true
+    window.electronAPI.getEgressConfig().then((r) => {
+      if (alive) { setEgressMode(r.mode); setEgressLoaded(true) }
+    }).catch(() => { if (alive) setEgressLoaded(true) })
+    return () => { alive = false }
+  }, [])
+
+  const commitEgress = async (mode: 'shared' | 'off' | 'proxy') => {
+    setEgressMode(mode)
+    try {
+      const r = await window.electronAPI.setEgressConfig(mode)
+      setEgressMode(r.mode)
+    } catch { /* keep optimistic on failure */ }
+  }
+
   const addSsrAllow = () => {
     const v = ssrfAllowInput.trim()
     if (!v) return
@@ -670,6 +690,31 @@ export default function SettingsView() {
                 </div>
 
                 <p className="text-[11px] text-ink-faint">{t('settings.sandbox.ssrf.footnote')}</p>
+              </SectionCard>
+
+              {/* Network egress for bash + MCP */}
+              <SectionCard icon={<GlobeIcon className="w-4 h-4" />} title={t('settings.sandbox.egress.title')}>
+                <p className="text-xs text-ink-faint">{t('settings.sandbox.egress.hint')}</p>
+                {!egressLoaded ? (
+                  <p className="text-sm text-ink-faint py-2">{t('common.loading')}</p>
+                ) : (
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['shared', 'off', 'proxy'] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => commitEgress(m)}
+                        className={`rounded-lg border px-2 py-2 text-sm transition-colors ${
+                          egressMode === m
+                            ? 'border-accent ring-1 ring-accent text-accent'
+                            : 'border-surface-border text-ink-soft hover:bg-surface-raised'
+                        }`}
+                      >
+                        {t(`settings.sandbox.egress.${m}`)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[11px] text-ink-faint">{t('settings.sandbox.egress.footnote')}</p>
               </SectionCard>
             </div>
           ) : (
