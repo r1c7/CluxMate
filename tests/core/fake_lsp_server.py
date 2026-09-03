@@ -4,8 +4,9 @@ Speaks the real LSP Base Protocol over stdio — Content-Length framed JSON,
 NOT newline-delimited JSON — just well enough to exercise LSPClient:
 - initialize (returns utf-16 positionEncoding)
 - initialized (ack only)
-- textDocument/definition (returns one fixed location)
+- textDocument/definition / declaration / typeDefinition / implementation
 - textDocument/references / hover / documentSymbol / workspace/symbol
+- textDocument/prepareCallHierarchy + callHierarchy/incomingCalls|outgoingCalls
 
 Run as: python tests/core/fake_lsp_server.py
 """
@@ -74,6 +75,30 @@ def handle_request(req: dict, stream) -> dict | None:
                 "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}},
             }],
         }
+    if method == "textDocument/declaration":
+        return {
+            "jsonrpc": "2.0", "id": req_id,
+            "result": [{
+                "uri": "file:///fake/decl.py",
+                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 4}},
+            }],
+        }
+    if method == "textDocument/typeDefinition":
+        return {
+            "jsonrpc": "2.0", "id": req_id,
+            "result": [{
+                "uri": "file:///fake/type_def.py",
+                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 4}},
+            }],
+        }
+    if method == "textDocument/implementation":
+        return {
+            "jsonrpc": "2.0", "id": req_id,
+            "result": [{
+                "uri": "file:///fake/impl.py",
+                "range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 4}},
+            }],
+        }
     if method == "textDocument/references":
         return {"jsonrpc": "2.0", "id": req_id, "result": []}
     if method == "textDocument/hover":
@@ -85,6 +110,39 @@ def handle_request(req: dict, stream) -> dict | None:
         return {"jsonrpc": "2.0", "id": req_id, "result": []}
     if method == "workspace/symbol":
         return {"jsonrpc": "2.0", "id": req_id, "result": []}
+    if method == "textDocument/prepareCallHierarchy":
+        return {
+            "jsonrpc": "2.0", "id": req_id,
+            "result": [{
+                "name": "foo", "kind": 12, "uri": "file:///fake/a.py",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+            }],
+        }
+    if method == "callHierarchy/incomingCalls":
+        return {
+            "jsonrpc": "2.0", "id": req_id,
+            "result": [{
+                "from": {
+                    "name": "caller_fn", "kind": 12, "uri": "file:///fake/caller.py",
+                    "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 9}},
+                    "selectionRange": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 9}},
+                },
+                "fromRanges": [{"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 9}}],
+            }],
+        }
+    if method == "callHierarchy/outgoingCalls":
+        return {
+            "jsonrpc": "2.0", "id": req_id,
+            "result": [{
+                "to": {
+                    "name": "callee_fn", "kind": 12, "uri": "file:///fake/callee.py",
+                    "range": {"start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 9}},
+                    "selectionRange": {"start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 9}},
+                },
+                "fromRanges": [{"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}],
+            }],
+        }
     # notifications (initialized, didOpen, didChange, exit) have no id.
     return None
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import threading
@@ -27,14 +28,33 @@ class ServerSpec:
     """How to launch one language server. Command resolves on PATH (never
     bundled); install_hint surfaces when it is missing. extension_to_language
     maps file suffixes to LSP language IDs and drives file → language routing,
-    so a config-only entry can add a new language without any code change."""
+    so a config-only entry can add a new language without any code change.
+
+    install_cmd is the argv form of the one-shot install command (never run
+    through a shell). auto_install is a per-server override of the top-level
+    lsp.json ``auto_install`` flag: None = inherit, bool = force on/off.
+    Install commands are USER config (shipped defaults or lsp.json), never
+    model output, and only run when the user opted in — so they execute
+    unsandboxed (global installs need real filesystem + network writes) and
+    never fail-closed, mirroring hooks' trust model."""
 
     command: str
     args: list[str] = field(default_factory=list)
     extension_to_language: dict[str, str] = field(default_factory=dict)
     install_hint: str = ""
+    install_cmd: list[str] = field(default_factory=list)
+    auto_install: bool | None = None
     env: dict[str, str] = field(default_factory=dict)
     initialization_options: dict = field(default_factory=dict)
+
+
+class ServerNotInstalledError(RuntimeError):
+    """The server binary is missing from PATH. Carries the spec so the manager
+    can decide between auto-install and surfacing the install hint."""
+
+    def __init__(self, message: str, spec: ServerSpec):
+        super().__init__(message)
+        self.spec = spec
 
 
 LSP_DEFAULT_SPECS: dict[str, ServerSpec] = {
@@ -43,33 +63,40 @@ LSP_DEFAULT_SPECS: dict[str, ServerSpec] = {
         args=["--stdio"],
         extension_to_language={".py": "python", ".pyi": "python"},
         install_hint="npm i -g pyright",
+        install_cmd=["npm", "install", "-g", "pyright"],
     ),
     "typescript": ServerSpec(
         command="typescript-language-server",
         args=["--stdio"],
         extension_to_language={".ts": "typescript", ".tsx": "typescript"},
         install_hint="npm i -g typescript-language-server typescript",
+        install_cmd=["npm", "install", "-g", "typescript-language-server", "typescript"],
     ),
     "javascript": ServerSpec(
         command="typescript-language-server",
         args=["--stdio"],
         extension_to_language={".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript"},
         install_hint="npm i -g typescript-language-server typescript",
+        install_cmd=["npm", "install", "-g", "typescript-language-server", "typescript"],
     ),
     "go": ServerSpec(
         command="gopls",
         extension_to_language={".go": "go"},
         install_hint="go install golang.org/x/tools/gopls@latest",
+        install_cmd=["go", "install", "golang.org/x/tools/gopls@latest"],
     ),
     "java": ServerSpec(
         command="jdtls",
         extension_to_language={".java": "java"},
+        # Platform-specific manual install only — no single portable command,
+        # so this spec stays download-prompt-only (install_cmd empty).
         install_hint="install eclipse.jdt.ls (jdtls): brew install jdtls / from the JDT-LS releases",
     ),
     "rust": ServerSpec(
         command="rust-analyzer",
         extension_to_language={".rs": "rust"},
         install_hint="rustup component add rust-analyzer",
+        install_cmd=["rustup", "component", "add", "rust-analyzer"],
     ),
     "cpp": ServerSpec(
         command="clangd",
@@ -77,6 +104,8 @@ LSP_DEFAULT_SPECS: dict[str, ServerSpec] = {
             ".c": "cpp", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp",
             ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
         },
+        # Platform-specific manual install only (apt/brew/scoop differ) —
+        # download-prompt-only, no portable install_cmd.
         install_hint="install clangd (LLVM): apt install clangd / brew install llvm / scoop install llvm",
     ),
 }
@@ -88,9 +117,26 @@ def _spec_to_dict(spec: ServerSpec) -> dict[str, Any]:
         "args": list(spec.args),
         "extension_to_language": dict(spec.extension_to_language),
         "install_hint": spec.install_hint,
+        "install_cmd": list(spec.install_cmd),
+        "auto_install": spec.auto_install,
         "env": dict(spec.env),
         "initialization_options": dict(spec.initialization_options),
     }
+
+
+def _parse_install_cmd(value: Any) -> list[str]:
+    """install_cmd accepts an argv list or a convenience shell-style string."""
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if isinstance(value, str):
+        return shlex.split(value)
+    return []
+
+
+def _parse_auto_install(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
 
 
 def _dict_to_spec(data: dict[str, Any]) -> ServerSpec:
@@ -102,9 +148,20 @@ def _dict_to_spec(data: dict[str, Any]) -> ServerSpec:
         args=list(data.get("args", []) or []),
         extension_to_language={str(k): str(v) for k, v in ext.items()},
         install_hint=str(data.get("install_hint", "") or ""),
+        install_cmd=_parse_install_cmd(data.get("install_cmd")),
+        auto_install=_parse_auto_install(data.get("auto_install")),
         env={str(k): str(v) for k, v in (data.get("env", {}) or {}).items()},
         initialization_options=data.get("initialization_options", {}) or {},
     )
+
+
+@dataclass
+class LSPConfig:
+    """Merged LSP configuration: per-language specs + the top-level
+    auto_install opt-in (default False — installers are never run silently)."""
+
+    specs: dict[str, ServerSpec] = field(default_factory=dict)
+    auto_install: bool = False
 
 
 class LSPConfigManager:
@@ -113,7 +170,9 @@ class LSPConfigManager:
     Global: ~/.cluxmate/lsp.json
     Project: <cwd>/.cluxmate/lsp.json (deep-merges over global over defaults;
     project can override per-server fields, disable a default, or add a new
-    language). Mirrors MCPConfigManager's two-root merge.
+    language). Mirrors MCPConfigManager's two-root merge. Top-level shape:
+
+    {"auto_install": false, "servers": {lang: ServerSpec-ish dict}}
     """
 
     def __init__(self, cwd: str):
@@ -126,9 +185,13 @@ class LSPConfigManager:
         ]
 
     def load(self) -> dict[str, ServerSpec]:
+        return self.load_config().specs
+
+    def load_config(self) -> LSPConfig:
         merged: dict[str, dict[str, Any]] = {
             lang: _spec_to_dict(spec) for lang, spec in LSP_DEFAULT_SPECS.items()
         }
+        auto_install = False
         for path in self._roots():
             if not path.is_file():
                 continue
@@ -136,6 +199,8 @@ class LSPConfigManager:
                 data = json.loads(path.read_text("utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
+            if isinstance(data, dict) and isinstance(data.get("auto_install"), bool):
+                auto_install = data["auto_install"]
             servers = data.get("servers", {})
             if not isinstance(servers, dict):
                 continue
@@ -155,7 +220,7 @@ class LSPConfigManager:
             if not spec.command:
                 continue
             specs[lang] = spec
-        return specs
+        return LSPConfig(specs=specs, auto_install=auto_install)
 
 
 def _path_to_uri(path: str) -> str:
@@ -194,9 +259,10 @@ class LSPClient:
         """Spawn + initialize handshake. Returns True on success."""
         resolved = shutil.which(self.spec.command)
         if resolved is None:
-            raise RuntimeError(
+            raise ServerNotInstalledError(
                 f"language server \"{self.spec.command}\" not found on PATH. "
-                f"Install it: {self.spec.install_hint}"
+                f"Install it: {self.spec.install_hint or ' '.join(self.spec.install_cmd) or 'see lsp.json'}",
+                spec=self.spec,
             )
         cmd = [resolved] + self.spec.args
         env = os.environ.copy()
@@ -383,6 +449,12 @@ class LSPClient:
 
 _MAX_LOCATIONS = 100
 _MAX_RESULT_CHARS = 16_000
+# Ceiling for one auto-install attempt (npm/rustup can be slow); the install
+# runs synchronously inside the triggering tool call, which is why it is
+# strictly opt-in (top-level lsp.json auto_install, default False).
+_INSTALL_TIMEOUT_SECONDS = 300
+# How much install output to echo back into error messages.
+_INSTALL_OUTPUT_TAIL = 4000
 
 
 def _locate_symbol(line_text: str, symbol: str, encoding: str) -> int:
@@ -449,12 +521,32 @@ class LSPManager:
     Servers start on first query for their language and are reused; the
     session-scoped lifecycle (shutdown/atexit) bounds them, not a single turn.
     Concurrent first-use calls share one spawn via a starting gate.
+
+    Auto-install: when a server binary is missing, ``_spawn`` either installs
+    it (effective auto_install for the spec is True and an install_cmd exists)
+    or surfaces the install hint. Effective auto_install =
+    manager-level gate ``self.auto_install`` AND (per-server override in
+    lsp.json, else the top-level lsp.json ``auto_install``). The builder lowers
+    the gate in plan mode so hard isolation can never run an installer. Install
+    commands run unsandboxed by design: they are user config, not model output
+    (see ServerSpec docstring).
     """
 
-    def __init__(self, workspace_root: str, specs: dict[str, ServerSpec] | None = None, sandbox=None):
+    def __init__(self, workspace_root: str, specs: dict[str, ServerSpec] | None = None, sandbox=None,
+                 auto_install: bool = True):
         self.ws_root = workspace_root
-        self.specs = specs if specs is not None else LSPConfigManager(workspace_root).load()
+        if specs is not None:
+            self.specs = specs
+            self._auto_install_default = False
+        else:
+            cfg = LSPConfigManager(workspace_root).load_config()
+            self.specs = cfg.specs
+            self._auto_install_default = cfg.auto_install
         self._sandbox = sandbox
+        # Manager-level gate; AgentBuilder sets it False in plan mode so hard
+        # isolation can never trigger an installer run.
+        self.auto_install = auto_install
+        self._install_lock = threading.Lock()
         self._ext_index: dict[str, str] = {}
         for lang, spec in self.specs.items():
             for ext in spec.extension_to_language:
@@ -462,6 +554,14 @@ class LSPManager:
         self._clients: dict[str, LSPClient] = {}
         self._starting: dict[str, threading.Event] = {}
         atexit.register(self.shutdown)
+
+    def _auto_install_for(self, spec: ServerSpec) -> bool:
+        """Effective auto-install decision for one server."""
+        if not self.auto_install:
+            return False
+        if spec.auto_install is not None:
+            return spec.auto_install
+        return self._auto_install_default
 
     def _abs(self, path: str) -> str:
         p = Path(path)
@@ -504,10 +604,86 @@ class LSPManager:
         # resolved from spec.extension_to_language. First extension's language
         # id is used when the file's exact id is unknown.
         first_lang = next(iter(spec.extension_to_language.values()), lang)
-        client = LSPClient(spec, language_id=first_lang, root=self.ws_root, sandbox=self._sandbox)
-        if not client.start():
-            raise RuntimeError(f"failed to start language server {spec.command}")
-        return client
+
+        def make() -> LSPClient:
+            return LSPClient(spec, language_id=first_lang, root=self.ws_root, sandbox=self._sandbox)
+
+        def try_start(client: LSPClient) -> bool:
+            try:
+                return client.start()
+            except ServerNotInstalledError:
+                raise
+            except OSError as e:
+                # Binary exists but cannot execute (corrupt/arch-mismatched
+                # install) — surface a clean tool error, not a crash.
+                raise RuntimeError(f"failed to start language server {spec.command}: {e}")
+
+        client = make()
+        try:
+            if try_start(client):
+                return client
+        except ServerNotInstalledError:
+            if self._auto_install_for(spec) and spec.install_cmd:
+                installed, output = self._run_install(spec)
+                if installed:
+                    client = make()
+                    if try_start(client):
+                        return client
+                    raise RuntimeError(
+                        f"language server {spec.command} failed to start after installation"
+                    )
+                raise RuntimeError(self._missing_message(spec, install_output=output))
+            raise RuntimeError(self._missing_message(spec))
+        raise RuntimeError(f"failed to start language server {spec.command}")
+
+    @staticmethod
+    def _missing_message(spec: ServerSpec, install_output: str | None = None) -> str:
+        """Download/install prompt shown when the server is missing."""
+        parts = [f'language server "{spec.command}" is not installed.']
+        if spec.install_cmd:
+            parts.append(f"Install with: {' '.join(spec.install_cmd)}")
+        if spec.install_hint:
+            parts.append(f"Manual install: {spec.install_hint}")
+        if install_output:
+            parts.append(f"Auto-install attempt failed:\n{install_output}")
+        parts.append(
+            'Set "auto_install": true in ~/.cluxmate/lsp.json (or per server) to '
+            "install it automatically on demand."
+        )
+        return " ".join(parts)
+
+    def _run_install(self, spec: ServerSpec) -> tuple[bool, str]:
+        """Run spec.install_cmd once, serialized. Returns (found_on_PATH, output).
+
+        Unsandboxed by design — installers need real global writes + network,
+        and the command is user config gated behind an explicit opt-in
+        (lsp.json auto_install), never model output.
+        """
+        with self._install_lock:
+            if shutil.which(spec.command) is not None:
+                return True, ""  # another caller already installed it
+            cmd = list(spec.install_cmd)
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.ws_root,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=_INSTALL_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                return False, f"installation timed out after {_INSTALL_TIMEOUT_SECONDS}s"
+            except OSError as e:
+                return False, f"failed to run install command: {e}"
+            output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            tail = output[-_INSTALL_OUTPUT_TAIL:]
+            if shutil.which(spec.command) is not None:
+                return True, tail
+            rc = f" (exit code {proc.returncode})" if proc.returncode else ""
+            return False, f"{tail or 'install produced no output'}{rc}\n" \
+                          f"{spec.command} still not found on PATH after install"
 
     def _prepare(self, file: str, line: int, symbol: str) -> tuple[LSPClient, str, dict]:
         path = self._abs(file)
@@ -521,10 +697,12 @@ class LSPManager:
         col = _locate_symbol(lines[line - 1], symbol, client.pos_encoding)
         return client, uri, {"line": line - 1, "character": col}
 
-    def definition(self, file: str, line: int, symbol: str) -> str:
+    def _loc_query(self, file: str, line: int, symbol: str, method: str, label: str) -> str:
+        """Shared shape of the position → locations navigation ops
+        (definition/declaration/typeDefinition/implementation)."""
         try:
             client, uri, pos = self._prepare(file, line, symbol)
-            raw = client.request("textDocument/definition", {
+            raw = client.request(method, {
                 "textDocument": {"uri": uri}, "position": pos,
             })
             if raw is None:
@@ -533,11 +711,70 @@ class LSPManager:
                 locs = [loc for loc in raw if isinstance(loc, dict)]
             else:
                 locs = [raw]
-            return _format_locations("definition", locs, self.ws_root)
+            return _format_locations(label, locs, self.ws_root)
         except ValueError as e:
             return f"Error: {e}"
         except RuntimeError as e:
             return f"Error: {e}"
+
+    def definition(self, file: str, line: int, symbol: str) -> str:
+        return self._loc_query(file, line, symbol, "textDocument/definition", "definition")
+
+    def declaration(self, file: str, line: int, symbol: str) -> str:
+        return self._loc_query(file, line, symbol, "textDocument/declaration", "declaration")
+
+    def type_definition(self, file: str, line: int, symbol: str) -> str:
+        return self._loc_query(file, line, symbol, "textDocument/typeDefinition", "type definition")
+
+    def implementation(self, file: str, line: int, symbol: str) -> str:
+        return self._loc_query(file, line, symbol, "textDocument/implementation", "implementation")
+
+    def call_hierarchy(self, file: str, line: int, symbol: str,
+                       kind: str = "incomingCalls") -> str:
+        """One level of the call graph around a symbol.
+
+        LSP has no flat "callHierarchy" request: this runs
+        textDocument/prepareCallHierarchy to anchor the symbol, then
+        callHierarchy/incomingCalls or callHierarchy/outgoingCalls for one
+        level (bounded — the protocol returns one level per call).
+        """
+        if kind not in ("incomingCalls", "outgoingCalls"):
+            return f"Error: unknown call hierarchy kind {kind!r} (use incomingCalls or outgoingCalls)"
+        try:
+            client, uri, pos = self._prepare(file, line, symbol)
+            items = client.request("textDocument/prepareCallHierarchy", {
+                "textDocument": {"uri": uri}, "position": pos,
+            })
+            if not isinstance(items, list) or not items:
+                return "no call hierarchy items at this position"
+            item = items[0]
+            raw = client.request(f"callHierarchy/{kind}", {"item": item})
+        except ValueError as e:
+            return f"Error: {e}"
+        except RuntimeError as e:
+            return f"Error: {e}"
+        calls = raw if isinstance(raw, list) else []
+        if not calls:
+            return f"no {kind} found"
+        target_field = "from" if kind == "incomingCalls" else "to"
+        locs: list[dict] = []
+        for call in calls:
+            target = call.get(target_field) if isinstance(call, dict) else None
+            if not isinstance(target, dict):
+                continue
+            uri = target.get("uri", "")
+            if not uri:
+                continue
+            locs.append({
+                "uri": uri,
+                "range": target.get("selectionRange") or target.get("range") or {},
+            })
+        label = "caller" if kind == "incomingCalls" else "callee"
+        rendered = _format_locations(label, locs, self.ws_root)
+        root_name = items[0].get("name", "") if isinstance(items[0], dict) else ""
+        if root_name:
+            return f"{label}s of {root_name}:\n{rendered}"
+        return rendered
 
     def references(self, file: str, line: int, symbol: str) -> str:
         try:

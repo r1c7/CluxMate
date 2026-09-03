@@ -680,6 +680,11 @@ class AgentBuilder:
         """Lazy, cached LSP manager for this builder's cwd. Shared by children."""
         if self._lsp is None:
             self._lsp = LSPManager(self._cwd, sandbox=self._shell_sandbox())
+        # Auto-install runs installer commands — a write-class side effect — so
+        # plan mode keeps it off regardless of lsp.json: hard isolation holds.
+        # Children inherit the parent's mode, so their _get_tools sets the same
+        # value on the shared manager.
+        self._lsp.auto_install = self._mode != "plan"
         return self._lsp
 
     def lsp_shutdown(self) -> None:

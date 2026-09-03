@@ -44,6 +44,20 @@ def test_lsp_manager_is_cached_across_calls(tmp_path):
     assert mgr1 is mgr2
 
 
+def test_default_mode_allows_auto_install(tmp_path):
+    b = _builder(tmp_path)
+    assert b._lsp_manager().auto_install is True
+
+
+def test_plan_mode_disables_auto_install(tmp_path):
+    # Auto-install runs installer commands — a write-class side effect — so
+    # plan mode's hard isolation keeps the gate off even if lsp.json opts in.
+    b = AgentBuilder(str(tmp_path), _Provider())
+    b.with_default_tools().with_mode("plan")
+    b._get_tools()
+    assert b._lsp_manager().auto_install is False
+
+
 def test_subagent_profiles_include_lsp():
     assert "lsp" in SUBAGENT_PROFILES["explore"]["tools"]
     assert "lsp" in SUBAGENT_PROFILES["general-purpose"]["tools"]

@@ -1,9 +1,21 @@
-"""LspTool — a single read-only tool exposing five LSP navigation operations."""
+"""LspTool — a single read-only tool exposing nine LSP navigation operations."""
 
 import asyncio
 from typing import Any
 
 from .base import BaseTool
+
+_OPERATIONS = [
+    "goToDefinition", "goToDeclaration", "goToTypeDefinition", "goToImplementation",
+    "findReferences", "hover", "documentSymbol", "workspaceSymbol", "callHierarchy",
+]
+
+_CALL_KINDS = ("incomingCalls", "outgoingCalls")
+
+_POSITION_OPS = {
+    "goToDefinition", "goToDeclaration", "goToTypeDefinition", "goToImplementation",
+    "findReferences", "hover",
+}
 
 
 class LspTool(BaseTool):
@@ -20,11 +32,17 @@ class LspTool(BaseTool):
     def description(self) -> str:
         return (
             "Query a language server for precise code navigation. operation is one of "
-            "goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol. "
-            "For goToDefinition/findReferences/hover, pass file_path (relative to the "
-            "workspace or absolute), the 1-based line, and the exact symbol text on that "
-            "line (the column is located internally). documentSymbol takes file_path only. "
-            "workspaceSymbol takes query only."
+            "goToDefinition, goToDeclaration, goToTypeDefinition, goToImplementation, "
+            "findReferences, hover, documentSymbol, workspaceSymbol, callHierarchy. "
+            "For goToDefinition/goToDeclaration/goToTypeDefinition/goToImplementation/"
+            "findReferences/hover, pass file_path (relative to the workspace or "
+            "absolute), the 1-based line, and the exact symbol text on that line "
+            "(the column is located internally). callHierarchy takes the same plus "
+            "kind (incomingCalls or outgoingCalls, default incomingCalls). "
+            "documentSymbol takes file_path only. workspaceSymbol takes query only. "
+            "If the language server is not installed, the tool reports how to "
+            "install it (or installs it automatically when auto_install is enabled "
+            "in lsp.json)."
         )
 
     @property
@@ -34,10 +52,7 @@ class LspTool(BaseTool):
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": [
-                        "goToDefinition", "findReferences", "hover",
-                        "documentSymbol", "workspaceSymbol",
-                    ],
+                    "enum": list(_OPERATIONS),
                     "description": "Which navigation query to run.",
                 },
                 "file_path": {
@@ -56,6 +71,13 @@ class LspTool(BaseTool):
                     "type": "string",
                     "description": "Search string for workspaceSymbol.",
                 },
+                "kind": {
+                    "type": "string",
+                    "enum": list(_CALL_KINDS),
+                    "description": "For callHierarchy: who calls this symbol "
+                                   "(incomingCalls) or what it calls (outgoingCalls). "
+                                   "Defaults to incomingCalls.",
+                },
             },
             "required": ["operation"],
         }
@@ -66,25 +88,38 @@ class LspTool(BaseTool):
 
     async def execute(self, operation: str, file_path: str | None = None,
                       line: int | None = None, symbol: str | None = None,
-                      query: str | None = None) -> str:
+                      query: str | None = None, kind: str | None = None) -> str:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, self._run, operation, file_path, line, symbol, query
+            None, self._run, operation, file_path, line, symbol, query, kind
         )
 
     def _run(self, operation: str, file_path: str | None, line: int | None,
-             symbol: str | None, query: str | None) -> str:
-        if operation in ("goToDefinition", "findReferences", "hover"):
+             symbol: str | None, query: str | None, kind: str | None) -> str:
+        if operation in _POSITION_OPS:
             if not file_path or line is None or not symbol:
                 return "Error: operation requires file_path, line, and symbol"
             if line < 1:
                 return "Error: line must be >= 1"
             fn = {
                 "goToDefinition": self._manager.definition,
+                "goToDeclaration": self._manager.declaration,
+                "goToTypeDefinition": self._manager.type_definition,
+                "goToImplementation": self._manager.implementation,
                 "findReferences": self._manager.references,
                 "hover": self._manager.hover,
             }[operation]
             return fn(file_path, line, symbol)
+        if operation == "callHierarchy":
+            if not file_path or line is None or not symbol:
+                return "Error: callHierarchy requires file_path, line, and symbol"
+            if line < 1:
+                return "Error: line must be >= 1"
+            if kind is not None and kind not in _CALL_KINDS:
+                return f"Error: unknown call hierarchy kind {kind!r} (use incomingCalls or outgoingCalls)"
+            return self._manager.call_hierarchy(
+                file_path, line, symbol, kind or "incomingCalls"
+            )
         if operation == "documentSymbol":
             if not file_path:
                 return "Error: documentSymbol requires file_path"

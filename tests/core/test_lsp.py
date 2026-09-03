@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from cluxmate.core.lsp import LSPConfigManager, LSP_DEFAULT_SPECS
+from cluxmate.core.lsp import LSPConfigManager, LSP_DEFAULT_SPECS, ServerSpec as _ServerSpec
 
 
 def _write_lsp_json(dir_path: Path, servers: dict) -> None:
@@ -15,6 +15,13 @@ def _write_lsp_json(dir_path: Path, servers: dict) -> None:
     (cfg_dir / "lsp.json").write_text(
         json.dumps({"servers": servers}, indent=2), encoding="utf-8"
     )
+
+
+def _write_lsp_raw(dir_path: Path, data: dict) -> None:
+    """Write lsp.json verbatim (for top-level keys like auto_install)."""
+    cfg_dir = dir_path / ".cluxmate"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "lsp.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def _cfg_with_home(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
@@ -32,6 +39,11 @@ def test_default_specs_cover_seven_languages():
     assert LSP_DEFAULT_SPECS["python"].command == "pyright-langserver"
     assert LSP_DEFAULT_SPECS["python"].extension_to_language[".py"] == "python"
     assert LSP_DEFAULT_SPECS["go"].command == "gopls"
+    assert LSP_DEFAULT_SPECS["python"].install_cmd == ["npm", "install", "-g", "pyright"]
+    assert LSP_DEFAULT_SPECS["rust"].install_cmd == ["rustup", "component", "add", "rust-analyzer"]
+    # Platform-specific manual installs stay download-prompt-only.
+    assert LSP_DEFAULT_SPECS["java"].install_cmd == []
+    assert LSP_DEFAULT_SPECS["cpp"].install_cmd == []
 
 
 def test_load_returns_defaults_without_any_config(tmp_path, monkeypatch):
@@ -80,6 +92,40 @@ def test_unknown_language_added_from_config(tmp_path, monkeypatch):
     specs = LSPConfigManager(str(project)).load()
     assert "custom" in specs
     assert specs["custom"].extension_to_language[".foo"] == "foo"
+
+
+def test_top_level_auto_install_defaults_off(tmp_path, monkeypatch):
+    home, project = _cfg_with_home(tmp_path, monkeypatch)
+    cfg = LSPConfigManager(str(project)).load_config()
+    assert cfg.auto_install is False
+    assert "python" in cfg.specs
+
+
+def test_top_level_auto_install_flag(tmp_path, monkeypatch):
+    home, project = _cfg_with_home(tmp_path, monkeypatch)
+    _write_lsp_raw(project, {"auto_install": True})
+    cfg = LSPConfigManager(str(project)).load_config()
+    assert cfg.auto_install is True
+    assert cfg.specs["python"].auto_install is None  # inherits the top level
+
+
+def test_per_server_auto_install_override(tmp_path, monkeypatch):
+    home, project = _cfg_with_home(tmp_path, monkeypatch)
+    _write_lsp_raw(project, {"auto_install": True, "servers": {"python": {"auto_install": False}}})
+    cfg = LSPConfigManager(str(project)).load_config()
+    assert cfg.auto_install is True
+    assert cfg.specs["python"].auto_install is False
+
+
+def test_install_cmd_accepts_string_or_list(tmp_path, monkeypatch):
+    home, project = _cfg_with_home(tmp_path, monkeypatch)
+    _write_lsp_json(project, {
+        "python": {"install_cmd": "npm i -g pyright"},
+        "go": {"install_cmd": ["go", "install", "x@latest"]},
+    })
+    specs = LSPConfigManager(str(project)).load()
+    assert specs["python"].install_cmd == ["npm", "i", "-g", "pyright"]
+    assert specs["go"].install_cmd == ["go", "install", "x@latest"]
 
 
 from cluxmate.core.lsp import LSPClient, _path_to_uri
@@ -144,6 +190,20 @@ def test_lsp_client_answers_server_request_during_handshake(tmp_path):
         client.shutdown()
 
 
+def test_lsp_client_start_raises_not_installed_for_missing_binary(tmp_path):
+    from cluxmate.core.lsp import ServerNotInstalledError
+    spec = _ServerSpec(
+        command="cluxmate-definitely-missing-lsp-xyz",
+        extension_to_language={".py": "python"},
+        install_hint="install it somehow",
+    )
+    client = LSPClient(spec, language_id="python", root=str(tmp_path))
+    with pytest.raises(ServerNotInstalledError) as ei:
+        client.start()
+    assert "install it somehow" in str(ei.value)
+    assert ei.value.spec is spec
+
+
 from cluxmate.core.lsp import LSPManager
 
 
@@ -187,14 +247,162 @@ def test_manager_workspace_symbol_queries_running_clients(tmp_path):
         mgr.shutdown()
 
 
+def test_manager_new_navigation_ops_roundtrip(tmp_path):
+    (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    mgr = _manager(tmp_path)
+    try:
+        assert "impl.py" in mgr.implementation("a.py", 1, "foo")
+        assert "decl.py" in mgr.declaration("a.py", 1, "foo")
+        assert "type_def.py" in mgr.type_definition("a.py", 1, "foo")
+        incoming = mgr.call_hierarchy("a.py", 1, "foo", "incomingCalls")
+        assert "callers of foo" in incoming
+        assert "caller.py" in incoming
+        outgoing = mgr.call_hierarchy("a.py", 1, "foo", "outgoingCalls")
+        assert "callees of foo" in outgoing
+        assert "callee.py" in outgoing
+        bad = mgr.call_hierarchy("a.py", 1, "foo", "bogus")
+        assert "unknown call hierarchy kind" in bad
+    finally:
+        mgr.shutdown()
+
+
+def test_manager_call_hierarchy_defaults_to_incoming(tmp_path):
+    (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    mgr = _manager(tmp_path)
+    try:
+        out = mgr.call_hierarchy("a.py", 1, "foo")
+        assert "callers of foo" in out
+    finally:
+        mgr.shutdown()
+
+
+# --- auto-install ---------------------------------------------------------
+
+import os
+import textwrap
+
+
+def _fake_installer(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
+    """A fake install command that "installs" a binary by dropping a file into
+    bindir (added to PATH), mirroring how npm/rustup put tools on PATH."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    name = "fake-lsp" + (".exe" if os.name == "nt" else "")
+    installer = tmp_path / "installer.py"
+    installer.write_text(textwrap.dedent("""
+        import os, sys
+        target = os.path.join(sys.argv[1], sys.argv[2])
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\\n")
+        try:
+            os.chmod(target, 0o755)
+        except OSError:
+            pass
+        print("installed " + target)
+    """), encoding="utf-8")
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    return bindir, name
+
+
+def _install_spec(bindir: Path, name: str, tmp_path: Path) -> _ServerSpec:
+    return _ServerSpec(
+        command=name,
+        extension_to_language={".py": "python"},
+        install_cmd=[sys.executable, str(tmp_path / "installer.py"), str(bindir), name],
+    )
+
+
+def test_run_install_runs_command_and_detects_binary(tmp_path, monkeypatch):
+    # _run_install is the auto-install engine: it executes spec.install_cmd
+    # (unsandboxed, serialized) and reports success only when the binary
+    # resolves on PATH afterwards.
+    bindir, name = _fake_installer(tmp_path, monkeypatch)
+    spec = _install_spec(bindir, name, tmp_path)
+    mgr = LSPManager(str(tmp_path), specs={"python": spec})
+    try:
+        installed, output = mgr._run_install(spec)
+        assert installed is True
+        assert (bindir / name).exists()
+        assert "installed" in output
+    finally:
+        mgr.shutdown()
+
+
+def test_resolve_without_install_cmd_surfaces_hint_only(tmp_path):
+    # Download-prompt-only spec (no portable install command, e.g. java/cpp):
+    # the tool message carries the manual hint and never tries to install.
+    spec = _ServerSpec(
+        command="cluxmate-missing-xyz",
+        extension_to_language={".py": "python"},
+        install_hint="manual steps here",
+    )
+    (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    mgr = LSPManager(str(tmp_path), specs={"python": spec})
+    try:
+        out = mgr.definition("a.py", 1, "foo")
+        assert "is not installed" in out
+        assert "manual steps here" in out
+    finally:
+        mgr.shutdown()
+
+
+def test_resolve_missing_server_surfaces_prompt_without_installing(tmp_path, monkeypatch):
+    # Specs passed directly → no lsp.json auto_install default, so the missing
+    # binary must NOT be auto-installed; the tool surfaces the install prompt.
+    bindir, name = _fake_installer(tmp_path, monkeypatch)
+    spec = _install_spec(bindir, name, tmp_path)
+    spec.install_hint = "hint-here"
+    (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    mgr = LSPManager(str(tmp_path), specs={"python": spec})
+    try:
+        out = mgr.definition("a.py", 1, "foo")
+        assert "is not installed" in out
+        assert "hint-here" in out
+        assert "auto_install" in out
+        assert not (bindir / name).exists()
+    finally:
+        mgr.shutdown()
+
+
+def test_resolve_auto_installs_when_spec_opts_in(tmp_path, monkeypatch):
+    # Per-server auto_install=True (user config) + manager gate on → the
+    # missing binary triggers the install command before the spawn. The fake
+    # installed binary is not a real LSP server, so the query ends with a
+    # start-failure — but the install itself must have run.
+    bindir, name = _fake_installer(tmp_path, monkeypatch)
+    spec = _install_spec(bindir, name, tmp_path)
+    spec.auto_install = True
+    (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    mgr = LSPManager(str(tmp_path), specs={"python": spec})
+    try:
+        out = mgr.definition("a.py", 1, "foo")
+        assert (bindir / name).exists()
+        assert "failed to start" in out
+    finally:
+        mgr.shutdown()
+
+
+def test_plan_mode_gate_blocks_auto_install(tmp_path, monkeypatch):
+    bindir, name = _fake_installer(tmp_path, monkeypatch)
+    spec = _install_spec(bindir, name, tmp_path)
+    spec.auto_install = True
+    (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    mgr = LSPManager(str(tmp_path), specs={"python": spec})
+    mgr.auto_install = False  # what the builder does in plan mode
+    try:
+        out = mgr.definition("a.py", 1, "foo")
+        assert "is not installed" in out
+        assert not (bindir / name).exists()
+    finally:
+        mgr.shutdown()
+
+
 # --- wire-framing regression: LSP stdio is Content-Length framed, not NDJSON.
 # A naive readline() client blocks forever on a body that has no trailing
 # newline; these tests assert byte-exact framing directly (and non-ASCII
 # content, which readline/char-count based parsing gets wrong).
 
 import io
-
-from cluxmate.core.lsp import ServerSpec as _ServerSpec
 
 
 class _FakeStream:
