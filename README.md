@@ -47,7 +47,7 @@ It speaks the **OpenAI-compatible API**, so it works with DeepSeek, Qwen, GLM, O
 - **Subagent delegation** — delegate independent tasks to restricted subagents (`general-purpose`, read-only `explore`) with a depth cap of 4, each with its own replayable session log.
 - **Doom-loop guard** — if the agent starts repeating identical tool calls, escalating advisories nudge it back on track; `MAX_TURNS` remains the hard backstop.
 - **Skills, memory & MCP** — project-scoped skill packs, durable project memory (`AGENTS.md`), and Model Context Protocol servers (stdio / HTTP) plug into the same context pipeline.
-- **Lifecycle hooks** — run your own shell commands at `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`, receiving context as stdin JSON and deciding to block or inject context via stdout JSON. Hooks are your own trusted config, never sandboxed; crashes/timeouts degrade to a no-op.
+- **Lifecycle hooks** — run your own shell commands at `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` / `SessionStart` / `SessionEnd` / `SubagentStop` / `PreCompact` / `Notification`, receiving context as stdin JSON and deciding to block or inject context via stdout JSON. Hooks are your own trusted config, never sandboxed; crashes/timeouts degrade to a no-op.
 - **Rich toolset, safely capped** — `bash`, file read/write/edit/delete, `grep`, `list_dir`, `web_fetch`, `web_search`, `ask_user_question`, subagents, skills, memory updates and more; every tool's output is capped and truncated to keep context bounded.
 
 ## Architecture at a glance
@@ -165,7 +165,19 @@ Subagents recurse up to a **depth cap of 4** (the `task` tool is withheld at the
 
 ## Lifecycle hooks
 
-Run your own shell commands at fixed points (Claude Code style): `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`. Commands receive context as stdin JSON and decide to block or inject via stdout JSON:
+Run your own shell commands at fixed points (Claude Code style). Commands receive context as stdin JSON and decide to block or inject via stdout JSON:
+
+| Event | Fires | Can block | Can inject |
+|---|---|---|---|
+| `UserPromptSubmit` | before the prompt reaches the model | ✓ | ✓ |
+| `PreToolUse` | before a tool runs (after approval) | ✓ (denies the tool) | ✓ |
+| `PostToolUse` | after a tool runs | — | ✓ |
+| `Stop` | after the reply, before it's committed | ✓ (re-runs the model, max 3) | ✓ |
+| `SessionStart` | once per session start | ✓ (aborts startup) | ✓ (first turn only) |
+| `SessionEnd` | clean shutdown / session switch / REPL `/clear` | — (output discarded) | — |
+| `SubagentStop` | after a subagent finishes | ✓ (replaces its reply) | ✓ |
+| `PreCompact` | before auto-compaction | ✓ (skips it this step) | ✓ |
+| `Notification` | turn end (desktop) + `hooks/notify` RPC / "Test notify" button | — (fire-and-forget) | — |
 
 ```jsonc
 {
@@ -180,10 +192,10 @@ Run your own shell commands at fixed points (Claude Code style): `UserPromptSubm
 }
 ```
 
-- **Block**: output `{"decision":"block","reason":"..."}` or exit with code 2 → the tool/reply is blocked and the model receives the reason.
+- **Block**: output `{"decision":"block","reason":"..."}` (or `{"continue":false,...}`) or exit with code 2 → the action/reply is blocked and the model receives the reason.
 - **Inject**: output `{"hookSpecificOutput":{"additionalContext":"..."}}` → extra context is injected for the model.
-- **Location**: `~/.cluxmate/settings.json` (global) and `<project>/.cluxmate/settings.json` (project, runs after global) are merged.
-- **Trust model**: hooks are your own trusted config, running in a normal subprocess (not sandboxed); crashes/timeouts degrade to a no-op.
+- **Location**: `~/.cluxmate/settings.json` (global) and `<project>/.cluxmate/settings.json` (project, runs after global) are merged. Event-specific payload fields (`source`, `reason`, `subagent_id`, `trigger`, `message`, …) ride along in the stdin JSON.
+- **Trust model**: hooks are your own trusted config, running in a normal subprocess (not sandboxed); crashes/timeouts degrade to a no-op. Edits apply via Reload in the desktop Hooks view (or restart for CLI/TUI).
 
 ## Installation
 

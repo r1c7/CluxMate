@@ -121,6 +121,9 @@ class TaskTool(BaseTool):
         try:
             result = await child.run(prompt, history=[], callbacks=child_cbs)
             text = result.text or "(subagent returned no output)"
+            text = await self._run_subagent_stop_hook(
+                subagent_type, description, prompt, child_id, text, error=None,
+            )
             if tracker is not None:
                 await tracker.on_agent_end(
                     child_id,
@@ -132,6 +135,9 @@ class TaskTool(BaseTool):
             return text
         except Exception as e:
             msg = f"Subagent failed: {e}"
+            msg = await self._run_subagent_stop_hook(
+                subagent_type, description, prompt, child_id, msg, error=str(e),
+            )
             if tracker is not None:
                 await tracker.on_agent_end(child_id, "error", msg)
             return msg
@@ -141,3 +147,43 @@ class TaskTool(BaseTool):
             if child_persister is not None:
                 child_persister.flush()
                 child_persister.dispose()
+
+    async def _run_subagent_stop_hook(
+        self,
+        subagent_type: str,
+        description: str,
+        prompt: str,
+        child_id: str,
+        text: str,
+        *,
+        error: str | None,
+    ) -> str:
+        """Run SubagentStop hooks after a subagent settles and adjust the reply.
+
+        The subagent has already finished, so "block" cannot stop it — instead
+        the block reason REPLACES the subagent's reply in the parent's tool
+        result (the model is told the result was rejected). Feedback is appended
+        to the reply as extra context. Not run on cancellation: a cancelled
+        subagent (turn cancelled) propagates CancelledError, which is not caught
+        by ``except Exception`` above.
+        """
+        hooks_manager = getattr(self._builder, "_hooks_manager", None)
+        hooks = hooks_manager() if hooks_manager is not None else None
+        if hooks is None or not hooks.has_event("SubagentStop"):
+            return text
+        hr = await hooks.run_event(
+            "SubagentStop",
+            extra={
+                "subagent_id": child_id,
+                "subagent_type": subagent_type,
+                "task_description": description,
+                "prompt": prompt,
+                "response": text,
+                "error": error,
+            },
+        )
+        if hr.blocked:
+            return hr.reason or "[SubagentStop hook blocked the subagent result]"
+        for fb in hr.feedback:
+            text = f"{text}\n\n[SubagentStop hook context]\n{fb}"
+        return text

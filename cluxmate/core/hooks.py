@@ -11,11 +11,24 @@ the agent by writing JSON to stdout:
 - exit code 2 → block (Claude Code's "blocking error" convention).
 - anything else (no output / non-JSON / exit 0) → continue with no effect.
 
-Events (v1 — the four core events):
+Events (the full surface — see docs/plans/hooks.md for the decision record):
     UserPromptSubmit   before the model sees a human prompt (can block/inject)
     PreToolUse         before a tool runs (can block/inject)
     PostToolUse        after a tool runs (inject only — too late to block)
-    Stop               after the agent finishes a turn (inject only)
+    Stop               after the agent finishes a turn (can block → re-run,
+                       up to 3 retries; inject)
+    SessionStart       once per session start (can block → aborts startup;
+                       inject → prepended to the first turn)
+    SessionEnd         at session shutdown (output discarded — nothing left
+                       to block or feed)
+    SubagentStop       after a subagent finishes (can block → the block
+                       reason replaces the subagent's reply in the parent;
+                       inject → appended to the reply)
+    PreCompact         before an auto-compaction runs (can block → skip
+                       compaction this step; inject → context for the model)
+    Notification       fire-and-forget side effects, triggered manually
+                       (hooks/notify RPC) or at turn end (desktop); output
+                       is discarded entirely
 
 Trust model: hooks are the USER's own configuration, not model output, so they
 run with ``subprocess.run`` at normal integrity (NOT the Low-IL / bwrap sandbox
@@ -242,18 +255,28 @@ class HookManager:
         tool_response: str | None = None,
         prompt: str | None = None,
         response: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> HookResult:
         """Run every hook matching ``event`` (and ``tool_name``, when given).
+
+        ``extra`` carries event-specific payload fields merged into the stdin
+        JSON: ``source`` (SessionStart), ``reason`` (SessionEnd),
+        ``subagent_id``/``subagent_type``/``task_description``/``error``
+        (SubagentStop), ``trigger``/``custom_instructions`` (PreCompact), and
+        ``message`` (Notification).
 
         Never raises: individual hook failures are swallowed so a broken user
         hook degrades to a no-op rather than killing the turn. Returns the
         aggregated block/feedback across all matched hooks (the first block
-        wins; all feedback is collected).
+        wins; all feedback is collected). Callers that want fire-and-forget
+        semantics (Notification, SessionEnd) simply discard the result.
         """
         specs = [s for s in self._specs.get(event, []) if s.matches(tool_name)]
         if not specs:
             return HookResult()
         payload = self._payload(event, tool_name, tool_input, tool_response, prompt, response)
+        if extra:
+            payload.update(extra)
         result = HookResult()
         for spec in specs:
             self._notify("hook_start", {

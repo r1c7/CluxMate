@@ -842,6 +842,23 @@ export function registerIpcHandlers() {
     return await bridge.reloadHooks()
   })
 
+  // Fire-and-forget Notification trigger: runs the session's Notification hooks
+  // with `message` in the payload. Like reload, a cold bridge is warmed first.
+  ipcMain.handle(IPC.HOOKS_NOTIFY, async (_, sid: string, message: string): Promise<{ status: string }> => {
+    const meta = sessionStore.getSession(sid)
+    if (!meta) {
+      throw new Error(`Session record not found (sid=${sid})`)
+    }
+    let bridge = bridges.get(sid)
+    if (!bridge || !bridge.isRunning) {
+      bridge = await ensureBridge(sid, meta.cwd, resolveModelId(meta.model_id))
+    }
+    if (!bridge || !bridge.isRunning) {
+      throw new Error('Agent process failed to start (Python agent not ready)')
+    }
+    return await bridge.notifyHooks(String(message ?? ''))
+  })
+
   // Open a hooks settings.json in the user's editor. `global` → ~/.cluxmate/
   // settings.json; `project` → <session cwd>/.cluxmate/settings.json. Auto-creates
   // the file (empty {"hooks":{}} skeleton) when missing so the editor always lands

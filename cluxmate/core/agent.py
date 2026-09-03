@@ -772,17 +772,41 @@ class AgentLoop:
             # Compact before the call if we're over budget — inside the loop so a
             # single multi-tool turn can't overflow the window mid-turn.
             if ctx_tokens > limit:
-                sources = None
-                if self.session_log is not None:
-                    sources = [None] + self.session_log.message_sources()
-                messages, did, edit = await compact(
-                    messages, self.context_window, self.provider,
-                    threshold=COMPACT_THRESHOLD, sources=sources,
-                )
-                if did:
-                    self.compacted_this_turn = True
-                    self._log_compaction(edit)
-                    ctx_tokens = estimate_tokens(messages)
+                # PreCompact hook: fires BEFORE the summarizer runs. A block
+                # skips compaction for this step (ctx_tokens stays over budget,
+                # so the hook fires again next iteration — a hook that always
+                # blocks can overflow the window; that is the author's choice).
+                # Feedback is injected as source:"hook" user messages so the
+                # model (and, when compaction still runs, the summarizer) sees
+                # it. Model-visible ⟺ logged.
+                skip_compact = False
+                if self.hooks is not None and self.hooks.has_event("PreCompact"):
+                    hr = await self.hooks.run_event(
+                        "PreCompact",
+                        extra={"trigger": "auto", "custom_instructions": None},
+                    )
+                    for fb in hr.feedback:
+                        fb_msg = {"role": "user", "content": fb}
+                        messages.append(fb_msg)
+                        ctx_tokens += estimate_tokens([fb_msg])
+                        self._log_append(
+                            "user/message",
+                            {"message": fb_msg, "source": "hook"},
+                            surface_op=APPEND,
+                        )
+                    skip_compact = hr.blocked
+                if not skip_compact:
+                    sources = None
+                    if self.session_log is not None:
+                        sources = [None] + self.session_log.message_sources()
+                    messages, did, edit = await compact(
+                        messages, self.context_window, self.provider,
+                        threshold=COMPACT_THRESHOLD, sources=sources,
+                    )
+                    if did:
+                        self.compacted_this_turn = True
+                        self._log_compaction(edit)
+                        ctx_tokens = estimate_tokens(messages)
 
             # Emit step/start, then a request/header snapshot only when the
             # non-history envelope (config/system/tools) changed since the last

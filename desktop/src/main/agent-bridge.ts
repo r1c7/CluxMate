@@ -273,6 +273,12 @@ export class AgentBridge {
     return { hooks: r?.hooks ?? [] }
   }
 
+  async notifyHooks(message: string): Promise<{ status: string }> {
+    this._lastActivityAt = Date.now()
+    const r = (await this.request('hooks/notify', { message })) as { status?: string }
+    return { status: r?.status ?? 'scheduled' }
+  }
+
   async setMode(mode: string): Promise<{ mode: string; accept_edits: boolean; always_allow_tools: string[]; always_allow_dangerous_tools: string[] }> {
     this._mode = mode
     return (await this.request('chat/set_mode', { mode })) as {

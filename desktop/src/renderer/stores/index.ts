@@ -394,6 +394,7 @@ retryMessage: (messageId: string) => Promise<void>
   setMcpDisabled: (name: string, disabled: boolean) => Promise<void>
   showHooks: () => Promise<void>
   reloadHooks: () => Promise<void>
+  notifyHooks: (message: string) => Promise<void>
   clearError: () => void
   setError: (msg: string | null) => void
 }
@@ -2202,6 +2203,18 @@ export const useStore = create<AppState>((set, get) => ({
       }
     } finally {
       if (get().activeSessionId === sid) set({ hooksLoading: false })
+    }
+  },
+
+  // Fire-and-forget Notification trigger (test/demo button in HooksView):
+  // runs the session's Notification hooks with `message` in the payload.
+  notifyHooks: async (message: string) => {
+    const sid = get().activeSessionId
+    if (!sid) return
+    try {
+      await window.electronAPI.notifyHooks(sid, message)
+    } catch (e: any) {
+      set({ error: tGlobal('error.notifyHooksFailed', { msg: e?.message }) })
     }
   },
 

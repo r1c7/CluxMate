@@ -471,6 +471,9 @@ class JsonRpcServer:
         self._builder: AgentBuilder | None = None
         self._cwd = os.getcwd()
         self._session_id = ""
+        # SessionStart hook feedback — prepended to the FIRST turn's injections
+        # (one-shot, cleared by _handle_chat_send). Empty when none / not blocked.
+        self._session_start_feedback: list[str] = []
         # Shadow-git checkpoints for undo/rewind + per-turn diffs. Built at
         # initialize; None (or ensure_init False) means the feature is disabled.
         self._checkpoints: CheckpointManager | None = None
@@ -547,6 +550,11 @@ class JsonRpcServer:
                 traceback.print_exc(file=sys.stderr)
                 _write_dict({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(e)}})
 
+        # stdin closed — the desktop shut the bridge down (clean shutdown, not
+        # a crash). SessionEnd hooks get one last run; their output is discarded
+        # (nothing is left to block or feed).
+        self._fire_session_end("exit")
+
     def _read_stdin(self):
         for line in sys.stdin:
             self._line_queue.put(line.strip())
@@ -610,6 +618,15 @@ class JsonRpcServer:
         elif method in ("hooks/reload", "hooks:reload"):
             hooks_list = self._builder.reload_hooks() if self._builder else []
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {"hooks": hooks_list}})
+        elif method in ("hooks/notify", "hooks:notify"):
+            # Manual Notification trigger (fire-and-forget): runs the
+            # Notification hooks on a background thread with ``message`` in the
+            # payload. Output is discarded — see _fire_notification.
+            message = params.get("message")
+            if isinstance(message, str) and message.strip():
+                self._fire_notification(message.strip())
+            if req_id is not None:
+                _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {"status": "scheduled"}})
         elif method in ("permissions/update", "permissions:update"):
             if "accept_edits" in params:
                 self._policy.set_accept_edits(bool(params["accept_edits"]))
@@ -676,14 +693,69 @@ class JsonRpcServer:
             "params": {"type": kind, **data},
         })
 
+    def _run_hooks_sync(self, hooks: "HookManager", event: str, extra: dict[str, Any] | None = None):
+        """Run hook commands on a throwaway event loop (sync contexts).
+
+        The dispatch thread has no running loop; each call spins one up just
+        long enough for the hooks (bounded by their timeouts) and closes it.
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(hooks.run_event(event, extra=extra))
+        finally:
+            loop.close()
+
+    def _fire_session_end(self, reason: str) -> None:
+        """Fire SessionEnd hooks; their output is discarded (nothing left to
+        block or feed). Never raises — a broken hook must not break shutdown."""
+        hooks = self._builder._hooks_manager() if self._builder else None
+        if hooks is None or not hooks.has_event("SessionEnd"):
+            return
+        try:
+            self._run_hooks_sync(hooks, "SessionEnd", {"reason": reason})
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+
+    def _run_notification_hooks(self, hooks: "HookManager", message: str) -> None:
+        """Fire-and-forget Notification run (fresh thread's loop).
+
+        Output is discarded — Notification is a side-effect event.
+        """
+        try:
+            self._run_hooks_sync(hooks, "Notification", {"message": message})
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+
+    def _fire_notification(self, message: str) -> None:
+        """Trigger Notification hooks on their own daemon thread.
+
+        A slow Notification hook must never stall the turn thread or the
+        dispatch thread; hook_start/hook_result still stream to the desktop
+        (the observer writes are thread-safe).
+        """
+        hooks = self._builder._hooks_manager() if self._builder else None
+        if hooks is None or not hooks.has_event("Notification"):
+            return
+        threading.Thread(
+            target=self._run_notification_hooks, args=(hooks, message),
+            daemon=True,
+        ).start()
+
     def _handle_initialize(self, req_id: Any, params: dict[str, Any]):
+        new_sid = params.get("session_id", "")
+        # SessionEnd for the PREVIOUS session before tearing it down. Skipped
+        # when the session id is unchanged — the desktop re-initializes the SAME
+        # session after settings toggles kill/restart the bridge, which is a
+        # continuation, not an end.
+        if self._session_id and new_sid and self._session_id != new_sid:
+            self._fire_session_end("other")
         # Re-init reuses one Python process; kill the previous builder's MCP
         # subprocesses before building a new one so they don't leak.
         self._shutdown_mcp()
         self._shutdown_lsp()
         self._shutdown_egress()
         self._cwd = params.get("cwd", os.getcwd())
-        self._session_id = params.get("session_id", "")
+        self._session_id = new_sid
         # Rebind the approval policy to this workspace's permissions.json so a
         # re-initialize onto a different cwd loads that project's policy.
         self._policy = PermissionPolicy(self._cwd)
@@ -719,7 +791,9 @@ class JsonRpcServer:
         # Load the session's JSONL event log (or create a fresh one) — Python is
         # the sole writer of conversation history (D6). The log must exist before
         # builder.build(session_log=...) so the agent records every turn.
-        self._session_log = self._load_or_create_log(self._session_id, entry)
+        # `log_created` tells SessionStart whether this is a fresh session or a
+        # resume of a persisted one.
+        self._session_log, log_created = self._load_or_create_log(self._session_id, entry)
         self._bind_persister()
         # Supersede any in-flight background MCP loader from a prior initialize.
         self._init_gen += 1
@@ -737,6 +811,28 @@ class JsonRpcServer:
         hooks.session_id = self._session_id
         hooks.set_observer(self._hook_observer)
         builder.with_hooks(hooks)
+        # SessionStart hook: fires once per (process, session) pair, BEFORE the
+        # session becomes usable. A block aborts initialization — the desktop
+        # shows the reason. Feedback is prepended to the FIRST turn's injections
+        # (one-shot, see _handle_chat_send).
+        self._session_start_feedback = []
+        if hooks.has_event("SessionStart"):
+            hr = self._run_hooks_sync(
+                hooks, "SessionStart",
+                {"source": "resume" if not log_created else "startup"},
+            )
+            if hr.blocked:
+                # Leave no half-built state: the previous agent/builder were
+                # already shut down above; a stale agent must not serve the new
+                # cwd or session.
+                self._agent = None
+                self._builder = None
+                _write_dict({"jsonrpc": "2.0", "id": req_id, "error": {
+                    "code": -32000,
+                    "message": hr.reason or "[SessionStart hook blocked the session]",
+                }})
+                return
+            self._session_start_feedback = hr.feedback
         builder.with_subagent_types(["general-purpose", "explore"])
         builder.with_mode(mode)
         if model_name:
@@ -832,12 +928,16 @@ class JsonRpcServer:
             except Exception:
                 pass
 
-    def _load_or_create_log(self, session_id: str, entry: dict[str, Any]) -> SessionLog:
-        """Load the session's JSONL log, or create a fresh one (D6: no <id>.json)."""
+    def _load_or_create_log(self, session_id: str, entry: dict[str, Any]) -> tuple[SessionLog, bool]:
+        """Load the session's JSONL log, or create a fresh one (D6: no <id>.json).
+
+        Returns ``(log, created)`` — ``created`` is True only when a brand-new
+        log was minted (SessionStart uses it for the resume/startup payload).
+        """
         if session_id:
             try:
                 header, events = self._log_store.load(session_id)
-                return SessionLog.from_events(header, events)
+                return SessionLog.from_events(header, events), False
             except SessionNotFoundError:
                 pass
         header = SessionHeader(
@@ -850,7 +950,7 @@ class JsonRpcServer:
         )
         log = SessionLog.create(header)
         self._log_store.create(header)
-        return log
+        return log, True
 
     def _bind_persister(self) -> None:
         """(Re)bind incremental JSONL persistence to the active session log.
@@ -967,6 +1067,13 @@ class JsonRpcServer:
             injections = (
                 self._builder.injections_for_turn() if self._builder else []
             )
+            # One-shot SessionStart feedback: prepended to the FIRST turn only
+            # (cleared here so later turns don't re-inject it).
+            if self._session_start_feedback:
+                injections = [
+                    ("hook", fb) for fb in self._session_start_feedback
+                ] + injections
+                self._session_start_feedback = []
             # ProactorEventLoop needs a ThreadPoolExecutor for run_in_executor.
             # Without one, the shared pool may not be configured in daemon threads.
             loop = asyncio.new_event_loop()
@@ -1013,6 +1120,10 @@ class JsonRpcServer:
                 main_task.cancel()
             try:
                 result = loop.run_until_complete(main_task)
+                # Notification hooks: fire-and-forget at turn end. Runs on its
+                # own daemon thread so a slow hook never stalls this thread's
+                # teardown (the checkpoint/title work below still runs).
+                self._fire_notification("Turn completed")
                 # A compaction this turn may have folded earlier memory/skill/mode
                 # injections into the summary — force a fresh injection next turn.
                 if agent.compacted_this_turn and self._builder is not None:

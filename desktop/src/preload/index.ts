@@ -31,6 +31,7 @@ const api: ElectronAPI = {
   setMode: (sessionId: string, mode: string) => ipcRenderer.invoke(IPC.CHAT_SET_MODE, sessionId, mode),
   getHooks: (sessionId: string) => ipcRenderer.invoke(IPC.HOOKS_GET, sessionId),
   reloadHooks: (sessionId: string) => ipcRenderer.invoke(IPC.HOOKS_RELOAD, sessionId),
+  notifyHooks: (sessionId: string, message: string) => ipcRenderer.invoke(IPC.HOOKS_NOTIFY, sessionId, message),
   openHooksSettings: (sessionId: string, scope: 'global' | 'project') =>
     ipcRenderer.invoke(IPC.HOOKS_OPEN, sessionId, scope),
 

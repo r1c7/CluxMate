@@ -671,6 +671,9 @@ export interface ElectronAPI {
   getHooks: (sessionId: string) => Promise<HooksConfig>
   // Re-read settings.json in place (no session restart) and return the new list.
   reloadHooks: (sessionId: string) => Promise<HooksConfig>
+  // Fire-and-forget trigger for Notification hooks: runs them with `message`
+  // in the payload; output is discarded. Returns immediately ("scheduled").
+  notifyHooks: (sessionId: string, message: string) => Promise<{ status: string }>
   // Open a hooks settings.json in the user's editor: `global` → ~/.cluxmate/
   // settings.json, `project` → <session cwd>/.cluxmate/settings.json. Creates the
   // file (with an empty {"hooks":{}} skeleton) if it doesn't exist, then opens it.

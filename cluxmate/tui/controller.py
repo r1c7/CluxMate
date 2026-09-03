@@ -55,6 +55,10 @@ class TuiController:
         # leaves the partial turn on disk (load() repairs the open turn on restart).
         self._session_log: SessionLog | None = None
         self._persister: IncrementalPersister | None = None
+        # Which session id has had its SessionStart hook fired (lazy, at the
+        # first prompt) — one per session, mirroring the desktop's per-session
+        # lifecycle without a hook storm on every model/mode rebuild.
+        self._session_start_fired_for: str | None = None
 
     @property
     def active_session_id(self) -> str | None:
@@ -307,6 +311,39 @@ class TuiController:
             if self._builder is not None:
                 injections = self._builder.injections_for_turn()
 
+        # SessionStart hook: fires once per session, lazily at its FIRST prompt
+        # (so model/mode rebuilds don't re-fire it). A block returns the reason
+        # as this turn's reply — no model call, nothing logged. Feedback is
+        # prepended to this first turn's injections.
+        if (
+            self._builder is not None
+            and self._active_session_id
+            and self._session_start_fired_for != self._active_session_id
+        ):
+            self._session_start_fired_for = self._active_session_id
+            hooks = self._builder._hooks_manager()
+            if hooks.has_event("SessionStart"):
+                resume = (
+                    self._session_log is not None
+                    and self._session_log.turn_count > 0
+                )
+                hr = await hooks.run_event(
+                    "SessionStart",
+                    extra={"source": "resume" if resume else "startup"},
+                )
+                if hr.blocked:
+                    return AgentResult(
+                        text=hr.reason or "[SessionStart hook blocked the session]",
+                        history=(
+                            self._session_log.derive_messages()
+                            if self._session_log is not None else None
+                        ),
+                    )
+                if hr.feedback:
+                    injections = [
+                        ("hook", fb) for fb in hr.feedback
+                    ] + injections
+
         callbacks = None
         if on_progress or on_tool_approval or on_ask_question:
             policy = self._policy
@@ -367,3 +404,10 @@ class TuiController:
                 self._active_session_id, user_message[:80]
             )
         return result
+
+    async def shutdown(self) -> None:
+        """Fire SessionEnd hooks at app exit (output discarded — nothing is
+        left to block or feed). Never raises."""
+        hooks = self._builder._hooks_manager() if self._builder else None
+        if hooks is not None and hooks.has_event("SessionEnd"):
+            await hooks.run_event("SessionEnd", extra={"reason": "exit"})

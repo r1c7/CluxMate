@@ -10,6 +10,7 @@ from cluxmate.core.agent import AgentLoop
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.providers.base import LLMResponse, ToolCall
 from cluxmate.tools.base import BaseTool, ToolBridge
+from cluxmate.tools.task import TaskTool
 
 # A tiny helper script the hook commands point at. Each mode exercises one
 # branch of the stdout/exit-code contract.
@@ -327,3 +328,184 @@ async def test_stop_feedback_injected_into_history(tmp_path, monkeypatch):
         m.get("role") == "user" and "HELLO_FROM_HOOK" in m.get("content", "")
         for m in (result.history or [])
     )
+
+
+# ── extended event surface (SessionStart/SessionEnd/SubagentStop/PreCompact/
+#    Notification — docs/plans/hooks.md D13–D18) ──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_payload_extra_fields_per_event(tmp_path, monkeypatch):
+    """Event-specific fields merge into the stdin payload via run_event(extra=...)."""
+    home = tmp_path / "home"
+    (home / ".cluxmate").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    script = proj / "hook_helper.py"
+    script.write_text(_HELPER, encoding="utf-8")
+    cmd = f'"{sys.executable}" {script.name} echo'
+    (proj / ".cluxmate").mkdir()
+    (proj / ".cluxmate" / "settings.json").write_text(json.dumps({
+        "hooks": {
+            event: [{"hooks": [{"type": "command", "command": cmd}]}]
+            for event in ("SessionStart", "SessionEnd", "SubagentStop",
+                          "PreCompact", "Notification")
+        },
+    }), encoding="utf-8")
+    mgr = HookManager(str(proj))
+
+    cases = {
+        "SessionStart": {"source": "resume"},
+        "SessionEnd": {"reason": "exit"},
+        "SubagentStop": {
+            "subagent_id": "abc123",
+            "subagent_type": "general-purpose",
+            "task_description": "survey the repo",
+            "prompt": "do it",
+            "response": "done",
+            "error": None,
+        },
+        "PreCompact": {"trigger": "auto", "custom_instructions": None},
+        "Notification": {"message": "Turn completed"},
+    }
+    for event, extra in cases.items():
+        result = await mgr.run_event(event, extra=extra)
+        assert len(result.feedback) == 1, event
+        payload = json.loads(result.feedback[0])
+        assert payload["hook_event_name"] == event
+        # Base fields stay in place; extra fields are merged in.
+        assert payload["session_id"] == ""
+        assert payload["cwd"] == str(proj.resolve())
+        for key, value in extra.items():
+            assert payload.get(key) == value, (event, key)
+
+
+def _long_history(n: int = 10) -> list[dict]:
+    """A multi-message history long enough to trip compaction on a tiny window."""
+    out: list[dict] = []
+    for i in range(n):
+        out.append({"role": "assistant", "content": f"assistant reply {i} " + "x" * 30})
+        out.append({"role": "user", "content": f"user follow-up {i} " + "y" * 30})
+    return out
+
+
+@pytest.mark.asyncio
+async def test_precompact_block_skips_compaction(tmp_path, monkeypatch):
+    """A blocking PreCompact hook skips compaction: no summarizer call, the model
+    still sees the full (over-budget) context, and compacted_this_turn stays off."""
+    mgr = _make_mgr(tmp_path, monkeypatch, "PreCompact", "block")
+    provider = _FakeProvider([LLMResponse(text="done", stop_reason="end_turn")])
+    agent = AgentLoop(
+        "t", provider, ToolBridge(), system_prompt="Test",
+        context_window=60, hooks=mgr,
+    )
+
+    result = await agent.run("hello", history=_long_history())
+
+    assert result.text == "done"
+    assert agent.compacted_this_turn is False
+    assert len(provider.calls) == 1  # no summarizer call was made
+    sent = provider.calls[0][0]
+    assert any("assistant reply 0" in str(m.get("content", "")) for m in sent)
+
+
+@pytest.mark.asyncio
+async def test_precompact_feedback_injected_before_compaction(tmp_path, monkeypatch):
+    """PreCompact feedback is injected as a user message; compaction still runs,
+    and the next model request carries the feedback."""
+    mgr = _make_mgr(tmp_path, monkeypatch, "PreCompact", "feedback")
+    provider = _FakeProvider([
+        LLMResponse(text="SUMMARY", stop_reason="end_turn"),  # summarizer call
+        LLMResponse(text="done", stop_reason="end_turn"),     # main call
+    ])
+    agent = AgentLoop(
+        "t", provider, ToolBridge(), system_prompt="Test",
+        context_window=60, hooks=mgr,
+    )
+
+    result = await agent.run("hello", history=_long_history())
+
+    assert result.text == "done"
+    assert agent.compacted_this_turn is True
+    assert len(provider.calls) == 2
+    main_call = provider.calls[1][0]
+    assert any(
+        m.get("role") == "user" and "HELLO_FROM_HOOK" in m.get("content", "")
+        for m in main_call
+    )
+
+
+# ── SubagentStop (TaskTool) ─────────────────────────────────────────────────
+
+class _StubChild:
+    """Minimal child stand-in: TaskTool calls run() and reads session_log only."""
+
+    session_log = None
+
+    def __init__(self, text: str = "SUB RESULT", error: str | None = None):
+        self._text = text
+        self._error = error
+
+    async def run(self, prompt, history=None, callbacks=None):
+        if self._error is not None:
+            raise RuntimeError(self._error)
+        return type("R", (), {"text": self._text, "cache_usage": {}, "out_tokens": 0})()
+
+
+class _StubBuilder:
+    """AgentBuilder stand-in carrying just what TaskTool touches."""
+
+    def __init__(self, hooks: HookManager, child_error: str | None = None):
+        self._hooks = hooks
+        self._child_error = child_error
+        self._subagent_types = ["general-purpose", "explore"]
+        self._tracker = None
+        self._agent_id = "root"
+        self._depth = 0
+        self._log_store = None
+
+    def _hooks_manager(self):
+        return self._hooks
+
+    def build_child(self, subagent_type, description, child_id):
+        return _StubChild(error=self._child_error)
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_block_replaces_reply(tmp_path, monkeypatch):
+    """A blocking SubagentStop hook replaces the subagent's reply in the parent."""
+    mgr = _make_mgr(tmp_path, monkeypatch, "SubagentStop", "block")
+    tool = TaskTool(_StubBuilder(mgr))
+
+    out = await tool.execute(
+        subagent_type="general-purpose", description="survey", prompt="do it",
+    )
+
+    assert out == "hook says no"
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_feedback_appended_to_reply(tmp_path, monkeypatch):
+    """SubagentStop feedback is appended to the subagent's reply."""
+    mgr = _make_mgr(tmp_path, monkeypatch, "SubagentStop", "feedback")
+    tool = TaskTool(_StubBuilder(mgr))
+
+    out = await tool.execute(
+        subagent_type="general-purpose", description="survey", prompt="do it",
+    )
+
+    assert out == "SUB RESULT\n\n[SubagentStop hook context]\nHELLO_FROM_HOOK"
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_fires_on_failure_path(tmp_path, monkeypatch):
+    """SubagentStop also fires when the subagent raised (error in the payload;
+    a block still replaces the failure message)."""
+    mgr = _make_mgr(tmp_path, monkeypatch, "SubagentStop", "block")
+    tool = TaskTool(_StubBuilder(mgr, child_error="boom"))
+
+    out = await tool.execute(
+        subagent_type="general-purpose", description="survey", prompt="do it",
+    )
+
+    assert out == "hook says no"

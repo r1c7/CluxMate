@@ -188,6 +188,11 @@ class CluxMateApp(App):
         self._update_mode_button()
         self._update_status()
 
+    async def on_unmount(self):
+        # App exit — fire SessionEnd hooks (output discarded). Bounded by the
+        # hook timeouts; never raises.
+        await self.ctrl.shutdown()
+
     # ── actions ──────────────────────────────────────────────────────────
 
     def action_new_session(self):

@@ -10,6 +10,11 @@ const EVENTS: { name: string; block: boolean; inject: boolean; whenKey: string }
   { name: 'PreToolUse', block: true, inject: true, whenKey: 'hooks.evtPreTool' },
   { name: 'PostToolUse', block: false, inject: true, whenKey: 'hooks.evtPostTool' },
   { name: 'Stop', block: true, inject: true, whenKey: 'hooks.evtStop' },
+  { name: 'SessionStart', block: true, inject: true, whenKey: 'hooks.evtSessionStart' },
+  { name: 'SessionEnd', block: false, inject: false, whenKey: 'hooks.evtSessionEnd' },
+  { name: 'SubagentStop', block: true, inject: true, whenKey: 'hooks.evtSubagentStop' },
+  { name: 'PreCompact', block: true, inject: true, whenKey: 'hooks.evtPreCompact' },
+  { name: 'Notification', block: false, inject: false, whenKey: 'hooks.evtNotification' },
 ]
 
 // Copyable example config (language-neutral — it's JSON).
@@ -42,6 +47,7 @@ export default function HooksView() {
   const loading = useStore((s) => s.hooksLoading)
   const showHooks = useStore((s) => s.showHooks)
   const reloadHooks = useStore((s) => s.reloadHooks)
+  const notifyHooks = useStore((s) => s.notifyHooks)
   const setError = useStore((s) => s.setError)
   const activeSessionId = useStore((s) => s.activeSessionId)
   const [view, setView] = useState<'list' | 'help'>('list')
@@ -108,6 +114,14 @@ export default function HooksView() {
             title={t('hooks.restartNote')}
           >
             {loading ? t('hooks.loading') : t('hooks.reload')}
+          </button>
+
+          <button
+            onClick={() => notifyHooks(t('hooks.notifyMessage'))}
+            className="text-xs px-2.5 py-1 rounded-md border border-surface-border text-ink-soft hover:text-ink hover:bg-sidebar-hover transition-colors"
+            title={t('hooks.notifyHint')}
+          >
+            {t('hooks.notifyBtn')}
           </button>
 
           <button

@@ -116,10 +116,28 @@ async def run_headless(
     builder.with_context_1m(entry.get("context_1m", False))
 
     agent = builder.build(session_log=_make_log(entry))
+    hooks = builder._hooks_manager()
+    injections = builder.injections_for_turn()
+
+    # SessionStart hook: fires once at startup. A block aborts the run before
+    # the model sees anything; feedback is prepended to the first turn.
+    if hooks.has_event("SessionStart"):
+        hr = await hooks.run_event("SessionStart", extra={"source": "startup"})
+        if hr.blocked:
+            print(hr.reason or "[SessionStart hook blocked the session]")
+            return
+        injections = [("hook", fb) for fb in hr.feedback] + injections
+
     cbs = _PrintingCallbacks()
-    result = await agent.run(
-        prompt, callbacks=cbs, injections=builder.injections_for_turn(),
-    )
+    try:
+        result = await agent.run(
+            prompt, callbacks=cbs, injections=injections,
+        )
+    finally:
+        # SessionEnd fires at process exit — even when the run raised. Output
+        # is discarded (nothing left to block or feed).
+        if hooks.has_event("SessionEnd"):
+            await hooks.run_event("SessionEnd", extra={"reason": "exit"})
 
     if cbs.saw_text:
         print()  # terminate the streamed line
@@ -145,6 +163,15 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
 
     log = _make_log(entry)
     agent = builder.build(session_log=log)
+    hooks = builder._hooks_manager()
+    # SessionStart feedback applies to the FIRST turn only (cleared on use).
+    session_feedback: list[str] = []
+    if hooks.has_event("SessionStart"):
+        hr = await hooks.run_event("SessionStart", extra={"source": "startup"})
+        if hr.blocked:
+            print(hr.reason or "[SessionStart hook blocked the session]")
+            return
+        session_feedback = hr.feedback
 
     print("CluxMate REPL. Type /exit to quit, /clear to reset history.")
     print(f"Model: {entry.get('provider', '')} / {entry.get('model_name', '')}")
@@ -158,6 +185,8 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
         try:
             user_input = input("> ").strip()
         except (KeyboardInterrupt, EOFError):
+            if hooks.has_event("SessionEnd"):
+                await hooks.run_event("SessionEnd", extra={"reason": "exit"})
             print("\nGoodbye.")
             break
 
@@ -165,21 +194,38 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
             continue
 
         if user_input == "/exit":
+            if hooks.has_event("SessionEnd"):
+                await hooks.run_event("SessionEnd", extra={"reason": "exit"})
             print("Goodbye.")
             break
 
         if user_input == "/clear":
+            # /clear ends the old session and starts a new one (Claude Code
+            # parity: both events fire with source/reason "clear"). A blocking
+            # SessionStart here only prints the reason — the REPL keeps running.
+            if hooks.has_event("SessionEnd"):
+                await hooks.run_event("SessionEnd", extra={"reason": "clear"})
             history = []
             log = _make_log(entry)
             agent.session_log = log
+            session_feedback = []
+            if hooks.has_event("SessionStart"):
+                hr = await hooks.run_event("SessionStart", extra={"source": "clear"})
+                if hr.blocked:
+                    print(hr.reason or "[SessionStart hook blocked the session]")
+                else:
+                    session_feedback = hr.feedback
             print("[History cleared]")
             continue
 
         print()
+        injections = builder.injections_for_turn()
+        if session_feedback:
+            injections = [("hook", fb) for fb in session_feedback] + injections
+            session_feedback = []
         cbs = _PrintingCallbacks()
         result = await agent.run(
-            user_input, history, callbacks=cbs,
-            injections=builder.injections_for_turn(),
+            user_input, history, callbacks=cbs, injections=injections,
         )
         if agent.compacted_this_turn:
             builder.invalidate_injections()
