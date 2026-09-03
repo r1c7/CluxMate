@@ -684,10 +684,12 @@ export interface ElectronAPI {
 
   // Read-denylist (forbid-read.json) — user-global. Paths the read tools
   // (read_file/grep/list_dir) refuse to read, and which bwrap/Seatbelt hide
-  // from the shell sandbox. Default empty = no restriction. set replaces the
-  // whole set (no Windows label reconcile needed).
-  getForbidRead: () => Promise<{ paths: string[] }>
-  setForbidRead: (paths: string[]) => Promise<{ paths: string[] }>
+  // from the shell sandbox. protectSensitive is the one-click switch for the
+  // built-in sensitive-file template (.env / .git-credentials / .netrc /
+  // *.pem *.key *.p12 *.pfx / ~/.ssh ~/.aws ~/.gnupg) — off by default. set
+  // replaces paths and/or flips the toggle (no Windows label reconcile).
+  getForbidRead: () => Promise<{ paths: string[]; protectSensitive: boolean }>
+  setForbidRead: (paths: string[], protectSensitive: boolean) => Promise<{ paths: string[]; protectSensitive: boolean }>
 
   // Bash/MCP OS sandbox toggle (~/.cluxmate/sandbox.json). get reads the current
   // state (default true when the file is absent); set persists it and kills the

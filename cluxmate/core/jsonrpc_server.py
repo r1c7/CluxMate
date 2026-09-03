@@ -623,7 +623,7 @@ class JsonRpcServer:
         elif method in ("sandbox/forbid_read", "sandbox/forbid_read/get", "sandbox:forbid_read"):
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._forbid_read_snapshot()})
         elif method in ("sandbox/forbid_read/set", "sandbox:forbid_read:set"):
-            result = self._set_forbid_read(params.get("paths", []))
+            result = self._set_forbid_read(params)
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
         elif method in ("ssrf/config", "ssrf/config/get", "ssrf:config"):
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._ssrf_snapshot()})
@@ -1160,28 +1160,38 @@ class JsonRpcServer:
         return {"paths": paths}
 
     def _forbid_read_snapshot(self) -> dict[str, Any]:
-        paths = self._read_denies.snapshot() if self._read_denies else []
-        return {"paths": paths}
+        if self._read_denies is None:
+            return {"paths": [], "protect_sensitive": False}
+        return {
+            "paths": self._read_denies.snapshot(),
+            "protect_sensitive": self._read_denies.protect_sensitive(),
+        }
 
-    def _set_forbid_read(self, paths: list[str]) -> dict[str, Any]:
-        """Replace the read-denylist and rebuild the agent so the new set is
-        picked up by the read fence + shell sandbox on the next turn. Unlike
-        grants there is NO enforcement-side reconcile — a read deny leaves no
-        on-disk label to restore."""
+    def _set_forbid_read(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Replace the read-denylist and/or flip the built-in sensitive-file
+        toggle, then rebuild the agent so the new set is picked up by the read
+        fence + shell sandbox on the next turn. Unlike grants there is NO
+        enforcement-side reconcile — a read deny leaves no on-disk label to
+        restore."""
         if self._read_denies is None:
             from cluxmate.core.read_denies import ReadDenyStore
             self._read_denies = ReadDenyStore()
-        wanted = []
-        for p in paths:
-            if isinstance(p, str) and p.strip():
-                wanted.append(self._read_denies.add(p))
-        for d in self._read_denies.snapshot():
-            if d not in wanted:
-                self._read_denies.remove(d)
+        if "paths" in params:
+            wanted = []
+            for p in params.get("paths", []):
+                if isinstance(p, str) and p.strip():
+                    wanted.append(self._read_denies.add(p))
+            for d in self._read_denies.snapshot():
+                if d not in wanted:
+                    self._read_denies.remove(d)
+        if "protect_sensitive" in params:
+            self._read_denies.set_protect_sensitive(
+                bool(params["protect_sensitive"])
+            )
         if self._builder is not None:
             self._builder.with_read_denies(self._read_denies)
             self._agent = self._builder.build(session_log=self._session_log)
-        return {"paths": self._read_denies.snapshot()}
+        return self._forbid_read_snapshot()
 
     def _ssrf_snapshot(self) -> dict[str, Any]:
         cfg = getattr(self, "_ssrf_config", None)

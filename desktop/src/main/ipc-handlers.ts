@@ -128,18 +128,24 @@ function forbidReadPath(): string {
   return path.join(app.getPath('home'), '.cluxmate', 'forbid-read.json')
 }
 
-function readForbidRead(): string[] {
+function readForbidRead(): { paths: string[]; protectSensitive: boolean } {
   try {
     const data = JSON.parse(fs.readFileSync(forbidReadPath(), 'utf-8'))
-    return Array.isArray(data.paths) ? data.paths.filter((p: unknown) => typeof p === 'string') : []
+    const paths = Array.isArray(data.paths) ? data.paths.filter((p: unknown) => typeof p === 'string') : []
+    // Legacy v1 files have no toggle key → off (zero behavior change).
+    return { paths, protectSensitive: data.protect_sensitive === true }
   } catch {
-    return []
+    return { paths: [], protectSensitive: false }
   }
 }
 
-function writeForbidRead(paths: string[]): void {
+function writeForbidRead(paths: string[], protectSensitive: boolean): void {
   fs.mkdirSync(path.dirname(forbidReadPath()), { recursive: true })
-  fs.writeFileSync(forbidReadPath(), JSON.stringify({ paths }, null, 2), 'utf-8')
+  fs.writeFileSync(
+    forbidReadPath(),
+    JSON.stringify({ protect_sensitive: protectSensitive, paths }, null, 2),
+    'utf-8',
+  )
 }
 
 // Bash/MCP OS sandbox toggle (sandbox.json) — user-global, mirrors the
@@ -884,12 +890,12 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.SANDBOX_FORBID_READ_GET, () => {
-    return { paths: readForbidRead() }
+    return readForbidRead()
   })
 
-  ipcMain.handle(IPC.SANDBOX_FORBID_READ_SET, (_, paths: string[]) => {
+  ipcMain.handle(IPC.SANDBOX_FORBID_READ_SET, (_, paths: string[], protectSensitive: boolean) => {
     const next = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string' && p.trim() !== '') : []
-    writeForbidRead(next)
+    writeForbidRead(next, protectSensitive === true)
     // Kill the active session's bridge so the next chat re-initializes the
     // Python agent with the new read-denylist (mirrors grants + SAVE_MODELS).
     if (activeSessionId) {
@@ -899,7 +905,7 @@ export function registerIpcHandlers() {
         b.kill().catch(() => {})
       }
     }
-    return { paths: next }
+    return { paths: next, protectSensitive: protectSensitive === true }
   })
 
   ipcMain.handle(IPC.SANDBOX_BASH_GET, () => {

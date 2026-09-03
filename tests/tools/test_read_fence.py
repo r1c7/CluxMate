@@ -78,6 +78,68 @@ def test_error_does_not_leak_other_deny_roots(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Built-in sensitive-file template (protect_sensitive)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    ".env", ".git-credentials", ".netrc",
+    "server.pem", "id_rsa.key", "cert.p12", "bundle.pfx",
+    # Case-insensitive, matching the reference implementation.
+    ".ENV", "Server.PEM",
+])
+def test_sensitive_patterns_blocked_when_enabled(tmp_path, name):
+    f = tmp_path / name
+    fence = ReadFence(protect_sensitive=True)
+    assert fence.enabled
+    assert fence.is_denied(f) is True
+    with pytest.raises(ReadDenied):
+        fence.check(f)
+
+
+@pytest.mark.parametrize("name", [
+    ".env", ".git-credentials", ".netrc",
+    "server.pem", "id_rsa.key", "cert.p12", "bundle.pfx",
+])
+def test_sensitive_patterns_readable_by_default(tmp_path, name):
+    """Zero behavior change: the template is opt-in (default off)."""
+    f = tmp_path / name
+    fence = ReadFence()
+    assert fence.is_denied(f) is False
+    assert fence.check(f) == f.resolve()
+
+
+def test_sensitive_patterns_do_not_overreach(tmp_path):
+    """Near-misses stay readable: .env.production is not .env, and a key
+    INSIDE a filename doesn't count."""
+    fence = ReadFence(protect_sensitive=True)
+    assert fence.is_denied(tmp_path / ".env.production") is False
+    assert fence.is_denied(tmp_path / "monkey.txt") is False
+    assert fence.is_denied(tmp_path / "app.env") is False
+    assert fence.check(tmp_path / "README.md") == (tmp_path / "README.md").resolve()
+
+
+def test_sensitive_patterns_compose_with_deny_paths(tmp_path):
+    secret = tmp_path / ".ssh"
+    fence = ReadFence(deny_paths=[str(secret)], protect_sensitive=True)
+    with pytest.raises(ReadDenied):
+        fence.check(secret / "id_rsa")  # path root
+    with pytest.raises(ReadDenied):
+        fence.check(tmp_path / "creds.pem")  # pattern rule
+    assert fence.check(tmp_path / "ok.txt") == (tmp_path / "ok.txt").resolve()
+
+
+@pytest.mark.asyncio
+async def test_grep_walk_skips_pattern_matches(tmp_path):
+    (tmp_path / ".env").write_text("SECRETKEY", encoding="utf-8")
+    (tmp_path / "pub.txt").write_text("HELLO", encoding="utf-8")
+    tool = GrepTool(workdir=str(tmp_path), fence=ReadFence(protect_sensitive=True))
+    result = await tool.execute(path=str(tmp_path), pattern="HELLO|SECRET")
+    assert "pub.txt" in result
+    assert ".env" not in result
+    assert "SECRETKEY" not in result
+
+
+# ---------------------------------------------------------------------------
 # Tool integration
 # ---------------------------------------------------------------------------
 

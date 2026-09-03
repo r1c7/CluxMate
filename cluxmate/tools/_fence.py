@@ -39,6 +39,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from ..core.read_denies import is_sensitive_pattern
 from ._sandbox import ESCALATION_HINT
 
 
@@ -163,8 +164,16 @@ class ReadFence:
 
     This is the read sibling of :class:`WriteFence`, but it is a DENYLIST
     (default empty → no-op), not an allowlist: a coding agent must be able to
-    read arbitrary files by default. Only paths the user explicitly listed in
-    ``~/.cluxmate/forbid-read.json`` are blocked.
+    read arbitrary files by default. Two sources can block a read:
+
+    - ``deny_paths`` — the user's ``~/.cluxmate/forbid-read.json`` paths (plus
+      the built-in sensitive DIRECTORIES when ``protect_sensitive`` is on, via
+      the store's ``effective_paths()``).
+    - ``protect_sensitive=True`` — the built-in sensitive-file PATTERN rules
+      (``.env`` / ``.git-credentials`` / ``.netrc`` / ``*.pem`` / ``*.key`` /
+      ``*.p12`` / ``*.pfx``), matched by basename anywhere on disk. Off by
+      default (zero behavior change); the pattern rules are process-level only
+      (no shell-side equivalent).
 
     Canonicalize-then-contain, same as WriteFence: ``resolve(strict=False)``
     first so ``..`` and symlinks cannot dodge the deny list (a workspace link
@@ -174,35 +183,40 @@ class ReadFence:
     file; a directory root blocks the whole subtree.
     """
 
-    def __init__(self, deny_paths: list[str] | None = None):
+    def __init__(self, deny_paths: list[str] | None = None,
+                 protect_sensitive: bool = False):
         self._deny_paths: list[Path] = []
         for p in deny_paths or []:
             try:
                 self._deny_paths.append(Path(p).resolve())
             except OSError:
                 continue
+        self._protect_sensitive = protect_sensitive
 
     @property
     def enabled(self) -> bool:
-        """True only when at least one deny root is configured."""
-        return bool(self._deny_paths)
+        """True when at least one deny root or the pattern rules are active."""
+        return bool(self._deny_paths) or self._protect_sensitive
 
     def denyroots(self) -> list[Path]:
         return list(self._deny_paths)
 
     def is_denied(self, path: Path) -> bool:
-        """Non-raising: is ``path`` (or its resolved target) inside a deny root?
+        """Non-raising: is ``path`` (or its resolved target) inside a deny root,
+        or matching a built-in sensitive-file pattern?
 
         Used by grep's directory walk and list_dir's entry filtering, where a
         single forbidden subtree should be skipped silently rather than fail
         the whole operation.
         """
-        if not self._deny_paths:
+        if not self._deny_paths and not self._protect_sensitive:
             return False
         try:
             resolved = path.resolve(strict=False)
         except OSError:
             resolved = Path(path)
+        if self._protect_sensitive and is_sensitive_pattern(resolved):
+            return True
         return any(
             resolved == d or resolved.is_relative_to(d) for d in self._deny_paths
         )
@@ -214,6 +228,11 @@ class ReadFence:
         checked path and the read path cannot diverge via a symlink swap).
         """
         resolved = path.resolve(strict=False)
+        if self._protect_sensitive and is_sensitive_pattern(resolved):
+            raise ReadDenied(
+                f"reading this path is forbidden by the sensitive-file "
+                f"protection rules: {path}"
+            )
         if any(
             resolved == d or resolved.is_relative_to(d) for d in self._deny_paths
         ):

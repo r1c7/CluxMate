@@ -10,6 +10,14 @@ import type { ModelEntry } from '../../shared/types'
 
 type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'language'
 
+// Built-in sensitive-file template (mirrors cluxmate/core/read_denies.py) —
+// shown read-only in the forbid-read card; the toggle turns them all on.
+const PROTECT_SENSITIVE_RULES = [
+  '.env', '.git-credentials', '.netrc',
+  '*.pem', '*.key', '*.p12', '*.pfx',
+  '~/.ssh', '~/.aws', '~/.gnupg',
+]
+
 const SECTIONS: { id: Section; labelKey: MessageKey; icon: React.ReactNode }[] = [
   {
     id: 'model', labelKey: 'settings.section.model',
@@ -167,20 +175,27 @@ export default function SettingsView() {
   // Sandbox read-denylist (forbid-read.json) — user-global, mirroring grants:
   // read once on mount, committed immediately on add/remove (full replace).
   const [forbidRead, setForbidRead] = useState<string[]>([])
+  const [protectSensitive, setProtectSensitive] = useState(false)
   const [forbidReadLoaded, setForbidReadLoaded] = useState(false)
   useEffect(() => {
     let alive = true
     window.electronAPI.getForbidRead().then((r) => {
-      if (alive) { setForbidRead(r.paths); setForbidReadLoaded(true) }
+      if (alive) {
+        setForbidRead(r.paths)
+        setProtectSensitive(r.protectSensitive === true)
+        setForbidReadLoaded(true)
+      }
     }).catch(() => { if (alive) setForbidReadLoaded(true) })
     return () => { alive = false }
   }, [])
 
-  const commitForbidRead = async (next: string[]) => {
+  const commitForbidRead = async (next: string[], nextProtect: boolean = protectSensitive) => {
     setForbidRead(next)
+    setProtectSensitive(nextProtect)
     try {
-      const r = await window.electronAPI.setForbidRead(next)
+      const r = await window.electronAPI.setForbidRead(next, nextProtect)
       setForbidRead(r.paths)
+      setProtectSensitive(r.protectSensitive === true)
     } catch { /* keep the optimistic list on failure */ }
   }
 
@@ -597,6 +612,37 @@ export default function SettingsView() {
                 badge={forbidReadLoaded ? <CountBadge n={forbidRead.length} /> : undefined}
               >
                 <p className="text-xs text-ink-faint">{t('settings.sandbox.forbidRead.hint')}</p>
+
+                {/* Built-in sensitive-file template — one-click enable */}
+                <div className="flex items-start justify-between gap-3 mt-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-ink">{t('settings.sandbox.forbidRead.protect.title')}</p>
+                    <p className="text-xs text-ink-soft leading-relaxed">{t('settings.sandbox.forbidRead.protect.hint')}</p>
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {PROTECT_SENSITIVE_RULES.map((r) => (
+                        <span key={r} className="text-[10px] px-1.5 py-0.5 rounded bg-surface-raised border border-surface-border text-ink-faint font-mono">{r}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => commitForbidRead(forbidRead, !protectSensitive)}
+                    role="switch"
+                    aria-checked={protectSensitive}
+                    aria-label={t('settings.sandbox.forbidRead.protect.title')}
+                    className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 hover:opacity-80 ${
+                      protectSensitive ? 'bg-accent' : 'bg-surface-border'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${
+                        protectSensitive ? 'left-[22px]' : 'left-0.5'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {/* User-configured paths */}
+                <p className="text-xs font-semibold text-ink mt-3">{t('settings.sandbox.forbidRead.custom.title')}</p>
                 {!forbidReadLoaded ? (
                   <p className="text-sm text-ink-faint py-2 text-center">{t('common.loading')}</p>
                 ) : forbidRead.length === 0 ? (

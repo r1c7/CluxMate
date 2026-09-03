@@ -280,10 +280,20 @@ class AgentBuilder:
             return []
         return self._grants.snapshot()
 
-    def _forbid_read_paths(self) -> list[str]:
+    def _read_deny_paths(self) -> list[str]:
+        """Effective deny roots: user forbid-read.json paths + the built-in
+        sensitive DIRECTORIES when the protect_sensitive toggle is on. Feeds
+        both the ReadFence (T1) and the shell sandbox (T2, Linux/macOS)."""
         if self._read_denies is None:
             return []
-        return self._read_denies.snapshot()
+        return self._read_denies.effective_paths()
+
+    def _protect_sensitive(self) -> bool:
+        """Whether the built-in sensitive-file PATTERN rules are on. Pattern
+        rules are ReadFence-only (no shell-side equivalent)."""
+        if self._read_denies is None:
+            return False
+        return self._read_denies.protect_sensitive()
 
     def _egress_mode(self) -> str:
         if self._egress is None:
@@ -484,9 +494,13 @@ class AgentBuilder:
     def _get_tools(self) -> list[BaseTool]:
         tools: list[BaseTool] = list(self._tools)
         if self._include_default_tools:
-            # Read denylist fence (read_file/grep/list_dir). Default empty → a
-            # no-op ReadFence; only paths in ~/.cluxmate/forbid-read.json block.
-            read_fence = ReadFence(deny_paths=self._forbid_read_paths())
+            # Read denylist fence (read_file/grep/list_dir). Default off → a
+            # no-op ReadFence; forbid-read.json paths + the built-in
+            # sensitive-file template (when its toggle is on) block reads.
+            read_fence = ReadFence(
+                deny_paths=self._read_deny_paths(),
+                protect_sensitive=self._protect_sensitive(),
+            )
             # Plan mode: hard isolation. Register only read-only tools so the
             # model literally cannot issue a write — no bash (can mutate files),
             # no edit/write/delete, no task (a subagent could write and bypass
@@ -534,7 +548,7 @@ class AgentBuilder:
                 pick_sandbox(
                     self._cwd,
                     grant_paths=self._grant_paths(),
-                    deny_read_paths=self._forbid_read_paths(),
+                    deny_read_paths=self._read_deny_paths(),
                     **egress_kw,
                 )
                 if sandbox_enabled else None
@@ -622,7 +636,7 @@ class AgentBuilder:
         return pick_sandbox(
             self._cwd,
             grant_paths=self._grant_paths(),
-            deny_read_paths=self._forbid_read_paths(),
+            deny_read_paths=self._read_deny_paths(),
         )
 
     def _mcp_sandbox(self):
@@ -637,7 +651,7 @@ class AgentBuilder:
         return pick_sandbox(
             self._cwd,
             grant_paths=self._grant_paths(),
-            deny_read_paths=self._forbid_read_paths(),
+            deny_read_paths=self._read_deny_paths(),
             **self._egress_sandbox_kwargs(),
         )
 
