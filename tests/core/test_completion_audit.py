@@ -178,13 +178,19 @@ def test_deletion_claim_skipped_by_filesystem_check():
 class _Stat:
     def __init__(self, mtime):
         self.st_mtime = mtime
+        # st_size/st_mode keep pathlib/linecache consumers (which pytest itself
+        # uses when formatting a failure report) from crashing on our fake.
+        self.st_size = 0
+        self.st_mode = 0o100644
 
 
 def test_resolve_file_touched_absolute_path(monkeypatch):
-    monkeypatch.setattr(ca.os, "stat", lambda p: _Stat(200.0))
+    monkeypatch.setattr(ca.os, "stat", lambda p, *a, **k: _Stat(200.0))
     assert resolve_file_touched("/work/src/utils.py", "/cwd", 100.0) is True
     assert resolve_file_touched("/work/src/utils.py", "/cwd", 300.0) is False
-    monkeypatch.setattr(ca.os, "stat", lambda p: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(
+        ca.os, "stat", lambda p, *a, **k: (_ for _ in ()).throw(OSError())
+    )
     assert resolve_file_touched("/work/src/missing.py", "/cwd", 100.0) is False
 
 
@@ -196,11 +202,13 @@ def test_resolve_file_touched_walk_finds_basename(monkeypatch):
     monkeypatch.setattr(ca.os, "walk", lambda cwd: iter(tree))
 
     monkeypatch.setattr(
-        ca.os, "stat", lambda p: _Stat(200.0 if "utils.py" in p.lower() else 1.0)
+        ca.os,
+        "stat",
+        lambda p, *a, **k: _Stat(200.0 if "utils.py" in p.lower() else 1.0),
     )
     assert resolve_file_touched("utils.py", "/cwd", 100.0) is True
     # exists but untouched this turn
-    monkeypatch.setattr(ca.os, "stat", lambda p: _Stat(1.0))
+    monkeypatch.setattr(ca.os, "stat", lambda p, *a, **k: _Stat(1.0))
     assert resolve_file_touched("utils.py", "/cwd", 100.0) is False
 
 
@@ -219,8 +227,15 @@ def test_resolve_file_touched_skips_heavy_dirs(monkeypatch):
         seen.append(dirs)
         yield (cwd, dirs, [])
 
+    def stat(path, *args, **kwargs):
+        # Report the file as missing: resolve_file_touched checks
+        # os.path.exists(cwd/name) first, and a fake stat that returns a
+        # valid-looking result for every path would fire that shortcut and
+        # skip the os.walk branch this test is about.
+        raise FileNotFoundError(path)
+
     monkeypatch.setattr(ca.os, "walk", walk)
-    monkeypatch.setattr(ca.os, "stat", lambda p: _Stat(1.0))
+    monkeypatch.setattr(ca.os, "stat", stat)
     resolve_file_touched("utils.py", "/cwd", 100.0)
     assert seen[0] == ["src"]  # heavy dirs pruned in place
 
