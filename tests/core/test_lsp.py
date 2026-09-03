@@ -284,7 +284,15 @@ import textwrap
 
 def _fake_installer(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
     """A fake install command that "installs" a binary by dropping a file into
-    bindir (added to PATH), mirroring how npm/rustup put tools on PATH."""
+    bindir (added to PATH), mirroring how npm/rustup put tools on PATH.
+
+    The dropped file is an inert placeholder, NOT a runnable server: it exists
+    on PATH but can never exec. That keeps the resulting query's failure mode
+    deterministic on every OS — POSIX raises ENOEXEC and Windows "not a valid
+    Win32 application" (both OSError → "failed to start"). A `#!/bin/sh` stub
+    instead would spawn and exit cleanly on POSIX, making the failure surface
+    only later at initialize with a different message.
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir()
     name = "fake-lsp" + (".exe" if os.name == "nt" else "")
@@ -293,7 +301,7 @@ def _fake_installer(tmp_path: Path, monkeypatch) -> tuple[Path, str]:
         import os, sys
         target = os.path.join(sys.argv[1], sys.argv[2])
         with open(target, "w", encoding="utf-8") as f:
-            f.write("#!/bin/sh\\n")
+            f.write("not a real lsp server\\n")
         try:
             os.chmod(target, 0o755)
         except OSError:
