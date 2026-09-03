@@ -14,6 +14,25 @@ if TYPE_CHECKING:
 class TaskTool(BaseTool):
     """Delegate work to a subagent and return its result."""
 
+    # End-reason kinds of a child's last turn that mean the child did NOT
+    # finish normally. The parent must not present such a result as a clean
+    # completion (run-settlement whitelist pattern, deepseek-harness
+    # packages/subagent/subagent/src/run-settlement.ts).
+    _ABNORMAL_END_KINDS = frozenset(
+        {"aborted", "interrupted", "max-turns", "max-tokens", "error"}
+    )
+
+    @staticmethod
+    def _child_end_kind(child: Any) -> str | None:
+        """``kind`` of the child's most recent ``turn/end`` event, if any."""
+        log = getattr(child, "session_log", None)
+        if log is None:
+            return None
+        for event in reversed(log.events):
+            if event.type == "turn/end":
+                return (event.data.get("reason") or {}).get("kind")
+        return None
+
     def __init__(self, builder: "AgentBuilder"):
         self._builder = builder
 
@@ -121,13 +140,33 @@ class TaskTool(BaseTool):
         try:
             result = await child.run(prompt, history=[], callbacks=child_cbs)
             text = result.text or "(subagent returned no output)"
+            # Completion honesty gate: the child's own event log is the source
+            # of truth for how its turn actually ended — its reply text alone
+            # may claim success. A non-completed end reason (aborted, max
+            # turns/tokens, error) is surfaced explicitly so the parent never
+            # treats a truncated/aborted child result as a clean completion.
+            end_kind = self._child_end_kind(child)
+            if end_kind in self._ABNORMAL_END_KINDS:
+                text = (
+                    f"[Subagent did not complete normally ({end_kind}). "
+                    f"Treat its output as partial and do not rely on it as a "
+                    f"finished result.]\n\n{text}"
+                )
             text = await self._run_subagent_stop_hook(
                 subagent_type, description, prompt, child_id, text, error=None,
             )
             if tracker is not None:
+                # Mirror the reload path's classification
+                # (session_log_store.py: "done" for completed/max-tokens/
+                # max-turns, else "error") so the live agent-tree event agrees
+                # with what the desktop reconstructs from the child JSONL.
                 await tracker.on_agent_end(
                     child_id,
-                    "done",
+                    (
+                        "done"
+                        if end_kind in (None, "completed", "max-tokens", "max-turns")
+                        else "error"
+                    ),
                     text,
                     input_tokens=(result.cache_usage or {}).get("input_tokens", 0),
                     output_tokens=result.out_tokens,

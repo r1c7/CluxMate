@@ -886,6 +886,7 @@ class AgentBuilder:
             mode=self._mode,
             sandbox=self._sandbox_state,
             hooks=self._hooks_manager(),
+            cwd=self._cwd,
         )
 
     def _child_builder(self, subagent_type: str, agent_id: str) -> "AgentBuilder":
@@ -976,6 +977,7 @@ class AgentBuilder:
             mode=self._mode,
             sandbox=child._sandbox_state,
             hooks=child._hooks_manager(),
+            cwd=self._cwd,
         )
 
     def _make_child_log(

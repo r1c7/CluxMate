@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from cluxmate.core.providers.base import (
@@ -32,6 +33,13 @@ from cluxmate.core.session_log import (
 from cluxmate.tools.base import ToolBridge, ToolResult
 from cluxmate.tools._sandbox import validate_escalation_args
 from cluxmate.core.hooks import HookManager
+from cluxmate.core.completion_audit import (
+    WRITE_TOOLS,
+    audit_completion,
+    normalize_path,
+    resolve_file_touched,
+    tool_write_paths,
+)
 
 # Compact when the running context estimate exceeds this fraction of the window.
 COMPACT_THRESHOLD = 0.8
@@ -298,6 +306,11 @@ class AgentLoop:
     # model with the hook's reason, so this bounds the extra latency a
     # pathological always-blocking hook can impose.
     MAX_STOP_BLOCK_RETRIES = 3
+    # How many times the completion audit (core/completion_audit.py) may bounce
+    # a final reply back to the model in one turn. One round suffices: the model
+    # either backs the claim with real tool calls or corrects the reply. The
+    # audit is advisory — after the cap the reply is committed as-is.
+    MAX_COMPLETION_AUDIT_RETRIES = 1
 
     # Doom-loop guard — modeled on DeepSeek Harness's repeat-tool-reminder.
     # Consecutive identical tool calls (same name + canonical arguments) trigger
@@ -327,6 +340,7 @@ class AgentLoop:
         mode: str = "default",
         sandbox: str = "off",
         hooks: HookManager | None = None,
+        cwd: str | None = None,
     ):
         self.model = model
         self.provider = provider
@@ -334,6 +348,11 @@ class AgentLoop:
         self.system_prompt = system_prompt
         self.parent = parent
         self.context_window = context_window
+        # Working directory. Enables the completion audit's filesystem fallback
+        # (mtime vs turn start) for turns where bash ran — the only ground
+        # truth for WHAT a bash call actually changed. None keeps the
+        # tool-record-only checks.
+        self._cwd = cwd
         # Lifecycle hooks (user-configured commands). None disables the feature.
         # Inherited by child agents (see build_child) so subagent tool calls are
         # hooked too.
@@ -624,6 +643,15 @@ class AgentLoop:
         # a loop, so reset the doom-loop chain at the turn boundary.
         self._repeat_key = None
         self._repeat_count = 0
+        # Completion-audit state (core/completion_audit.py): the per-turn trace
+        # of executed writes + bash calls that the end_turn audit reconciles
+        # final-reply claims against, the audit bounces spent this turn, and
+        # the wall-clock instant this turn started (the filesystem fallback
+        # compares claimed files' mtime against it).
+        self._completion_audit_retries = 0
+        self._turn_write_paths: set[str] = set()
+        self._turn_any_bash = False
+        self._turn_start_ts = time.time()
         log = self.session_log
 
         # UserPromptSubmit hook: fires before the prompt reaches the model. A
@@ -710,6 +738,12 @@ class AgentLoop:
             # Self-close any tool calls left without a result before the turn
             # closes, so an aborted turn's surface is still a valid transcript.
             self._close_orphaned_tools()
+            if self._completion_audit_retries:
+                # Audit trail: how many completion-audit reminders this turn
+                # consumed. `reason.kind` already says completed/aborted/etc.
+                end_reason["completion_audit"] = {
+                    "reminders": self._completion_audit_retries
+                }
             log.append("turn/end", {"turn": session_turn, "reason": end_reason})
             self._log_turn = None
             self._log_step = None
@@ -997,6 +1031,56 @@ class AgentLoop:
                         "[The model ended the turn with an empty response "
                         "(no text, no tool calls). Resend the message to retry.]"
                     )
+                # Completion audit (claim-vs-evidence): reconcile this final
+                # reply against the turn's executed tool calls BEFORE it is
+                # committed. On a hit, bounce the reply back to the model with
+                # the reminder as a synthetic user message — same mechanism and
+                # boundedness as the Stop-hook block path below. Advisory only:
+                # after MAX_COMPLETION_AUDIT_RETRIES the reply is committed
+                # as-is (the bounce count lands in turn/end for the audit
+                # trail).
+                if (
+                    self._completion_audit_retries
+                    < self.MAX_COMPLETION_AUDIT_RETRIES
+                ):
+                    reminder = audit_completion(
+                        text,
+                        write_paths=self._turn_write_paths,
+                        any_bash=self._turn_any_bash,
+                        tool_calls_made=tool_calls_made,
+                        # Filesystem fallback for bash turns: the tool record
+                        # can't say WHAT a bash call changed, so claimed files
+                        # are checked against mtime >= turn start. Only when
+                        # this agent knows its cwd.
+                        resolve_touched=(
+                            partial(
+                                resolve_file_touched,
+                                cwd=self._cwd,
+                                turn_start_ts=self._turn_start_ts,
+                            )
+                            if self._cwd
+                            else None
+                        ),
+                    )
+                    if reminder is not None:
+                        self._completion_audit_retries += 1
+                        audit_msg = {"role": "user", "content": reminder}
+                        messages.append(audit_msg)
+                        ctx_tokens += estimate_tokens([audit_msg])
+                        self._log_append(
+                            "user/message",
+                            {"message": audit_msg, "source": "completion-audit"},
+                            surface_op=APPEND,
+                        )
+                        self._log_append(
+                            "step/end", {"turn": self._log_turn, "step": step}
+                        )
+                        # Tell the UI to clear the rejected text before the new
+                        # generation streams (else it would append/duplicate).
+                        if callbacks is not None:
+                            await callbacks.on_text_restart()
+                        continue
+
                 # Stop hook fires BEFORE the assistant message is committed, so a
                 # block can reject this reply and re-run without polluting history
                 # with the rejected text. It receives the full reply as `response`.
@@ -1269,6 +1353,25 @@ class AgentLoop:
                 # on_tool_end fires inside _execute_one (incl. on cancellation),
                 # so there is no separate notify loop after gather.
                 results = await asyncio.gather(*[_execute_one(tc) for tc in tool_calls])
+
+                # Completion-audit trace: record executed (non-denied,
+                # non-error) write paths and bash calls — the only
+                # host-verifiable evidence the end_turn audit can reconcile
+                # final-reply claims against. Denied/malformed/hook-blocked
+                # calls changed nothing, so they must not back a claim.
+                for tc in tool_calls:
+                    meta = self._log_tool_meta.get(tc.id) or {}
+                    if meta.get("status") != "executed":
+                        continue
+                    result = meta.get("result")
+                    if result is not None and getattr(result, "is_error", False):
+                        continue
+                    if tc.name == "bash":
+                        self._turn_any_bash = True
+                    elif tc.name in WRITE_TOOLS:
+                        for p in tool_write_paths(tc.name, tc.input):
+                            if p:
+                                self._turn_write_paths.add(normalize_path(p))
 
                 # Append tool results to messages
                 appended: list[dict[str, Any]] = []

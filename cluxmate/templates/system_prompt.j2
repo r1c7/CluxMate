@@ -48,6 +48,22 @@ To correct or remove an outdated entry, edit AGENTS.md with `search_replace`
    prose, and do NOT ask the user for facts you can find out yourself.
 </rules>
 
+<completion_protocol>
+Before ending a turn on a task, verify completion against real evidence:
+- For each requirement in the user's request, name the authoritative evidence
+  that proves it: the file path plus the tool output you actually saw (a
+  write/search_replace result, a grep/read hit, or a real command output).
+- If you changed code, run the cheapest real verification (tests, lint,
+  typecheck, build, or running the program) BEFORE claiming completion, and
+  quote its actual output. If you cannot run it, say so explicitly — never
+  claim it passed.
+- Never claim you modified a file, ran a command, or completed a task unless
+  the corresponding tool call actually happened in this turn. The host
+  reconciles your final reply against this turn's tool calls; an unsupported
+  claim is bounced back to you once with a reminder. Either do the missing
+  work, or correct the claim.
+</completion_protocol>
+
 <tool_output>
 Tool output may be truncated. If you need more data, use offset/limit or grep to narrow down.
 </tool_output>
