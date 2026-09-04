@@ -98,7 +98,7 @@ export default function PermissionCard() {
   const approve = useStore((s) => s.approveTool)
   const deny = useStore((s) => s.denyTool)
 
-  // Keyboard shortcuts: y = approve, a = always, n/esc = deny (Claude-style).
+  // Keyboard shortcuts: y = approve, a = always, n/esc = deny.
   useEffect(() => {
     if (!pending) return
     const onKey = (e: KeyboardEvent) => {

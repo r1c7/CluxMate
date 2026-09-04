@@ -11,7 +11,13 @@ from cluxmate.core.agent import (
 )
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.providers.base import LLMProvider, LLMResponse, ToolCall
+from cluxmate.core.session_log import (
+    SessionHeader,
+    SessionLog,
+    fold_todos,
+)
 from cluxmate.tools.base import BaseTool, ToolBridge
+from cluxmate.tools.todo import TodoTool
 from typing import Any
 from pathlib import Path
 
@@ -264,9 +270,9 @@ async def test_max_turns_safety():
 async def test_repeat_tool_reminder_injects_advisory_nudge():
     """Three consecutive identical tool calls inject a gentle loop-guard nudge.
 
-    Modeled on DeepSeek Harness's repeat-tool-reminder: the first threshold
-    (3) is advisory text telling the model to stop repeating itself. The loop
-    never blocks — MAX_TURNS remains the hard backstop."""
+    The first threshold (3) is advisory text telling the model to stop
+    repeating itself. The loop never blocks — MAX_TURNS remains the hard
+    backstop."""
     bridge = ToolBridge()
     bridge.register(EchoTool())
 
@@ -1295,3 +1301,152 @@ async def test_fallback_mid_conversation_keeps_history_valid():
     # History: Q1, A1, Q2, fallback-marker — roles alternate throughout.
     roles = [m["role"] for m in r2.history]
     assert roles == ["user", "assistant", "user", "assistant"]
+
+
+def _todo_log() -> SessionLog:
+    return SessionLog.create(SessionHeader(id="todo-s1", createdAt=0, apiType="openai"))
+
+
+@pytest.mark.asyncio
+async def test_todo_write_appends_log_only_event():
+    """A successful todo_write call appends the canonical list to the session
+    log as a log-only todo/write event; the surface keeps only the tool
+    result message (model-visible ⟺ logged, state rides the log)."""
+    log = _todo_log()
+    bridge = ToolBridge()
+    bridge.register(TodoTool())
+    provider = FakeProvider([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    name="todo_write",
+                    input={
+                        "todos": [
+                            {"content": "  step a  ", "status": "completed"},
+                            {"content": "step b", "status": "in_progress"},
+                        ],
+                    },
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        LLMResponse(text="Working on step b.", stop_reason="end_turn"),
+    ])
+    agent = AgentLoop(
+        model="test", provider=provider, tools=bridge,
+        system_prompt="s", session_log=log,
+    )
+
+    result = await agent.run("Do the plan")
+    assert result.text == "Working on step b."
+
+    writes = [e for e in log.events if e.type == "todo/write"]
+    assert len(writes) == 1
+    # Content is canonicalized (trimmed) exactly as the model wrote it.
+    assert writes[0].data == {
+        "todos": [
+            {"content": "step a", "status": "completed"},
+            {"content": "step b", "status": "in_progress"},
+        ],
+    }
+    assert fold_todos(log.events) == writes[0].data["todos"]
+    # The surface carries the tool result message, never the todo/write
+    # event — and the todo list itself is not model-visible as a message.
+    tool_msgs = [
+        m for m in log.derive_messages()
+        if m.get("role") == "user" and "Updated todo list" in m.get("content", "")
+    ]
+    assert len(tool_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_todo_write_invalid_call_appends_no_event():
+    """A rejected todo_write (validation error) must not overwrite the last
+    good list: no todo/write event, error result fed back to the model."""
+    log = _todo_log()
+    bridge = ToolBridge()
+    bridge.register(TodoTool())
+    provider = FakeProvider([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    name="todo_write",
+                    input={
+                        "todos": [
+                            {"content": "dup", "status": "pending"},
+                            {"content": "dup", "status": "completed"},
+                        ],
+                    },
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        LLMResponse(text="Retrying with a fixed list.", stop_reason="end_turn"),
+    ])
+    agent = AgentLoop(
+        model="test", provider=provider, tools=bridge,
+        system_prompt="s", session_log=log,
+    )
+
+    result = await agent.run("Do the plan")
+    assert result.text == "Retrying with a fixed list."
+
+    assert not [e for e in log.events if e.type == "todo/write"]
+    assert fold_todos(log.events) is None
+    # The error result is on the surface for the model to retry from.
+    err_msgs = [
+        m for m in log.derive_messages()
+        if m.get("role") == "user" and "duplicate content" in m.get("content", "")
+    ]
+    assert len(err_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_todo_write_second_call_replaces_first():
+    """Whole-value replacement across steps: the second call's list wins and
+    the fold reflects only the latest state."""
+    log = _todo_log()
+    bridge = ToolBridge()
+    bridge.register(TodoTool())
+    provider = FakeProvider([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t1", name="todo_write",
+                    input={"todos": [{"content": "a", "status": "pending"}]},
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t2", name="todo_write",
+                    input={
+                        "todos": [
+                            {"content": "a", "status": "completed"},
+                            {"content": "b", "status": "in_progress"},
+                        ],
+                    },
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        LLMResponse(text="Done with a, on b.", stop_reason="end_turn"),
+    ])
+    agent = AgentLoop(
+        model="test", provider=provider, tools=bridge,
+        system_prompt="s", session_log=log,
+    )
+
+    result = await agent.run("Do the plan")
+    assert result.text == "Done with a, on b."
+
+    writes = [e for e in log.events if e.type == "todo/write"]
+    assert len(writes) == 2
+    assert fold_todos(log.events) == [
+        {"content": "a", "status": "completed"},
+        {"content": "b", "status": "in_progress"},
+    ]

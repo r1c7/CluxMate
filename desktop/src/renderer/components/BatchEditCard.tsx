@@ -54,7 +54,7 @@ export default function BatchEditCard() {
         <MultiEditFileList edits={pending.edits} defaultOpenFirst />
       </div>
 
-      {/* Footer — whole-turn approval, Claude-Code style */}
+      {/* Footer — whole-turn approval */}
       <div className="flex gap-2 px-3 py-2 border-t border-surface-border">
         <button
           onClick={() => approveBatchEdit(pending.call_id)}

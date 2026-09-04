@@ -18,6 +18,7 @@ const api: ElectronAPI = {
   truncateHistory: (id: string, len: number) => ipcRenderer.invoke(IPC.SESSION_TRUNCATE, id, len),
   replaySession: (id: string) => ipcRenderer.invoke(IPC.SESSION_REPLAY, id),
   getTurnContexts: (id: string, targetId?: string) => ipcRenderer.invoke(IPC.SESSION_CONTEXT, id, targetId),
+  getSessionTodos: (id: string) => ipcRenderer.invoke(IPC.SESSION_TODOS, id),
 
   sendMessage: (sessionId: string, text: string, options) =>
     ipcRenderer.invoke(IPC.CHAT_SEND, sessionId, text, options),

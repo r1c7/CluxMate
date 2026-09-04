@@ -6,7 +6,7 @@ import { useT } from '../useI18n'
 
 type Pane = 'root' | 'model' | 'effort'
 
-// The composer's model seat, mirroring DeepSeek Harness web's ModelSelect: a
+// The composer's model seat: a
 // trigger showing `model · effort` and a two-row root menu (模型 / 推理等级)
 // that drills into the model list or the reasoning-level list. Selecting a model
 // resets the effort to that model's default; both apply to the NEXT message

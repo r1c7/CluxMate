@@ -28,6 +28,7 @@ from cluxmate.tools.update_memory import UpdateMemoryTool
 from cluxmate.tools.web_fetch import WebFetchTool
 from cluxmate.tools.web_search import WebSearchTool
 from cluxmate.tools.ask_user_question import AskUserQuestionTool
+from cluxmate.tools.todo import TodoTool
 from cluxmate.core.skills import SkillManager
 from cluxmate.core.memory import MemoryManager
 from cluxmate.core.mcp import MCPManager
@@ -526,6 +527,12 @@ class AgentBuilder:
                 # spec without writing anything.
                 if self._depth == 0:
                     tools.append(AskUserQuestionTool(builder=self))
+                # todo_write is read-only in the sandbox sense (it only appends
+                # a session-log event), so the task list stays available in
+                # plan mode. Root agent only — the list belongs to the session
+                # the user is watching, not to subagent logs.
+                if self._depth == 0:
+                    tools.append(TodoTool())
                 return tools
             # Write fence (sandbox phase 0): file write/delete tools may only
             # touch the workspace + temp dir + granted folders. Disabled in
@@ -601,8 +608,13 @@ class AgentBuilder:
             # the SkillTool/MCP parent-only gate.
             if self._depth == 0:
                 tools.append(UpdateMemoryTool(cwd=self._cwd))
+            # todo_write only for the parent (depth 0) — the task list is the
+            # root session's plan strip; a subagent's list would be invisible
+            # in the UI and die with the child log.
+            if self._depth == 0:
+                tools.append(TodoTool())
             # Parent-only: a subagent must not block the parent's `task` call
-            # waiting on a human answer (mirrors DSH's DELEGATED_CALLER rule).
+            # waiting on a human answer.
             if self._depth == 0:
                 tools.append(AskUserQuestionTool(builder=self))
             # MCP tools only for the parent (depth 0). Construct the manager
@@ -709,12 +721,16 @@ class AgentBuilder:
         has_update_memory = any(
             getattr(t, "name", "") == "update_memory" for t in tools
         )
+        has_todo_write = any(
+            getattr(t, "name", "") == "todo_write" for t in tools
+        )
         return render_system_prompt(
             os_name=os_name,
             shell_path=shell_path,
             working_directory=self._cwd,
             current_date=datetime.now().strftime("%Y-%m-%d"),
             has_update_memory=has_update_memory,
+            has_todo_write=has_todo_write,
         )
 
     def render_injections(self) -> list[tuple[str, str]]:

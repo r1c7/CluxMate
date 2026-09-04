@@ -18,6 +18,7 @@ from textual.binding import Binding
 
 from .controller import TuiController
 from .widgets.chat_view import ChatView
+from .widgets.todo_strip import TodoStrip
 from .widgets.input_box import InputBox
 from .widgets.session_list import SessionList
 from cluxmate.core.reasoning import options_for
@@ -121,6 +122,9 @@ class CluxMateApp(App):
                 # ── chat view (default) ──
                 with Vertical(id="chat-panel"):
                     yield ChatView(id="chat-view")
+                    # Plan strip: one-line todo_write summary; hidden until the
+                    # model writes a task list (reset each turn).
+                    yield TodoStrip()
                     with Horizontal(id="mode-row"):
                         yield Button(
                             "Model: ?", id="btn-cycle-model", variant="default",
@@ -406,6 +410,7 @@ class CluxMateApp(App):
         self._history = []
         self._refresh_session_list()
         chat = self.query_one(ChatView)
+        self.query_one(TodoStrip).update_todos([])
         chat.clear()
         chat.add_info(
             f"New session — {label} / {model}  |  {self._cwd}"
@@ -429,6 +434,9 @@ class CluxMateApp(App):
 
         self._refresh_session_list()
         chat = self.query_one(ChatView)
+        strip = self.query_one(TodoStrip)
+        # Restore the persisted task list folded from the JSONL (None → hidden).
+        strip.update_todos(data.get("todos") or [])
         chat.clear()
         chat.add_info(
             f"Loaded: {data.get('title','Session')}  |  "
@@ -655,10 +663,14 @@ class CluxMateApp(App):
     async def _send_message(self, text: str):
         chat = self.query_one(ChatView)
         inp = self.query_one(InputBox)
+        strip = self.query_one(TodoStrip)
         inp.clear_input()
         chat.add_user_message(text)
         chat.show_thinking(True)
         inp.set_status("Thinking...")
+        # New turn → the previous task list is stale (todo/write fold resets at
+        # turn/start). The model re-writes the whole list when it wants one.
+        strip.update_todos([])
         streamed = {"text": ""}
 
         def on_progress(msg: dict):
@@ -666,11 +678,17 @@ class CluxMateApp(App):
                 streamed["text"] += msg.get("content", "")
                 chat.stream_agent_text(streamed["text"])
 
+        def on_todo_update(todos: list[dict]):
+            # The callback fires from the run_prompt worker — route the widget
+            # update through the App's thread boundary.
+            self.call_from_thread(strip.update_todos, list(todos))
+
         try:
             result = await self.ctrl.run_prompt(
                 text, self._history, on_progress=on_progress,
                 on_tool_approval=self._request_tool_approval,
                 on_ask_question=self._request_question,
+                on_todo_update=on_todo_update,
             )
             self._history = result.history
             chat.show_thinking(False)

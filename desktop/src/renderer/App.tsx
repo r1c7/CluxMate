@@ -7,6 +7,7 @@ import QuickNav from './components/QuickNav'
 import WorkingDirBar from './components/WorkingDirBar'
 import InputBox from './components/InputBox'
 import QuestionCard from './components/QuestionCard'
+import TodoPanel from './components/TodoPanel'
 import SettingsView from './components/SettingsView'
 import AgentInspector from './components/AgentInspector'
 import CheckpointTimeline from './components/CheckpointTimeline'
@@ -233,6 +234,10 @@ function AppInner() {
             <SettingsView />
           ) : (
             <>
+              {/* Task tracking strip (todo_write): sits between the chat header
+                  and the message list so it never scrolls away with the
+                  transcript. Renders nothing while no list is in force. */}
+              {!focusAgent && <TodoPanel />}
               <div className="flex-1 flex relative min-h-0">
                 <ChatView />
                 {!focusAgent && <QuickNav />}

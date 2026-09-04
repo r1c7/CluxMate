@@ -273,11 +273,26 @@ export interface TextRestartEvent {
   agent_id?: string
 }
 
+// One entry in the model-declared task tracking list (todo_write).
+export interface TodoItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
+// Emitted after a successful todo_write call: the canonical WHOLE task list
+// (the tool replaces the previous list on every call). The plan strip renders
+// this directly; the list resets each turn (turn_start clears the panel).
+export interface TodoUpdateEvent {
+  type: 'todo_update'
+  todos: TodoItem[]
+  agent_id?: string
+}
+
 export type StreamEvent =
   | ToolStartEvent | ToolResultEvent | TextDeltaEvent | ThinkingEvent
   | AgentStartEvent | AgentEndEvent | TurnDiffEvent | TurnStartEvent | SkillUsedEvent
   | TitleSuggestedEvent | QuestionEvent
-  | HookStartEvent | HookResultEvent | TextRestartEvent
+  | HookStartEvent | HookResultEvent | TextRestartEvent | TodoUpdateEvent
 
 export type SessionStreamEvent = StreamEvent & {
   sessionId: string
@@ -728,6 +743,10 @@ export interface ElectronAPI {
   // `targetSessionId` is whose log to reconstruct — pass a subagent id to
   // inspect a child's context, or omit for the parent.
   getTurnContexts: (sessionId: string, targetSessionId?: string) => Promise<{ turns: TurnContext[] }>
+  // Restore the persisted task list (todo/write fold over the Python-owned
+  // JSONL). null when the session has no list in force or the bridge is still
+  // warming up (fire-and-forget on switchSession, mirrors replaySession).
+  getSessionTodos: (sessionId: string) => Promise<{ todos: TodoItem[] | null }>
 
   writeClipboard: (text: string) => Promise<void>
 

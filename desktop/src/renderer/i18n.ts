@@ -166,6 +166,10 @@ const en = {
   'chat.turnOf': 'Turn {current} / {total}',
   'chat.workingDir': 'Working Dir:',
   'chat.changeDir': 'Change...',
+  'todo.title': 'To-dos',
+  'todo.progress.done': '{done} done',
+  'todo.progress.active': '{active} in progress',
+  'todo.progress.pending': '{pending} pending',
 
   // ── code block ──
   'code.expand': 'Expand',
@@ -665,6 +669,10 @@ const zh: Record<keyof typeof en, string> = {
   'chat.turnOf': 'Turn {current} / {total}',
   'chat.workingDir': '工作目录：',
   'chat.changeDir': '更改…',
+  'todo.title': '任务',
+  'todo.progress.done': '{done} 已完成',
+  'todo.progress.active': '{active} 进行中',
+  'todo.progress.pending': '{pending} 待处理',
 
   // ── code block ──
   'code.expand': '展开',

@@ -5,14 +5,6 @@ any ``end_turn`` reply at face value. This module closes the gap for the cheap,
 deterministic cases: a final reply that claims work (file changes, a command or
 test outcome) that this turn's tool calls cannot support.
 
-Pattern references (cross-project corpus, 2026-09):
-- Reasonix ``internal/completion/claim.go`` + ``AdjudicateCompletion`` — a
-  completion claim must reconcile with the host's tool-call receipts; the host
-  may only lower a claim, never raise it.
-- grok-build ``goal_stop_detector`` / laziness classifier's
-  ``stalled_false_completion`` — "claimed to run X" with no tool_call to back it.
-- pi ``harness/reducer.ts`` record-log validation — ``tool_call_mismatch``.
-
 Design constraints for CluxMate:
 - The audit is ADVISORY. It returns a reminder string; the loop injects it as a
   synthetic user message and re-runs, bounded (mirrors the Stop-hook block path
@@ -21,11 +13,10 @@ Design constraints for CluxMate:
   change/test claim paired with a file or command token), never on a bare
   "done". Negated claims ("did not modify", "couldn't run") are skipped.
 - When a bash call DID run this turn, test-outcome claims get the benefit of
-  the doubt (no command-semantics matching, unlike Reasonix's
-  ``commandmatch.go``). File claims are then checked against the FILESYSTEM
-  when the caller supplies a ``resolve_touched`` callback (mtime vs turn
-  start — grok hunk-tracker / opencode2 snapshot pattern); without one, the
-  path-level checks are skipped and bash turns pass unverified.
+  the doubt (no command-semantics matching). File claims are then checked
+  against the FILESYSTEM when the caller supplies a ``resolve_touched``
+  callback (mtime vs turn start); without one, the path-level checks are
+  skipped and bash turns pass unverified.
 """
 
 from __future__ import annotations

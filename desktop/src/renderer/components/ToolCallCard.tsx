@@ -5,9 +5,9 @@ import { MultiEditFileList, EditedFilesList, editStats, editsFromToolInput, tool
 import { useT } from '../useI18n'
 import { tGlobal } from '../i18n'
 
-// One-line summary of a tool call for the collapsed header, mirroring how
-// Claude Code shows "Read(path)", "Bash(cmd)", etc. File-path tools show a path
-// relative to the session working dir instead of an absolute one.
+// One-line summary of a tool call for the collapsed header, e.g. "Read(path)",
+// "Bash(cmd)". File-path tools show a path relative to the session working dir
+// instead of an absolute one.
 function summarize(tc: ToolCallEntry, cwd: string): string {
   const i = tc.input || {}
   const s = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v))

@@ -5,6 +5,7 @@ import type {
   Checkpoint, CheckpointFileDiff, SkillMeta, McpServer, BatchEditRequest,
   ModelEntry, PermissionMode, GitInfo, ReplaySubagent, TurnContext,
   PendingQuestion, QuestionAnswer, SessionSearchHit, HookEntry, HookRunEntry,
+  TodoItem,
 } from '../../shared/types'
 import { deriveSessionTitle } from '../../shared/session-title'
 import { defaultReasoningValue } from '../../shared/reasoning'
@@ -187,6 +188,9 @@ interface SessionState {
   // user hasn't switched back to view the result yet. Drives the sidebar's green
   // "unread" dot (distinct from the streaming "working" indicator).
   hasUnread: boolean
+  // The model-declared task tracking list (todo_write). null = no list in force
+  // (reset at each turn_start, mirroring the session-log todo/write fold).
+  todos: TodoItem[] | null
 }
 
 // Which subagent node the inspector panel is showing, if any.
@@ -215,6 +219,8 @@ interface AppState {
   pendingPermission: PermissionRequest | null
   pendingBatchEdit: BatchEditRequest | null
   pendingQuestion: PendingQuestion | null
+  // Derived from the active session's state — the plan strip's task list.
+  todos: TodoItem[] | null
   // global
   workingDir: string
   // The cwd of the session the user most recently SENT a message in. New
@@ -411,6 +417,7 @@ const NEW_SS: SessionState = {
   modelId: '',
   reasoningEffort: null,
   hasUnread: false,
+  todos: null,
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -427,6 +434,7 @@ export const useStore = create<AppState>((set, get) => ({
   pendingPermission: null,
   pendingBatchEdit: null,
   pendingQuestion: null,
+  todos: null,
   workingDir: '',
   lastSentCwd: null,
   git: null,
@@ -540,6 +548,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: ss?.pendingPermission || null,
       pendingBatchEdit: ss?.pendingBatchEdit || null,
       pendingQuestion: ss?.pendingQuestion || null,
+      todos: ss?.todos ?? null,
     })
     get().refreshBridgeStatuses()
   },
@@ -732,6 +741,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: null,
       pendingBatchEdit: null,
       pendingQuestion: null,
+      todos: null,
       selectedAgent: null,
       error: null,
     })
@@ -762,6 +772,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: ss?.pendingPermission || null,
       pendingBatchEdit: ss?.pendingBatchEdit || null,
       pendingQuestion: ss?.pendingQuestion || null,
+      todos: ss?.todos ?? null,
     })
     // Bridge for the deleted session is now gone — refresh sidebar dots.
     get().refreshBridgeStatuses()
@@ -839,6 +850,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: ss.pendingPermission,
       pendingBatchEdit: ss.pendingBatchEdit,
       pendingQuestion: ss.pendingQuestion,
+      todos: ss.todos ?? null,
       selectedAgent: null,
       contextOpen: false,
       turnContexts: [],
@@ -874,6 +886,29 @@ export const useStore = create<AppState>((set, get) => ({
         }
       })()
     }
+    // Fire-and-forget: restore the persisted task list from the Python JSONL
+    // (todo/write fold). Skipped while the session is streaming — the turn
+    // already reset the list and live todo_update events own it from here.
+    if (!ss.isStreaming) {
+      void (async () => {
+        try {
+          const { todos } = await window.electronAPI.getSessionTodos(id)
+          if (!todos || todos.length === 0) return
+          const cur = get()
+          const states2 = new Map(cur.sessionStates)
+          const s2 = states2.get(id)
+          if (!s2) return
+          s2.todos = todos
+          set({
+            sessionStates: states2,
+            ...(cur.activeSessionId === id ? { todos: s2.todos } : {}),
+          })
+        } catch {
+          // Bridge may be cold or the session has no todo events — the strip
+          // just stays hidden until the model writes a new list.
+        }
+      })()
+    }
   },
 
   sendMessage: async (text) => {
@@ -899,6 +934,10 @@ export const useStore = create<AppState>((set, get) => ({
     ss.thinkingContent = ''
     ss.pendingPermission = null
     ss.pendingQuestion = null
+    // A new turn starts: the previous list is stale (mirrors the todo/write
+    // fold's turn/start reset). The model re-writes the whole list when it
+    // wants the panel to show a plan again.
+    ss.todos = null
 
     // Optimistically title the session after its first message. The backend
     // persists the same on CHAT_SEND; this just avoids waiting for a reload.
@@ -908,7 +947,7 @@ export const useStore = create<AppState>((set, get) => ({
         : s
     )
     const bs0 = { ...get().bridgeStatuses, [sid]: true }
-    set({ sessions, sessionStates: states, messages: ss.messages, isStreaming: true, streamingContent: '', thinkingContent: '', pendingPermission: null, pendingQuestion: null, error: null, bridgeStatuses: bs0 })
+    set({ sessions, sessionStates: states, messages: ss.messages, isStreaming: true, streamingContent: '', thinkingContent: '', pendingPermission: null, pendingQuestion: null, todos: null, error: null, bridgeStatuses: bs0 })
 
     // Pending throttled-render timer for this turn's text/thinking deltas (see
     // scheduleRender). Held across events so deltas coalesce into one render.
@@ -928,7 +967,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         sessionStates: s2,
         bridgeStatuses,
-        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion } : {}),
+        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion, todos: css.todos } : {}),
         ...extra,
       })
     }
@@ -1100,6 +1139,14 @@ export const useStore = create<AppState>((set, get) => ({
         css.messages = mapAgentMsg(css.messages, userMsg.id, (m) => ({
           ...m, undo: { checkpoint_id: event.checkpoint_id, log_seq: event.log_seq },
         }))
+        // New turn → the previous task list is stale (todo/write fold resets at
+        // turn/start; the model re-writes the whole list when it wants one).
+        css.todos = null
+        commit(css, s2)
+      } else if (event.type === 'todo_update') {
+        // Whole-list replacement from the root agent's todo_write call — the
+        // plan strip renders this as-is.
+        css.todos = event.todos
         commit(css, s2)
       } else if (event.type === 'title_suggested') {
         // Live-swap the sidebar title (main process already persisted it, with
@@ -1697,7 +1744,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         sessionStates: s2,
         bridgeStatuses,
-        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion } : {}),
+        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion, todos: css.todos } : {}),
         ...extra,
       })
     }
@@ -1797,6 +1844,11 @@ export const useStore = create<AppState>((set, get) => ({
         css.messages = mapAgentMsg(css.messages, userMsg.id, (m) => ({
           ...m, undo: { checkpoint_id: event.checkpoint_id, log_seq: event.log_seq },
         }))
+        // Retry restarts the turn — same reset as sendMessage (stale list out).
+        css.todos = null
+        commit(css, s2)
+      } else if (event.type === 'todo_update') {
+        css.todos = event.todos
         commit(css, s2)
       } else if (event.type === 'title_suggested') {
         commit(css, s2, {

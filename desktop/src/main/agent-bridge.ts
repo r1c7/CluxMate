@@ -233,6 +233,14 @@ export class AgentBridge {
     return { subagents: r?.subagents ?? [] }
   }
 
+  // Fold the persisted todo/write events into the session's current task list
+  // (null = no list in force). Used by switchSession so the plan strip restores
+  // after reopening a session — the display transcript doesn't carry it.
+  async getSessionTodos(sessionId: string): Promise<{ todos: unknown[] | null }> {
+    const r = (await this.request('session/todos', { session_id: sessionId })) as { todos?: unknown[] | null }
+    return { todos: r?.todos ?? null }
+  }
+
   // `sessionId` is this bridge's parent session (the process serving the RPC);
   // `targetSessionId` is whose log to reconstruct — a subagent's own <id>.jsonl
   // when inspecting a child, otherwise the parent. The bridge reads both from the

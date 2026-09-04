@@ -3,8 +3,8 @@ import type { TurnFileChange } from '../../shared/types'
 import { useStore } from '../stores'
 import { useT } from '../useI18n'
 
-// Status glyph + color, Claude-Code-desktop style: a single-letter badge in a
-// tinted pill (green add / coral modify / red delete). Labels are i18n keys.
+// Status glyph + color: a single-letter badge in a tinted pill (green add /
+// coral modify / red delete). Labels are i18n keys.
 const STATUS: Record<TurnFileChange['status'], { glyph: string; cls: string; labelKey: string }> = {
   A: { glyph: '+', cls: 'text-emerald-700 border-emerald-500/30 bg-emerald-500/10', labelKey: 'changedFiles.added' },
   M: { glyph: '~', cls: 'text-accent border-accent/30 bg-accent/10', labelKey: 'changedFiles.modified' },
@@ -22,8 +22,7 @@ function dirname(p: string): string {
 
 // Inline card shown at the end of an agent turn listing every file that turn
 // changed. Clicking a file opens the diff overlay (lazy content fetch via the
-// checkpoint's diff()). Mirrors Claude Code desktop's post-turn file summary.
-// Collapsed by default — click the header to expand.
+// checkpoint's diff()). Collapsed by default — click the header to expand.
 export default function ChangedFilesCard({
   checkpointId, files, label,
 }: {

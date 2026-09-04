@@ -17,8 +17,7 @@ Schema (JSON at ~/.cluxmate/forbid-read.json):
 - ``protect_sensitive`` — one-click switch for the BUILT-IN sensitive-file
   template (see below). Default false = zero behavior change: the template is
   opt-in because hiding credential files (e.g. every ``.env`` in the
-  workspace) breaks legitimate edit/config workflows — mirrors Reasonix's
-  ``[secrets] protect_sensitive_files``.
+  workspace) breaks legitimate edit/config workflows.
 
 Built-in template (active only while ``protect_sensitive`` is true):
 
@@ -54,10 +53,8 @@ import threading
 import traceback
 from pathlib import Path
 
-# Built-in sensitive-file template — modeled on Reasonix's
-# protect_sensitive_files (internal/tool/builtin/confine.go::sensitiveReadPath).
-# Basenames are compared lowercased (case-insensitive on every platform, same
-# as the reference implementation).
+# Built-in sensitive-file template. Basenames are compared lowercased
+# (case-insensitive on every platform).
 SENSITIVE_BASENAMES = (".env", ".git-credentials", ".netrc")
 SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 

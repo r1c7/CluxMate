@@ -10,6 +10,7 @@ export const IPC = {
   SESSION_TRUNCATE: 'session:truncate',
   SESSION_REPLAY: 'session:replay',
   SESSION_CONTEXT: 'session:context',
+  SESSION_TODOS: 'session:todos',
 
   CHAT_SEND:      'chat:send',
   CHAT_CANCEL:    'chat:cancel',

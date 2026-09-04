@@ -353,7 +353,7 @@ class LSPClient:
         """Send a request, await the matching response, return its `result`.
 
         ContentModified (-32801) means the server is mid-reindex: retry a few
-        times with a short backoff before surfacing it (matches Reasonix).
+        times with a short backoff before surfacing it.
         """
         delay = 0.4
         for attempt in range(retries + 1):

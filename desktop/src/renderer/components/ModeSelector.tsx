@@ -3,7 +3,7 @@ import { useStore } from '../stores'
 import type { PermissionMode } from '../../shared/types'
 import { useT } from '../useI18n'
 
-// Development-mode list (mirrors Claude Code's shift+tab). Order defines the
+// Development-mode list. Order defines the
 // list order in the popup. Each entry carries the button's label, dot/border/
 // text classes, and a tooltip. Labels/tooltips are translated at render time via
 // useT (the keys below resolve per language). yolo is styled as a warning — it

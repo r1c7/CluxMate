@@ -8,7 +8,7 @@ from cluxmate.core.config import ConfigManager
 from cluxmate.core.reasoning import default_for, options_for
 from cluxmate.core.mcp import MCPManager
 from cluxmate.core.permissions import PermissionPolicy
-from cluxmate.core.session_log import SessionLog
+from cluxmate.core.session_log import SessionLog, fold_todos
 from cluxmate.core.session_log_store import IncrementalPersister
 from cluxmate.core.session_store import SessionStore
 from cluxmate.core.providers.base import LLMProvider
@@ -102,7 +102,14 @@ class TuiController:
             entry = self.config.get_model(self._model_id) or {}
             if saved in options_for(entry):
                 self.set_reasoning_effort(saved)
-        return data
+        # Restore the persisted task list: fold the JSONL's todo/write events
+        # (last-write-wins, turn/start-reset) so the plan strip shows the last
+        # list the model wrote. None → strip hidden.
+        todos = (
+            fold_todos(self._session_log.events)
+            if self._session_log is not None else None
+        )
+        return {**data, "todos": todos}
 
     def delete_session(self, session_id: str):
         self.sessions.delete(session_id)
@@ -293,6 +300,7 @@ class TuiController:
         on_progress: callable = None,
         on_tool_approval: callable = None,
         on_ask_question: callable = None,
+        on_todo_update: callable = None,
     ) -> AgentResult:
         if self._agent is None:
             raise RuntimeError("No active agent — create or select a session first.")
@@ -345,13 +353,17 @@ class TuiController:
                     ] + injections
 
         callbacks = None
-        if on_progress or on_tool_approval or on_ask_question:
+        if on_progress or on_tool_approval or on_ask_question or on_todo_update:
             policy = self._policy
 
             class _Cb(AgentCallbacks):
                 async def on_text_delta(self, chunk: str) -> None:
                     if on_progress:
                         on_progress({"type": "text_delta", "content": chunk})
+
+                async def on_todo_update(self, todos: list[dict]) -> None:
+                    if on_todo_update is not None:
+                        on_todo_update(list(todos))
 
                 async def on_tool_start(
                     self,

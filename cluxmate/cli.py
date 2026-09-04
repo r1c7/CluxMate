@@ -200,9 +200,9 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
             break
 
         if user_input == "/clear":
-            # /clear ends the old session and starts a new one (Claude Code
-            # parity: both events fire with source/reason "clear"). A blocking
-            # SessionStart here only prints the reason — the REPL keeps running.
+            # /clear ends the old session and starts a new one (both events
+            # fire with source/reason "clear"). A blocking SessionStart here
+            # only prints the reason — the REPL keeps running.
             if hooks.has_event("SessionEnd"):
                 await hooks.run_event("SessionEnd", extra={"reason": "clear"})
             history = []

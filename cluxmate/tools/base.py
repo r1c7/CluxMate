@@ -16,6 +16,12 @@ class ToolResult:
     name: str
     content: str
     is_error: bool = False
+    # Whole-value state payload for state-carrying tools: the agent loop
+    # appends it to the session log as a log-only event (see
+    # ``BaseTool.session_event``) after an executed, non-error call. Never
+    # model-visible — the same posture as the audit fields (riskLevel/decision)
+    # that ride ``tool/result`` events beside ``message``.
+    data: dict[str, Any] | None = None
 
 
 class BaseTool(ABC):
@@ -38,6 +44,21 @@ class BaseTool(ABC):
         """Return 'safe', 'write', 'dangerous', or 'critical'. Override per tool."""
         return "safe"
 
+    #: Log-only session event the agent loop appends (with the payload from
+    #: :meth:`result_data`) after this tool executes successfully. None = this
+    #: tool emits no session event. The event data must be whole-value: the
+    #: complete post-call state, never a delta (see ``todo/write``).
+    session_event: str | None = None
+
+    def result_data(self, args: dict[str, Any], output: str) -> dict[str, Any] | None:
+        """Whole-value state payload for :attr:`session_event` (default: none).
+
+        ``run_safe`` calls this only after a successful ``execute``; the
+        default returns None, so ordinary tools emit no session event.
+        Must be plain JSON (validated at log append) and must never raise
+        for inputs that passed ``execute``."""
+        return None
+
     @abstractmethod
     async def execute(self, **kwargs) -> str:
         """Execute the tool and return result text."""
@@ -56,6 +77,7 @@ class BaseTool(ABC):
                 tool_call_id=tool_call_id,
                 name=self.name,
                 content=output,
+                data=self.result_data(kwargs, output),
             )
         except Exception as e:
             return ToolResult(
@@ -82,6 +104,10 @@ class ToolBridge:
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
+
+    def tool(self, name: str) -> BaseTool | None:
+        """Look up a registered tool by name (None when unknown)."""
+        return self._tools.get(name)
 
     def definitions(self) -> list[dict[str, Any]]:
         return [t.definition() for t in self._tools.values()]

@@ -5,11 +5,11 @@ One append-only ``<id>.jsonl`` file per session under ``~/.cluxmate/sessions/``
 ``{"type": "session", ...}``; every subsequent line is one :class:`SessionEvent`
 serialized by :func:`~cluxmate.core.session_log.event_to_dict`.
 
-Simplified from DeepSeek Harness' ``session-persistence-jsonl``: no zstd
-compression, no write-batching coordinator, no multi-process exclusion — CluxMate
-is single-writer per session. Kept from DSH: append-only writes with ``fsync``,
-contiguous ``seq`` validation, and crash repair (a torn tail is dropped; an open
-turn is durably closed with synthetic ``tool/result`` + ``turn/end {interrupted}``).
+Append-only writes with ``fsync``, contiguous ``seq`` validation, and crash
+repair (a torn tail is dropped; an open turn is durably closed with synthetic
+``tool/result`` + ``turn/end {interrupted}``). No zstd compression, no
+write-batching coordinator, no multi-process exclusion — CluxMate is
+single-writer per session.
 """
 
 from __future__ import annotations
@@ -91,8 +91,8 @@ class SessionLogStore:
         """Write the header line. Rejects an existing session.
 
         Written directly (not via a temp-file rename): CluxMate is single-writer
-        per session and ids are fresh UUIDs, so the cross-process collision
-        safety DSH gets from atomic rename is unnecessary. A crash mid-write
+        per session and ids are fresh UUIDs, so cross-process collision safety
+        via atomic rename is unnecessary. A crash mid-write
         leaves a torn header line, which :meth:`load` reports as corruption.
         """
         path = self.path_for(header.id)

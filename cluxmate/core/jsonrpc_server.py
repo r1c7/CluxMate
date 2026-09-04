@@ -30,6 +30,7 @@ from cluxmate.core.permissions import PermissionPolicy
 from cluxmate.core.session_log import (
     SessionHeader,
     SessionLog,
+    fold_todos,
     reconstruct_turn_contexts,
 )
 from cluxmate.core.session_log_store import (
@@ -280,9 +281,9 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._tool_events[call_id] = evt
 
         # Wait indefinitely on a thread so the event loop stays free for
-        # other tool_start calls, text streaming, and chat/cancel.  Claude
-        # Code has no approval timeout — the user can take as long as they
-        # need to review a tool call before approving or denying it.
+        # other tool_start calls, text streaming, and chat/cancel — the user
+        # can take as long as they need to review a tool call before
+        # approving or denying it.
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, evt.wait)
         self._tool_events.pop(call_id, None)
@@ -302,6 +303,17 @@ class JsonRpcCallbacks(AgentCallbacks):
                 "type": "tool_result", "call_id": call_id,
                 "output": result.content, "is_error": result.is_error,
             },
+        })
+
+    async def on_todo_update(self, todos: list[dict[str, Any]]) -> None:
+        """Forward the canonical task list as a dedicated stream event.
+
+        The desktop's plan strip renders this directly — it must not parse the
+        tool_result output (which is model-visible prose, not state).
+        """
+        _write_dict({
+            "jsonrpc": "2.0", "method": "chat/stream",
+            "params": {"type": "todo_update", "todos": todos},
         })
 
     async def on_text_delta(self, chunk: str) -> None:
@@ -666,6 +678,10 @@ class JsonRpcServer:
             sid = params.get("session_id") or self._session_id
             subagents = replay_subagents(self._log_store, sid) if sid else []
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {"subagents": subagents}})
+        elif method in ("session/todos", "session:todos"):
+            sid = params.get("session_id") or self._session_id
+            todos = self._session_todos(sid)
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {"todos": todos}})
         elif method in ("session/context", "session:context"):
             sid = params.get("session_id") or self._session_id
             contexts = []
@@ -1307,6 +1323,21 @@ class JsonRpcServer:
     def _ssrf_snapshot(self) -> dict[str, Any]:
         cfg = getattr(self, "_ssrf_config", None)
         return cfg.snapshot() if cfg is not None else {"allow": [], "block_extra": []}
+
+    def _session_todos(self, sid: str) -> list[dict[str, Any]] | None:
+        """Fold the persisted ``todo/write`` events into the current task list.
+
+        Read-only ``inspect`` (NOT ``load``) — opening a session's plan strip
+        must not repair/append closers to an in-flight turn's log. None when the
+        session is unknown/unreadable or has no list in force.
+        """
+        if not sid:
+            return None
+        try:
+            _header, events = self._log_store.inspect(sid)
+            return fold_todos(events)
+        except (SessionNotFoundError, SessionLogCorruptionError):
+            return None
 
     def _set_ssrf_config(self, params: dict[str, Any]) -> dict[str, Any]:
         """Replace the SSRF allow/block lists. Invalid entries raise ValueError

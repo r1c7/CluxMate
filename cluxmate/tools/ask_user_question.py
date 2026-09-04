@@ -1,4 +1,4 @@
-"""AskUserQuestion tool — pause for a human answer (DSH `ask_user_question`).
+"""AskUserQuestion tool — pause for a human answer.
 
 The tool itself does NOT collect the answer: the agent loop asks the frontend's
 ``ask_question`` callback and injects the answer as ``_answer`` (mirroring how

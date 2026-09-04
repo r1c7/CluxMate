@@ -16,8 +16,7 @@ class TaskTool(BaseTool):
 
     # End-reason kinds of a child's last turn that mean the child did NOT
     # finish normally. The parent must not present such a result as a clean
-    # completion (run-settlement whitelist pattern, deepseek-harness
-    # packages/subagent/subagent/src/run-settlement.ts).
+    # completion (run-settlement whitelist pattern).
     _ABNORMAL_END_KINDS = frozenset(
         {"aborted", "interrupted", "max-turns", "max-tokens", "error"}
     )

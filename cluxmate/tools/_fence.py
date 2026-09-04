@@ -6,7 +6,7 @@ It is NOT a defense against malicious code — a determined process can bypass
 any in-process check. It prevents the model from accidentally or (via prompt
 injection) deliberately writing/deleting outside the workspace.
 
-Design (mirrors DSH's `writableRoots`):
+Design:
 - The writable roots are defined in exactly ONE place: `WriteFence.roots()`.
   Default roots = the session working directory + the platform temp dir +
   one home file: ~/.cluxmate/AGENTS.md (the global memory file — see the

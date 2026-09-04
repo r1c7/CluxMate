@@ -1,6 +1,6 @@
 """Event-sourced session log — the append-only source of truth for an agent turn.
 
-Mirrors the DeepSeek Harness ``dsh-session`` design, simplified for CluxMate:
+Design:
 
 - A :class:`SessionLog` is an append-only sequence of :class:`SessionEvent` objects.
   The provider message history is *derived* from it (never stored separately), so
@@ -44,6 +44,11 @@ APPEND = "append"
 # ordered surface. Anything else is log-only (boundaries, usage, headers).
 SURFACE_EVENT_TYPES = frozenset({"user/message", "assistant/message", "tool/result"})
 
+# Whole-value state event written by the agent loop after a successful
+# ``todo_write`` call: the complete post-call task list. Log-only — the model
+# already knows what it declared, so it must not enter the surface.
+TODO_WRITE_EVENT = "todo/write"
+
 # Interruption stages recorded on ``turn/end.reason.stage``. Shared by the writer
 # (the agent loop, which records the precise stage) and the crash-repair reader
 # (SessionLogStore, which infers a best-effort stage) so the vocabulary never
@@ -61,7 +66,7 @@ STAGE_TOOL_EXECUTING = "tool_executing"
 # second read. snapshot_json_value() validates and deep-copies in one pass and
 # raises on invalid input; is_json_value() is the boolean predicate. Recursion is
 # acceptable here: CluxMate message graphs are shallow (a few dozen levels at
-# most), unlike DSH's call-stack-defensive iterative walk.
+# most).
 
 
 def snapshot_json_value(value: Any) -> Any:
@@ -303,6 +308,28 @@ def fold_request_header(
     for event in events:
         if event.type == "request/header":
             state = canonical_header(event.data["header"])
+    return state
+
+
+def fold_todos(
+    events: Iterator[SessionEvent],
+    from_state: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Fold ``todo/write`` events into the current task list.
+
+    Whole-value replacement, last-write-wins: every ``todo/write`` carries the
+    complete post-call list. A ``turn/start`` resets the list to None so a
+    stale plan never lingers into a later turn — the model re-writes the
+    entire list on each ``todo_write`` call. Non-todo events are skipped.
+    Returns None when no list is in force.
+    """
+    state = from_state
+    for event in events:
+        if event.type == TODO_WRITE_EVENT:
+            todos = event.data.get("todos")
+            state = list(todos) if isinstance(todos, list) else None
+        elif event.type == "turn/start":
+            state = None
     return state
 
 
@@ -743,6 +770,7 @@ __all__ = [
     "SESSION_FORMAT_VERSION",
     "APPEND",
     "SURFACE_EVENT_TYPES",
+    "TODO_WRITE_EVENT",
     "STAGE_STREAMING",
     "STAGE_APPROVAL",
     "STAGE_TOOL_EXECUTING",
@@ -756,6 +784,7 @@ __all__ = [
     "header_equals",
     "diff_headers",
     "fold_request_header",
+    "fold_todos",
     "reconstruct_turn_contexts",
     "event_to_dict",
     "event_from_dict",

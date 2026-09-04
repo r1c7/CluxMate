@@ -665,6 +665,20 @@ export function registerIpcHandlers() {
     return await bridge.replaySession(sid)
   })
 
+  // Restore the persisted task list (todo/write fold over the Python-owned
+  // JSONL). Used by switchSession so the plan strip survives reopening —
+  // same fire-and-forget bridge pattern as SESSION_REPLAY.
+  ipcMain.handle(IPC.SESSION_TODOS, async (_, sid: string) => {
+    const meta = sessionStore.getSession(sid)
+    if (!meta) return { todos: null }
+    let bridge = bridges.get(sid)
+    if (!bridge || !bridge.isRunning) {
+      bridge = await ensureBridge(sid, meta.cwd, resolveModelId(meta.model_id))
+    }
+    if (!bridge || !bridge.isRunning) return { todos: null }
+    return await bridge.getSessionTodos(sid)
+  })
+
   // Reconstruct every turn's exact first-request context from the Python-owned
   // JSONL (the authoritative source). `sid` is the parent session (its bridge
   // serves the RPC and owns the shared log store); `targetSid` is whose log to

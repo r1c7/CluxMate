@@ -219,6 +219,12 @@ class AgentCallbacks:
         """Called after tool execution with the result."""
         pass
 
+    async def on_todo_update(self, todos: list[dict[str, Any]]) -> None:
+        """Called with the canonical whole task list after a successful
+        ``todo_write`` call (the same payload the loop logs as ``todo/write``).
+        Failed/denied calls never fire this — only a committed state update."""
+        pass
+
     async def on_text_delta(self, chunk: str) -> None:
         """Called with each incremental text chunk as the model streams output.
 
@@ -312,7 +318,7 @@ class AgentLoop:
     # audit is advisory — after the cap the reply is committed as-is.
     MAX_COMPLETION_AUDIT_RETRIES = 1
 
-    # Doom-loop guard — modeled on DeepSeek Harness's repeat-tool-reminder.
+    # Doom-loop guard.
     # Consecutive identical tool calls (same name + canonical arguments) trigger
     # escalating advisory reminders at these run lengths. The FIRST threshold
     # gets a gentle nudge; later thresholds get the detailed form. Advisory
@@ -1348,6 +1354,18 @@ class AgentLoop:
                                 hook_feedback.extend(hr.feedback)
                     if callbacks is not None:
                         await callbacks.on_tool_end(tc.id, result)
+                        # State-carrying tool (todo_write): forward the
+                        # canonical whole list so frontends can update their
+                        # plan strip. Failed/denied calls never reach here with
+                        # data (see run_safe), so this is a committed update.
+                        if (
+                            tc.name == "todo_write"
+                            and not getattr(result, "is_error", False)
+                            and result.data is not None
+                        ):
+                            await callbacks.on_todo_update(
+                                list(result.data.get("todos") or [])
+                            )
                     return result
 
                 # on_tool_end fires inside _execute_one (incl. on cancellation),
@@ -1372,6 +1390,20 @@ class AgentLoop:
                         for p in tool_write_paths(tc.name, tc.input):
                             if p:
                                 self._turn_write_paths.add(normalize_path(p))
+                    # State-carrying tools (todo_write): append their
+                    # whole-value payload as a log-only session event, so UIs
+                    # and replay folds read the post-call state from the log.
+                    # Same gating as the audit trace — only an executed,
+                    # non-error call may advance state, and a denied/failed
+                    # call must not overwrite the last good list.
+                    tool = self.tools.tool(tc.name)
+                    if (
+                        tool is not None
+                        and tool.session_event is not None
+                        and result is not None
+                        and result.data is not None
+                    ):
+                        self._log_append(tool.session_event, result.data)
 
                 # Append tool results to messages
                 appended: list[dict[str, Any]] = []
