@@ -8,6 +8,7 @@ from .base import BaseTool
 _OPERATIONS = [
     "goToDefinition", "goToDeclaration", "goToTypeDefinition", "goToImplementation",
     "findReferences", "hover", "documentSymbol", "workspaceSymbol", "callHierarchy",
+    "diagnostics",
 ]
 
 _CALL_KINDS = ("incomingCalls", "outgoingCalls")
@@ -40,6 +41,7 @@ class LspTool(BaseTool):
             "(the column is located internally). callHierarchy takes the same plus "
             "kind (incomingCalls or outgoingCalls, default incomingCalls). "
             "documentSymbol takes file_path only. workspaceSymbol takes query only. "
+            "diagnostics takes file_path only. "
             "If the language server is not installed, the tool reports how to "
             "install it (or installs it automatically when auto_install is enabled "
             "in lsp.json)."
@@ -120,6 +122,10 @@ class LspTool(BaseTool):
             return self._manager.call_hierarchy(
                 file_path, line, symbol, kind or "incomingCalls"
             )
+        if operation == "diagnostics":
+            if not file_path:
+                return "Error: diagnostics requires file_path"
+            return self._manager.diagnostics(file_path)
         if operation == "documentSymbol":
             if not file_path:
                 return "Error: documentSymbol requires file_path"

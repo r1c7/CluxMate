@@ -7,6 +7,7 @@ from cluxmate.tools.lsp_tool import LspTool
 _OPERATIONS = [
     "goToDefinition", "goToDeclaration", "goToTypeDefinition", "goToImplementation",
     "findReferences", "hover", "documentSymbol", "workspaceSymbol", "callHierarchy",
+    "diagnostics",
 ]
 
 
@@ -49,6 +50,10 @@ class _StubManager:
     def workspace_symbol(self, query):
         self.calls.append(("workspace_symbol", query))
         return "ws-result"
+
+    def diagnostics(self, file):
+        self.calls.append(("diagnostics", file))
+        return "diag-result"
 
 
 @pytest.mark.asyncio
@@ -125,3 +130,21 @@ async def test_lsp_tool_workspace_symbol_uses_query():
     out = await tool.execute(operation="workspaceSymbol", query="Foo")
     assert out == "ws-result"
     assert mgr.calls == [("workspace_symbol", "Foo")]
+
+
+@pytest.mark.asyncio
+async def test_lsp_tool_dispatches_diagnostics():
+    mgr = _StubManager()
+    tool = LspTool(mgr)
+    out = await tool.execute(operation="diagnostics", file_path="a.py")
+    assert out == "diag-result"
+    assert mgr.calls == [("diagnostics", "a.py")]
+
+
+@pytest.mark.asyncio
+async def test_lsp_tool_diagnostics_requires_file_path():
+    mgr = _StubManager()
+    tool = LspTool(mgr)
+    out = await tool.execute(operation="diagnostics")
+    assert "requires file_path" in out
+    assert mgr.calls == []
