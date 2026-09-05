@@ -450,3 +450,18 @@ def test_read_consumes_exact_bytes():
     assert msg == {"jsonrpc": "2.0", "id": 1, "result": "中文"}
     # only the framed body was consumed; the next frame is still buffered.
     assert client._proc.stdout.buffer.read() == b'{"trailing":1}'
+
+
+def test_lsp_client_caches_publish_diagnostics(tmp_path):
+    # fake_lsp_server 在 didOpen 后主动 push publishDiagnostics（Task 3 补充
+    # server 行为；本任务先验证 client 侧的缓存读取接口存在并可用）。
+    client = _lsp_client(tmp_path)
+    try:
+        assert client.start() is True
+        uri = _path_to_uri(str(tmp_path / "a.py"))
+        # fake server 尚未实现 push，当前先手写一个 Diagnostic 到缓存，验证接口。
+        client._diagnostics = {uri: [{"severity": 1, "message": "boom"}]}
+        assert client.diagnostics_for(uri) == [{"severity": 1, "message": "boom"}]
+        assert client.diagnostics_for("file:///other.py") == []
+    finally:
+        client.shutdown()

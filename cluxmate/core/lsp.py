@@ -250,6 +250,7 @@ class LSPClient:
         self._proc: subprocess.Popen | None = None
         self._next_id = 0
         self._docs: dict[str, tuple[int, int, float]] = {}  # uri -> (version, size, mtime)
+        self._diagnostics: dict[str, list[dict]] = {}  # uri -> [Diagnostic]
 
     def _next_request_id(self) -> int:
         self._next_id += 1
@@ -389,11 +390,21 @@ class LSPClient:
                 if msg.get("method") is not None:
                     if msg.get("id") is not None:
                         self._respond_to_server_request(msg)
-                    # else: a notification ($/progress, publishDiagnostics, ...)
-                    # — nothing to answer, keep reading.
+                    elif msg.get("method") == "textDocument/publishDiagnostics":
+                        params = msg.get("params") or {}
+                        uri = params.get("uri")
+                        if uri is not None:
+                            self._diagnostics[uri] = params.get("diagnostics") or []
+                    # else: a notification ($/progress, ...) — nothing to
+                    # answer, keep reading.
                     continue
                 if msg.get("id") == req_id:
                     return msg
+
+    def diagnostics_for(self, uri: str) -> list[dict]:
+        """Return the latest cached publishDiagnostics for a document (may be
+        empty if the server has not pushed any since open/change)."""
+        return self._diagnostics.get(uri, [])
 
     def _respond_to_server_request(self, msg: dict) -> None:
         """Answer a server-initiated request so the server can proceed.
