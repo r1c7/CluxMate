@@ -465,3 +465,16 @@ def test_lsp_client_caches_publish_diagnostics(tmp_path):
         assert client.diagnostics_for("file:///other.py") == []
     finally:
         client.shutdown()
+
+
+def test_lsp_client_drain_pending_no_hang_without_data(tmp_path):
+    # 没有 pending 通知时 drain 必须及时返回（不阻塞整段超时）。
+    import time
+    client = _lsp_client(tmp_path)
+    try:
+        assert client.start() is True
+        t0 = time.monotonic()
+        client.drain_pending(timeout_seconds=0.1)
+        assert time.monotonic() - t0 < 1.0
+    finally:
+        client.shutdown()

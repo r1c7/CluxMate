@@ -13,6 +13,7 @@ import json
 import os
 import shlex
 import shutil
+import select
 import subprocess
 import threading
 import time
@@ -232,6 +233,35 @@ def _uri_to_path(uri: str) -> str:
     return url2pathname(unquote(parsed.path))
 
 
+def _pipe_readable(fd: int, timeout: float) -> bool:
+    """Wait up to ``timeout`` seconds for ``fd`` to become readable.
+
+    POSIX uses select(). Windows' select() only supports sockets, so poll the
+    pipe handle with PeekNamedPipe (anonymous pipes, as Popen(stdout=PIPE)
+    creates) — the same bounded-wait semantics as select without ever blocking
+    on a silent server.
+    """
+    if os.name != "nt":
+        ready, _, _ = select.select([fd], [], [], timeout)
+        return bool(ready)
+    import ctypes
+    import msvcrt
+
+    handle = msvcrt.get_osfhandle(fd)
+    deadline = time.monotonic() + timeout
+    while True:
+        avail = ctypes.c_uint32(0)
+        ok = ctypes.windll.kernel32.PeekNamedPipe(
+            ctypes.c_void_p(handle), None, 0, None, ctypes.byref(avail), None
+        )
+        if ok and avail.value > 0:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(remaining, 0.01))
+
+
 class LSPClient:
     """One stdio language server connection (sync, like MCPClient).
 
@@ -405,6 +435,39 @@ class LSPClient:
         """Return the latest cached publishDiagnostics for a document (may be
         empty if the server has not pushed any since open/change)."""
         return self._diagnostics.get(uri, [])
+
+    def drain_pending(self, timeout_seconds: float) -> None:
+        """Read available frames for up to ``timeout_seconds``, caching
+        publishDiagnostics (and answering any server→client requests), so a
+        diagnostics query can wait a bounded moment for fresh pushes.
+
+        Waits on the stdout fd (select() on POSIX, PeekNamedPipe polling on
+        Windows) so it never blocks on a silent server; each frame goes through
+        the same dispatch as _send (requests answered, publishDiagnostics
+        cached, other notifications dropped).
+        """
+        if self._proc is None or self._proc.stdout is None:
+            return
+        fd = self._proc.stdout.fileno()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if not _pipe_readable(fd, remaining):
+                return
+            with self._lock:
+                msg = self._read()
+                if msg is None:
+                    return
+                if msg.get("method") is not None:
+                    if msg.get("id") is not None:
+                        self._respond_to_server_request(msg)
+                    elif msg.get("method") == "textDocument/publishDiagnostics":
+                        params = msg.get("params") or {}
+                        uri = params.get("uri")
+                        if uri is not None:
+                            self._diagnostics[uri] = params.get("diagnostics") or []
 
     def _respond_to_server_request(self, msg: dict) -> None:
         """Answer a server-initiated request so the server can proceed.
