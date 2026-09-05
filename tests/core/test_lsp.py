@@ -452,6 +452,28 @@ def test_read_consumes_exact_bytes():
     assert client._proc.stdout.buffer.read() == b'{"trailing":1}'
 
 
+def test_send_caches_publish_diagnostics_while_awaiting_response():
+    spec = _ServerSpec(command="fake", extension_to_language={".py": "python"})
+    client = LSPClient(spec, language_id="python", root=".")
+    push = {"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+            "params": {"uri": "file:///x.py",
+                       "diagnostics": [{"severity": 1, "message": "boom"}]}}
+    resp = {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+
+    def frame(o):
+        body = json.dumps(o).encode("utf-8")
+        return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+
+    client._proc = _FakeProc(frame(push) + frame(resp))
+    result = client._send(
+        "textDocument/definition",
+        {"textDocument": {"uri": "file:///x.py"},
+         "position": {"line": 0, "character": 0}},
+    )
+    assert result == resp
+    assert client.diagnostics_for("file:///x.py") == [{"severity": 1, "message": "boom"}]
+
+
 def test_lsp_client_caches_publish_diagnostics(tmp_path):
     # fake_lsp_server 在 didOpen 后主动 push publishDiagnostics（Task 3 补充
     # server 行为；本任务先验证 client 侧的缓存读取接口存在并可用）。
@@ -519,3 +541,32 @@ def test_manager_diagnostics_no_diagnostics(tmp_path):
         assert out == "no diagnostics"
     finally:
         mgr.shutdown()
+
+
+def test_format_diagnostics_ignores_malformed_entries():
+    from cluxmate.core.lsp import _format_diagnostics
+    diags = [
+        "not-a-dict",
+        {"range": None, "message": "ok1"},
+        {"range": {"start": None}, "message": "ok2"},
+        {"range": {"start": {"line": "1", "character": "2"}},
+         "severity": 3, "message": "ok3", "source": "s", "code": "c"},
+    ]
+    out = _format_diagnostics(diags)
+    assert "[information]" in out
+    assert "ok3" in out
+    assert "ok1" not in out and "ok2" not in out
+
+
+def test_handle_push_ignores_malformed_params():
+    spec = _ServerSpec(command="fake", extension_to_language={".py": "python"})
+    client = LSPClient(spec, language_id="python", root=".")
+    client._handle_push({"method": "textDocument/publishDiagnostics", "params": {"uri": 123}})
+    client._handle_push({"method": "textDocument/publishDiagnostics", "params": None})
+    client._handle_push({"method": "textDocument/publishDiagnostics",
+                         "params": {"uri": "file:///x.py", "diagnostics": "bad"}})
+    assert client.diagnostics_for("file:///x.py") == []
+    client._handle_push({"method": "textDocument/publishDiagnostics",
+                         "params": {"uri": "file:///x.py",
+                                    "diagnostics": [{"severity": 1, "message": "boom"}]}})
+    assert client.diagnostics_for("file:///x.py") == [{"severity": 1, "message": "boom"}]

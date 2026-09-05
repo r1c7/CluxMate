@@ -1,4 +1,4 @@
-"""LspTool — a single read-only tool exposing nine LSP navigation operations."""
+"""LspTool — a single read-only tool exposing ten LSP navigation operations."""
 
 import asyncio
 from typing import Any
@@ -34,7 +34,8 @@ class LspTool(BaseTool):
         return (
             "Query a language server for precise code navigation. operation is one of "
             "goToDefinition, goToDeclaration, goToTypeDefinition, goToImplementation, "
-            "findReferences, hover, documentSymbol, workspaceSymbol, callHierarchy. "
+            "findReferences, hover, documentSymbol, workspaceSymbol, callHierarchy, "
+            "diagnostics. "
             "For goToDefinition/goToDeclaration/goToTypeDefinition/goToImplementation/"
             "findReferences/hover, pass file_path (relative to the workspace or "
             "absolute), the 1-based line, and the exact symbol text on that line "

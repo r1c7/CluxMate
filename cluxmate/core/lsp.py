@@ -421,10 +421,7 @@ class LSPClient:
                     if msg.get("id") is not None:
                         self._respond_to_server_request(msg)
                     elif msg.get("method") == "textDocument/publishDiagnostics":
-                        params = msg.get("params") or {}
-                        uri = params.get("uri")
-                        if uri is not None:
-                            self._diagnostics[uri] = params.get("diagnostics") or []
+                        self._handle_push(msg)
                     # else: a notification ($/progress, ...) — nothing to
                     # answer, keep reading.
                     continue
@@ -436,27 +433,52 @@ class LSPClient:
         empty if the server has not pushed any since open/change)."""
         return self._diagnostics.get(uri, [])
 
-    def drain_pending(self, timeout_seconds: float) -> None:
-        """Read available frames for up to ``timeout_seconds``, caching
-        publishDiagnostics (and answering any server→client requests), so a
-        diagnostics query can wait a bounded moment for fresh pushes.
+    def _handle_push(self, msg: dict) -> None:
+        """Cache a textDocument/publishDiagnostics notification.
 
-        Waits on the stdout fd (select() on POSIX, PeekNamedPipe polling on
-        Windows) so it never blocks on a silent server; each frame goes through
-        the same dispatch as _send (requests answered, publishDiagnostics
-        cached, other notifications dropped).
+        Diagnostics arrive unsolicited from a user-configured server, so any
+        malformed payload is dropped (never raised): a non-dict params/uri or a
+        non-list diagnostics list degrades to "no diagnostics" for that uri.
+        """
+        params = msg.get("params")
+        if not isinstance(params, dict):
+            return
+        uri = params.get("uri")
+        if not isinstance(uri, str):
+            return
+        diags = params.get("diagnostics")
+        if not isinstance(diags, list):
+            diags = []
+        self._diagnostics[uri] = diags
+
+    def drain_pending(self, timeout_seconds: float) -> None:
+        """Drain pending server→client frames, caching publishDiagnostics and
+        answering requests.
+
+        Waits up to the full ``timeout_seconds`` for the FIRST frame (the server
+        pushes diagnostics shortly after didOpen/didChange); once at least one
+        frame has been read, subsequent reads use a zero-timeout probe so the
+        call returns promptly once the push has arrived rather than holding the
+        turn for the whole window.
         """
         if self._proc is None or self._proc.stdout is None:
             return
         fd = self._proc.stdout.fileno()
         deadline = time.monotonic() + timeout_seconds
+        read_any = False
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            if not _pipe_readable(fd, remaining):
+            probe = 0.0 if read_any else remaining
+            if not _pipe_readable(fd, probe):
                 return
             with self._lock:
+                # Re-check availability under the lock: a concurrent reader
+                # (e.g. _send) may have consumed the frame between the probe
+                # and acquiring the lock; do not let _read() block on nothing.
+                if not _pipe_readable(fd, 0.0):
+                    return
                 msg = self._read()
                 if msg is None:
                     return
@@ -464,10 +486,8 @@ class LSPClient:
                     if msg.get("id") is not None:
                         self._respond_to_server_request(msg)
                     elif msg.get("method") == "textDocument/publishDiagnostics":
-                        params = msg.get("params") or {}
-                        uri = params.get("uri")
-                        if uri is not None:
-                            self._diagnostics[uri] = params.get("diagnostics") or []
+                        self._handle_push(msg)
+                read_any = True
 
     def _respond_to_server_request(self, msg: dict) -> None:
         """Answer a server-initiated request so the server can proceed.
@@ -593,27 +613,41 @@ def _format_hover(raw: Any) -> str:
     return value[:_MAX_RESULT_CHARS]
 
 
-_SEVERITY_LABELS = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+_SEVERITY_LABELS = {1: "error", 2: "warning", 3: "information", 4: "hint"}
 
 
-def _format_diagnostics(diags: list[dict], root: str) -> str:
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _format_diagnostics(diags: list[dict]) -> str:
     if not diags:
         return "no diagnostics"
     out: list[str] = []
     for d in diags:
         if not isinstance(d, dict):
             continue
-        start = (d.get("range") or {}).get("start", {})
-        line = start.get("line", 0) + 1
-        col = start.get("character", 0) + 1
+        rng = d.get("range")
+        if not isinstance(rng, dict):
+            continue
+        start = rng.get("start")
+        if not isinstance(start, dict):
+            continue
+        line = _coerce_int(start.get("line")) + 1
+        col = _coerce_int(start.get("character")) + 1
         severity = _SEVERITY_LABELS.get(d.get("severity"), "diagnostic")
-        message = d.get("message", "")
-        source = d.get("source", "")
-        code = d.get("code", "")
+        message = str(d.get("message") or "")
+        source = d.get("source")
+        code = d.get("code")
         suffix = ""
         if source or code:
             suffix = f" ({source}, {code})" if source and code else f" ({source or code})"
         out.append(f"{line}:{col} [{severity}] {message}{suffix}")
+    if not out:
+        return "no diagnostics"
     rendered = "\n".join(out[:_MAX_LOCATIONS])
     if len(out) > _MAX_LOCATIONS:
         rendered += f"\n\n[truncated: {len(out)} diagnostics, showing first {_MAX_LOCATIONS}]"
@@ -916,7 +950,7 @@ class LSPManager:
         try:
             client.ensure_synced(uri, path)
             client.drain_pending(_DIAGNOSTICS_DRAIN_SECONDS)
-            rendered = _format_diagnostics(client.diagnostics_for(uri), self.ws_root)
+            rendered = _format_diagnostics(client.diagnostics_for(uri))
         except (OSError, ValueError) as e:
             return f"Error: {e}"
         if rendered == "no diagnostics":
@@ -927,7 +961,7 @@ class LSPManager:
                 rel = path
         except ValueError:
             rel = path
-        return f"{rel}:" + rendered
+        return "\n".join(f"{rel}:{line}" for line in rendered.split("\n"))
 
     def document_symbol(self, file: str) -> str:
         path = self._abs(file)
