@@ -523,6 +523,10 @@ class LSPClient:
 
 _MAX_LOCATIONS = 100
 _MAX_RESULT_CHARS = 16_000
+# How long a diagnostics query waits for the server to push fresh
+# textDocument/publishDiagnostics after didOpen/didChange before returning the
+# cached set (bounded — never blocks the turn on a silent server).
+_DIAGNOSTICS_DRAIN_SECONDS = 1.5
 # Ceiling for one auto-install attempt (npm/rustup can be slow); the install
 # runs synchronously inside the triggering tool call, which is why it is
 # strictly opt-in (top-level lsp.json auto_install, default False).
@@ -587,6 +591,33 @@ def _format_hover(raw: Any) -> str:
     if not value:
         return "no hover information"
     return value[:_MAX_RESULT_CHARS]
+
+
+_SEVERITY_LABELS = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+
+
+def _format_diagnostics(diags: list[dict], root: str) -> str:
+    if not diags:
+        return "no diagnostics"
+    out: list[str] = []
+    for d in diags:
+        if not isinstance(d, dict):
+            continue
+        start = (d.get("range") or {}).get("start", {})
+        line = start.get("line", 0) + 1
+        col = start.get("character", 0) + 1
+        severity = _SEVERITY_LABELS.get(d.get("severity"), "diagnostic")
+        message = d.get("message", "")
+        source = d.get("source", "")
+        code = d.get("code", "")
+        suffix = ""
+        if source or code:
+            suffix = f" ({source}, {code})" if source and code else f" ({source or code})"
+        out.append(f"{line}:{col} [{severity}] {message}{suffix}")
+    rendered = "\n".join(out[:_MAX_LOCATIONS])
+    if len(out) > _MAX_LOCATIONS:
+        rendered += f"\n\n[truncated: {len(out)} diagnostics, showing first {_MAX_LOCATIONS}]"
+    return rendered[:_MAX_RESULT_CHARS]
 
 
 class LSPManager:
@@ -874,6 +905,29 @@ class LSPManager:
             return f"Error: {e}"
         except RuntimeError as e:
             return f"Error: {e}"
+
+    def diagnostics(self, file: str) -> str:
+        path = self._abs(file)
+        try:
+            client = self.resolve(path)
+        except ValueError as e:
+            return f"Error: {e}"
+        uri = _path_to_uri(path)
+        try:
+            client.ensure_synced(uri, path)
+            client.drain_pending(_DIAGNOSTICS_DRAIN_SECONDS)
+            rendered = _format_diagnostics(client.diagnostics_for(uri), self.ws_root)
+        except (OSError, ValueError) as e:
+            return f"Error: {e}"
+        if rendered == "no diagnostics":
+            return rendered
+        try:
+            rel = os.path.relpath(path, self.ws_root)
+            if rel.startswith(".."):
+                rel = path
+        except ValueError:
+            rel = path
+        return f"{rel}:" + rendered
 
     def document_symbol(self, file: str) -> str:
         path = self._abs(file)

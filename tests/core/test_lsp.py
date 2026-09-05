@@ -494,3 +494,28 @@ def test_lsp_client_captures_pushed_diagnostics(tmp_path):
         assert any(d.get("severity") == 2 for d in diags)
     finally:
         client.shutdown()
+
+
+def test_manager_diagnostics_formats_severity_and_location(tmp_path):
+    (tmp_path / "a.py").write_text("NEEDS_DIAGNOSTICS\ndef foo():\n    pass\n", encoding="utf-8")
+    mgr = _manager(tmp_path)
+    try:
+        out = mgr.diagnostics("a.py")
+        assert "a.py:1:1" in out
+        assert "[error]" in out
+        assert "[warning]" in out
+        assert "fake error" in out
+        assert "fake warning" in out
+        assert "(fake, E001)" in out
+    finally:
+        mgr.shutdown()
+
+
+def test_manager_diagnostics_no_diagnostics(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    mgr = _manager(tmp_path)
+    try:
+        out = mgr.diagnostics("a.py")
+        assert out == "no diagnostics"
+    finally:
+        mgr.shutdown()
