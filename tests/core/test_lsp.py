@@ -478,3 +478,19 @@ def test_lsp_client_drain_pending_no_hang_without_data(tmp_path):
         assert time.monotonic() - t0 < 1.0
     finally:
         client.shutdown()
+
+
+def test_lsp_client_captures_pushed_diagnostics(tmp_path):
+    client = _lsp_client(tmp_path)
+    try:
+        assert client.start() is True
+        path = tmp_path / "a.py"
+        path.write_text("NEEDS_DIAGNOSTICS\ndef foo():\n    pass\n", encoding="utf-8")
+        uri = _path_to_uri(str(path))
+        client.ensure_synced(uri, str(path))
+        client.drain_pending(1.0)
+        diags = client.diagnostics_for(uri)
+        assert any(d.get("severity") == 1 for d in diags)
+        assert any(d.get("severity") == 2 for d in diags)
+    finally:
+        client.shutdown()

@@ -46,6 +46,36 @@ def handle_request(req: dict, stream) -> dict | None:
     req_id = req.get("id")
     params = req.get("params", {}) or {}
 
+    if method in ("textDocument/didOpen", "textDocument/didChange"):
+        text = (params.get("textDocument") or {}).get("text") or ""
+        if "NEEDS_DIAGNOSTICS" not in text:
+            return None
+        uri = (params.get("textDocument") or {}).get("uri", "file:///fake/a.py")
+        write_message(stream, {
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": uri,
+                "diagnostics": [
+                    {
+                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                        "severity": 1,
+                        "source": "fake",
+                        "code": "E001",
+                        "message": "fake error",
+                    },
+                    {
+                        "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}},
+                        "severity": 2,
+                        "source": "fake",
+                        "code": "W001",
+                        "message": "fake warning",
+                    },
+                ],
+            },
+        })
+        return None
+
     if method == "initialize":
         # Real servers issue a server→client request mid-handshake and BLOCK
         # until the client answers. A client that drops it deadlocks. We send
