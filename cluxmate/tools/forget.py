@@ -18,9 +18,10 @@ class ForgetTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Delete a remembered fact by its id (the id shown next to a recalled "
-            "fact). Use only to correct or remove a fact that is wrong or no "
-            "longer useful."
+            "Delete a retrieval-memory fact by its id (the id shown next to a "
+            "recalled fact). Use only to correct or remove a fact that is wrong "
+            "or no longer useful. Removes retrieval facts only, NOT AGENTS.md "
+            "entries — edit those with search_replace (see update_memory)."
         )
 
     @property

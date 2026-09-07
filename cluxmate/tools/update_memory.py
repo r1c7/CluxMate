@@ -34,7 +34,9 @@ class UpdateMemoryTool(BaseTool):
             "by reading code or git history. Default scope is 'project' (this "
             "repo); use 'global' only for preferences that apply everywhere. To "
             "correct or delete an existing entry, edit AGENTS.md with "
-            "search_replace instead — do not append a duplicate."
+            "search_replace instead — do not append a duplicate. This is the "
+            "always-injected AGENTS.md memory; for episodic facts recalled only "
+            "when relevant, prefer `remember` (when it is available)."
         )
 
     @property

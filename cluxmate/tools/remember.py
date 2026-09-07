@@ -23,7 +23,9 @@ class RememberTool(BaseTool):
             "and shown to you. Use for stable, reusable facts: environment "
             "specifics, decisions and their reasons, user preferences, gotchas. "
             "Default scope 'project' (this repo); use 'global' for facts that "
-            "apply everywhere. To remove a fact, call forget with its id."
+            "apply everywhere. To remove a fact, call forget with its id. This "
+            "is retrieval memory, NOT AGENTS.md — for always-injected project "
+            "conventions/commands use update_memory instead."
         )
 
     @property
