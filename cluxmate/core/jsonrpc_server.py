@@ -790,6 +790,10 @@ class JsonRpcServer:
         if getattr(self, "_egress_config", None) is None:
             from cluxmate.core.egress_config import EgressConfig
             self._egress_config = EgressConfig()
+        # Retrieval-memory config is user-global (~/.cluxmate/retrieval-memory.json).
+        if getattr(self, "_retrieval_config", None) is None:
+            from cluxmate.core.retrieval_memory import RetrievalConfig
+            self._retrieval_config = RetrievalConfig()
         model_id = params.get("model_id", "")
         # Development mode is per-session and not persisted; default unless the
         # desktop passes one on (re)initialize.
@@ -820,6 +824,7 @@ class JsonRpcServer:
         builder.with_read_denies(self._read_denies)
         builder.with_ssrf(self._ssrf_config)
         builder.with_egress(self._egress_config)
+        builder.with_retrieval_memory(self._retrieval_config)
         # Lifecycle hooks (settings.json). One manager per session so the payload
         # carries the session id; the builder caches it and children inherit it.
         # The observer streams hook_start/hook_result events to the desktop.
