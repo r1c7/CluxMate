@@ -46,6 +46,8 @@ const api: ElectronAPI = {
   setSsrConfig: (cfg: SsrConfigPayload) => ipcRenderer.invoke(IPC.SSRF_CONFIG_SET, cfg),
   getEgressConfig: () => ipcRenderer.invoke(IPC.EGRESS_CONFIG_GET),
   setEgressConfig: (mode: EgressConfigPayload['mode']) => ipcRenderer.invoke(IPC.EGRESS_CONFIG_SET, mode),
+  getRetrievalConfig: () => ipcRenderer.invoke(IPC.RETRIEVAL_CONFIG_GET),
+  setRetrievalConfig: (enabled: boolean) => ipcRenderer.invoke(IPC.RETRIEVAL_CONFIG_SET, enabled),
 
   listCheckpoints: (sessionId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_LIST, sessionId),
   diffCheckpoint: (sessionId: string, checkpointId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_DIFF, sessionId, checkpointId),

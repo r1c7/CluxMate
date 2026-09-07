@@ -632,6 +632,13 @@ export interface EgressConfigPayload {
   mode: 'shared' | 'off' | 'proxy'
 }
 
+// Retrieval-memory toggle (~/.cluxmate/retrieval-memory.json). Only the enabled
+// flag is surfaced in the UI; max_facts/max_chars/include_agents_md stay at
+// their defaults unless the user edits the file by hand.
+export interface RetrievalConfigPayload {
+  enabled: boolean
+}
+
 declare global {
   interface Window {
     electronAPI: ElectronAPI
@@ -730,6 +737,13 @@ export interface ElectronAPI {
   // ssrf.json's allow list.
   getEgressConfig: () => Promise<EgressConfigPayload>
   setEgressConfig: (mode: EgressConfigPayload['mode']) => Promise<EgressConfigPayload>
+
+  // Retrieval-memory toggle (~/.cluxmate/retrieval-memory.json). get reads the
+  // file directly (default off); set persists enabled, preserving the other
+  // fields, and kills the active bridge so the next message re-registers
+  // remember/forget + recall.
+  getRetrievalConfig: () => Promise<RetrievalConfigPayload>
+  setRetrievalConfig: (enabled: boolean) => Promise<RetrievalConfigPayload>
 
   listCheckpoints: (sessionId: string) => Promise<Checkpoint[]>
   diffCheckpoint: (sessionId: string, checkpointId: string) => Promise<CheckpointFileDiff[]>

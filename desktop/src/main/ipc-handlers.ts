@@ -3,7 +3,7 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { AgentBridge } from './agent-bridge'
 import * as sessionStore from './session-store'
@@ -215,6 +215,37 @@ function readEgressConfig(): EgressConfigPayload {
 function writeEgressConfig(mode: EgressConfigPayload['mode']): void {
   fs.mkdirSync(path.dirname(egressConfigPath()), { recursive: true })
   fs.writeFileSync(egressConfigPath(), JSON.stringify({ mode }, null, 2), 'utf-8')
+}
+
+// Retrieval-memory toggle (retrieval-memory.json) — user-global, mirrors the
+// egress config file layout. get reads the file directly; set preserves the
+// non-enabled fields, persists enabled, and kills the active bridge so the next
+// message re-registers remember/forget + recall.
+function retrievalConfigPath(): string {
+  return path.join(app.getPath('home'), '.cluxmate', 'retrieval-memory.json')
+}
+
+function readRetrievalConfig(): RetrievalConfigPayload {
+  try {
+    const data = JSON.parse(fs.readFileSync(retrievalConfigPath(), 'utf-8'))
+    return { enabled: data.enabled === true }
+  } catch {
+    return { enabled: false }
+  }
+}
+
+function writeRetrievalConfig(enabled: boolean): RetrievalConfigPayload {
+  let merged: Record<string, unknown> = { max_facts: 4, max_chars: 2400, include_agents_md: false }
+  try {
+    const data = JSON.parse(fs.readFileSync(retrievalConfigPath(), 'utf-8'))
+    if (data && typeof data === 'object') merged = { ...merged, ...data }
+  } catch {
+    // file absent/corrupt → defaults
+  }
+  merged.enabled = enabled
+  fs.mkdirSync(path.dirname(retrievalConfigPath()), { recursive: true })
+  fs.writeFileSync(retrievalConfigPath(), JSON.stringify(merged, null, 2), 'utf-8')
+  return { enabled }
 }
 
 // Convert the legacy {providers, default_provider} schema to v2 {models,
@@ -986,6 +1017,24 @@ export function registerIpcHandlers() {
       }
     }
     return { mode: next }
+  })
+
+  ipcMain.handle(IPC.RETRIEVAL_CONFIG_GET, () => readRetrievalConfig())
+
+  ipcMain.handle(IPC.RETRIEVAL_CONFIG_SET, (_, enabled: boolean) => {
+    // writeRetrievalConfig reads the existing file to preserve the non-enabled
+    // fields, then persists `enabled` on top.
+    writeRetrievalConfig(enabled === true)
+    // enabled gates remember/forget registration in the Python toolset, so kill
+    // the active bridge (mirrors EGRESS_CONFIG_SET); the next message re-builds.
+    if (activeSessionId) {
+      const b = bridges.get(activeSessionId)
+      if (b) {
+        bridges.delete(activeSessionId)
+        b.kill().catch(() => {})
+      }
+    }
+    return { enabled: enabled === true }
   })
 
   ipcMain.handle(IPC.CHAT_SET_MODE, async (_, sid: string, mode: string) => {
