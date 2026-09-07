@@ -37,6 +37,9 @@ from cluxmate.tools.lsp_tool import LspTool
 from cluxmate.core.grants import GrantStore
 from cluxmate.core.read_denies import ReadDenyStore
 from cluxmate.core.hooks import HookManager
+from cluxmate.core.retrieval_memory import RetrievalConfig, RetrievalMemory
+from cluxmate.tools.remember import RememberTool
+from cluxmate.tools.forget import ForgetTool
 from cluxmate.core.egress_config import EgressConfig
 from cluxmate.tools._egress_proxy import LocalFilteringProxy
 from cluxmate.core.session_log import SessionHeader, SessionLog
@@ -224,6 +227,11 @@ class AgentBuilder:
         # the caller didn't inject one, then cached. Inherited by children so
         # subagent tool calls are hooked too.
         self._hooks: HookManager | None = None
+        # Retrieval memory (~/.cluxmate/retrieval-memory.json). Shared across
+        # rebuilds; never inherited by children (subagents don't recall or write
+        # durable facts). None → feature disabled.
+        self._retrieval_config: RetrievalConfig | None = None
+        self._retrieval: RetrievalMemory | None = None
 
     def with_default_tools(self) -> "AgentBuilder":
         self._include_default_tools = True
@@ -259,6 +267,19 @@ class AgentBuilder:
         """
         self._hooks = hooks
         return self
+
+    def with_retrieval_memory(self, config: "RetrievalConfig | None") -> "AgentBuilder":
+        """Attach the retrieval-memory config (shared across rebuilds)."""
+        self._retrieval_config = config
+        return self
+
+    def _retrieval_manager(self) -> "RetrievalMemory | None":
+        """Lazy RetrievalMemory for this cwd, or None when the feature is off."""
+        if self._retrieval_config is None:
+            return None
+        if self._retrieval is None:
+            self._retrieval = RetrievalMemory(self._cwd, self._retrieval_config)
+        return self._retrieval
 
     def _hooks_manager(self) -> "HookManager | None":
         """Current HookManager, lazily constructed from the cwd when unset."""
@@ -608,6 +629,13 @@ class AgentBuilder:
             # the SkillTool/MCP parent-only gate.
             if self._depth == 0:
                 tools.append(UpdateMemoryTool(cwd=self._cwd))
+            # Retrieval-memory tools (remember/forget) — parent-only, opt-in
+            # (enabled), write risk. Never in plan mode: plan returns earlier
+            # with a read-only toolset, so this block is already non-plan.
+            retrieval = self._retrieval_manager()
+            if self._depth == 0 and retrieval is not None and retrieval.enabled():
+                tools.append(RememberTool(retrieval=retrieval))
+                tools.append(ForgetTool(retrieval=retrieval))
             # todo_write only for the parent (depth 0) — the task list is the
             # root session's plan strip; a subagent's list would be invisible
             # in the UI and die with the child log.
@@ -902,6 +930,7 @@ class AgentBuilder:
             mode=self._mode,
             sandbox=self._sandbox_state,
             hooks=self._hooks_manager(),
+            retrieval=self._retrieval_manager(),
             cwd=self._cwd,
         )
 
