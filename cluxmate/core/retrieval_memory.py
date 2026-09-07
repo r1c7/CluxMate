@@ -76,3 +76,86 @@ class RetrievalConfig:
         if isinstance(raw.get("include_agents_md"), bool):
             out["include_agents_md"] = raw["include_agents_md"]
         return out
+
+
+@dataclass(frozen=True)
+class Doc:
+    source: str       # "global" | "project"
+    kind: str         # "fact" | "agents_md"
+    doc_id: str       # fact id (kind="fact") or path (kind="agents_md")
+    body: str
+    path: str
+    fingerprint: str
+
+
+def _chunk_text(text: str, max_chars: int = 1600) -> list[str]:
+    """Split markdown on ``## `` headings, hard-splitting over-long sections."""
+    text = text.strip()
+    if not text:
+        return []
+    parts: list[str] = []
+    current = ""
+    for line in text.splitlines():
+        if line.startswith("## ") and current.strip():
+            parts.append(current.strip())
+            current = line + "\n"
+        else:
+            current += line + "\n"
+    if current.strip():
+        parts.append(current.strip())
+    chunks: list[str] = []
+    for part in parts:
+        if len(part) <= max_chars:
+            chunks.append(part)
+            continue
+        for para in part.split("\n\n"):
+            para = para.strip()
+            if not para:
+                continue
+            chunks.append(para if len(para) <= max_chars else para[:max_chars])
+    return chunks
+
+
+class RetrievalMemory:
+    """Fact store + in-memory FTS5 (trigram) index with per-turn recall."""
+
+    def __init__(self, cwd: str, config: RetrievalConfig):
+        self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        self._config = config
+        self._conn = sqlite3.connect(":memory:")
+        self._conn.execute(
+            "CREATE VIRTUAL TABLE fts USING fts5(doc_id UNINDEXED, body, tokenize='trigram')"
+        )
+        self._docs: list[Doc] = []
+        self._fingerprints: tuple[str, ...] = ()
+
+    def _facts_dir(self, scope: str) -> Path:
+        if scope == "global":
+            return Path.home() / ".cluxmate" / "memory" / "global" / "facts"
+        return Path(self._cwd) / ".cluxmate" / "memory" / "facts"
+
+    def enabled(self) -> bool:
+        return self._config.snapshot()["enabled"]
+
+    def remember(self, content: str, scope: str = "project") -> str:
+        content = (content or "").strip()
+        if not content:
+            return "Error: content is empty — nothing to record."
+        if scope not in ("global", "project"):
+            scope = "project"
+        d = self._facts_dir(scope)
+        d.mkdir(parents=True, exist_ok=True)
+        fact_id = uuid.uuid4().hex[:12]
+        (d / f"{fact_id}.md").write_text(content + "\n", encoding="utf-8")
+        return f"Recorded fact {fact_id} ({scope} memory)."
+
+    def forget(self, fact_id: str) -> str:
+        fact_id = (fact_id or "").strip()
+        if not fact_id or any(c in fact_id for c in "/\\") or fact_id in (".", ".."):
+            return "Error: invalid fact id."
+        for scope in ("global", "project"):
+            path = self._facts_dir(scope) / f"{fact_id}.md"
+            if path.is_file():
+                path.unlink()
+                return f"Forgot fact {fact_id}."
+        return f"Error: no fact with id {fact_id}."
