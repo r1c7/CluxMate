@@ -172,7 +172,13 @@ class RetrievalMemory:
     def __init__(self, cwd: str, config: RetrievalConfig):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
         self._config = config
-        self._conn = sqlite3.connect(":memory:")
+        # One connection is created lazily on whichever thread first built the
+        # agent (initialize / MCP loader) but recall() runs on the per-turn
+        # worker thread (JSON-RPC server spins up a fresh thread + loop per
+        # turn). check_same_thread=False lets it cross threads; _lock keeps the
+        # shared index consistent so only one thread touches it at a time.
+        self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self._lock = threading.Lock()
         try:
             self._conn.execute(
                 "CREATE VIRTUAL TABLE fts USING fts5(doc_id UNINDEXED, body, tokenize='trigram')"
@@ -198,8 +204,9 @@ class RetrievalMemory:
         q = (query or "").strip()
         if len(q) < 3 or q.lower() in _GENERIC_QUERIES:
             return None
-        self._reconcile(cfg)
-        hits = self._search(q, cfg["max_facts"])
+        with self._lock:
+            self._reconcile(cfg)
+            hits = self._search(q, cfg["max_facts"])
         if not hits:
             return None
         return self._format(hits, cfg["max_chars"])

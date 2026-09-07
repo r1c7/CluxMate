@@ -1,6 +1,7 @@
 """Tests for retrieval-memory config, fact store, chunking, and recall."""
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -176,6 +177,29 @@ def test_recall_reconciles_new_fact(tmp_path, monkeypatch):
     assert mem.recall("pytest testing") is None
     mem.remember("Use pytest for tests.")
     assert mem.recall("pytest testing") is not None
+
+
+def test_recall_from_other_thread_than_constructor(tmp_path, monkeypatch):
+    # Regression: the JSON-RPC server lazily builds RetrievalMemory on the
+    # initialize/MCP-loader thread but runs every chat turn (and so recall())
+    # on its own fresh worker thread. sqlite3 connections are thread-bound by
+    # default, so cross-thread recall used to raise ProgrammingError.
+    mem = _enabled_mem(tmp_path, monkeypatch)
+    mem.remember("Use pytest for tests.")
+    out: list[str | None] = []
+    error: list[BaseException] = []
+
+    def worker():
+        try:
+            out.append(mem.recall("what test framework should I use?"))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            error.append(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert error == []
+    assert out and "Use pytest" in out[0]
 
 
 def test_recall_agents_md_when_enabled(tmp_path, monkeypatch):
