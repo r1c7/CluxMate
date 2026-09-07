@@ -40,4 +40,5 @@ def test_initialize_wires_retrieval_config(tmp_path, monkeypatch):
     s._handle_initialize(1, {"session_id": "s1", "cwd": str(cwd)})
 
     assert isinstance(s._retrieval_config, RetrievalConfig)
+    assert s._retrieval_config.path == home / ".cluxmate" / "retrieval-memory.json"
     assert s._builder._retrieval_config is s._retrieval_config

@@ -185,3 +185,18 @@ def test_recall_agents_md_when_enabled(tmp_path, monkeypatch):
     out = mem.recall("how to run tests")
     assert out is not None
     assert "pytest" in out
+
+
+def test_recall_agents_md_returns_multiple_matching_chunks(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    (cwd / "AGENTS.md").write_text(
+        "# P\n\n## A\nrun pytest for unit tests\n\n## B\nrun pytest for integration tests",
+        encoding="utf-8",
+    )
+    mem = _enabled_mem(tmp_path, monkeypatch, include_agents_md=True)
+    out = mem.recall("run pytest tests")
+    assert out is not None
+    assert "unit tests" in out
+    assert "integration tests" in out

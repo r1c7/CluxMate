@@ -1,6 +1,5 @@
 """Tests for RememberTool and ForgetTool."""
 
-import json
 from pathlib import Path
 
 import pytest

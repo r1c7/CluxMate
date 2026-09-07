@@ -55,7 +55,7 @@ class RetrievalConfig:
         except OSError:
             return dict(_CONFIG_DEFAULTS)
         if self._cache is not None and self._cache[0] == key:
-            return self._cache[1]
+            return dict(self._cache[1])
         data = self._load()
         self._cache = (key, data)
         return data
@@ -227,7 +227,7 @@ class RetrievalMemory:
             Doc(
                 source=scope,
                 kind="agents_md",
-                doc_id=str(path),
+                doc_id=f"{path}#{i}",
                 body=c,
                 path=str(path),
                 fingerprint=f"{scope}:{st.st_mtime_ns}:{st.st_size}:{i}",

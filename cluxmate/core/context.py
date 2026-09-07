@@ -21,10 +21,10 @@ from typing import Any
 
 CHARS_PER_TOKEN = 4
 
-# ``user/message`` sources that are environment injections (memory/skills/mode/
-# compaction/interruption/hook), not human turns. ``_split_head`` skips them when
+# ``user/message`` sources that are environment injections (memory/memory-recall/
+# skills/mode/compaction/interruption/hook), not human turns. ``_split_head`` skips them when
 # finding the original-task anchor so the head starts at the first HUMAN message.
-ENV_SOURCES = frozenset({"memory", "skill", "mode", "compaction", "interruption", "hook"})
+ENV_SOURCES = frozenset({"memory", "memory-recall", "skill", "mode", "compaction", "interruption", "hook"})
 
 SUMMARY_PROMPT = (
     "You are compressing an earlier portion of a coding-agent conversation to "
