@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from cluxmate.core.retrieval_memory import (
     RetrievalConfig,
     RetrievalMemory,
@@ -200,3 +202,36 @@ def test_recall_agents_md_returns_multiple_matching_chunks(tmp_path, monkeypatch
     assert out is not None
     assert "unit tests" in out
     assert "integration tests" in out
+
+
+def test_set_enabled_persists(tmp_path):
+    p = tmp_path / "retrieval-memory.json"
+    cfg = RetrievalConfig(p)
+    snap = cfg.set_enabled(True)
+    assert snap["enabled"] is True
+    assert snap["max_facts"] == 4
+    assert RetrievalConfig(p).snapshot()["enabled"] is True
+
+
+def test_set_enabled_preserves_other_fields(tmp_path):
+    p = tmp_path / "retrieval-memory.json"
+    p.write_text(
+        json.dumps({"enabled": False, "max_facts": 9, "max_chars": 100, "include_agents_md": True}),
+        encoding="utf-8",
+    )
+    cfg = RetrievalConfig(p)
+    snap = cfg.set_enabled(True)
+    assert snap == {"enabled": True, "max_facts": 9, "max_chars": 100, "include_agents_md": True}
+
+
+def test_set_enabled_creates_file_with_defaults(tmp_path):
+    p = tmp_path / "retrieval-memory.json"
+    RetrievalConfig(p).set_enabled(True)
+    data = json.loads(p.read_text("utf-8"))
+    assert data == {"enabled": True, "max_facts": 4, "max_chars": 2400, "include_agents_md": False}
+
+
+def test_set_enabled_rejects_non_bool(tmp_path):
+    cfg = RetrievalConfig(tmp_path / "retrieval-memory.json")
+    with pytest.raises(ValueError):
+        cfg.set_enabled("yes")

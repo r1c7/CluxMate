@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
+import threading
+import traceback
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +46,7 @@ class RetrievalConfig:
             path = Path.home() / ".cluxmate" / "retrieval-memory.json"
         self._path = Path(path)
         self._cache: tuple[tuple[int, int], dict[str, Any]] | None = None
+        self._lock = threading.Lock()
 
     @property
     def path(self) -> Path:
@@ -77,6 +81,31 @@ class RetrievalConfig:
         if isinstance(raw.get("include_agents_md"), bool):
             out["include_agents_md"] = raw["include_agents_md"]
         return out
+
+    def set_enabled(self, enabled: bool) -> dict[str, Any]:
+        """Flip the `enabled` toggle, preserving the other fields, and persist.
+
+        Raises ValueError for a non-bool. The write is best-effort: an I/O
+        failure is logged, not raised, so a read-only home never breaks the
+        agent. Returns the new snapshot.
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError(f"enabled must be a bool, got {type(enabled).__name__}")
+        with self._lock:
+            current = self._load()
+            current["enabled"] = enabled
+            self._save(current)
+            self._cache = None
+            return dict(current)
+
+    def _save(self, data: dict[str, Any]) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), "utf-8"
+            )
+        except OSError:
+            traceback.print_exc(file=sys.stderr)
 
 
 @dataclass(frozen=True)
