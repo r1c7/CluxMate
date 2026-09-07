@@ -8,7 +8,7 @@ import { reasoningValuesFor } from '../../shared/reasoning'
 import { isValidSsrEntry } from '../../shared/ssrf'
 import type { ModelEntry } from '../../shared/types'
 
-type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'language'
+type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'memory' | 'language'
 
 // Built-in sensitive-file template (mirrors cluxmate/core/read_denies.py) —
 // shown read-only in the forbid-read card; the toggle turns them all on.
@@ -57,6 +57,16 @@ const SECTIONS: { id: Section; labelKey: MessageKey; icon: React.ReactNode }[] =
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+  },
+  {
+    id: 'memory', labelKey: 'settings.section.memory',
+    icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+        <path d="M3 12a9 3 0 0 0 18 0" />
       </svg>
     ),
   },
@@ -250,6 +260,26 @@ export default function SettingsView() {
       const r = await window.electronAPI.setEgressConfig(mode)
       setEgressMode(r.mode)
     } catch { /* keep optimistic on failure */ }
+  }
+
+  // Retrieval-memory toggle (retrieval-memory.json) — user-global, mirroring the
+  // bash sandbox toggle: read once on mount, committed immediately on change.
+  const [retrievalEnabled, setRetrievalEnabled] = useState<boolean>(false)
+  const [retrievalLoaded, setRetrievalLoaded] = useState(false)
+  useEffect(() => {
+    let alive = true
+    window.electronAPI.getRetrievalConfig().then((r) => {
+      if (alive) { setRetrievalEnabled(r.enabled); setRetrievalLoaded(true) }
+    }).catch(() => { if (alive) setRetrievalLoaded(true) })
+    return () => { alive = false }
+  }, [])
+
+  const commitRetrieval = async (enabled: boolean) => {
+    setRetrievalEnabled(enabled)
+    try {
+      const r = await window.electronAPI.setRetrievalConfig(enabled)
+      setRetrievalEnabled(r.enabled)
+    } catch { /* keep the optimistic value on failure */ }
   }
 
   const addSsrAllow = () => {
@@ -763,6 +793,41 @@ export default function SettingsView() {
                 <p className="text-[11px] text-ink-faint">{t('settings.sandbox.egress.footnote')}</p>
               </SectionCard>
             </div>
+          ) : section === 'memory' ? (
+            <div className="space-y-4">
+              <SectionCard
+                icon={<MemoryIcon className="w-4 h-4" />}
+                title={t('settings.memory.title')}
+                badge={
+                  <button
+                    onClick={() => commitRetrieval(!retrievalEnabled)}
+                    role="switch"
+                    aria-checked={retrievalEnabled}
+                    aria-label={t('settings.memory.title')}
+                    className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 hover:opacity-80 ${
+                      retrievalEnabled ? 'bg-accent' : 'bg-surface-border'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${
+                        retrievalEnabled ? 'left-[22px]' : 'left-0.5'
+                      }`}
+                    />
+                  </button>
+                }
+              >
+                {retrievalLoaded && (
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${retrievalEnabled ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                    <span className={`text-xs font-medium ${retrievalEnabled ? 'text-emerald-600' : 'text-amber-600'}`}>
+                      {retrievalEnabled ? t('settings.memory.on') : t('settings.memory.off')}
+                    </span>
+                  </div>
+                )}
+                <p className="text-xs text-ink-soft leading-relaxed">{t('settings.memory.hint')}</p>
+                <p className="text-[11px] text-ink-faint">{t('settings.memory.footnote')}</p>
+              </SectionCard>
+            </div>
           ) : (
             <>
               <p className="text-xs text-ink-faint mb-3">{t('settings.language.hint')}</p>
@@ -943,6 +1008,16 @@ function EyeOffIcon({ className = 'w-4 h-4' }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
       <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
+  )
+}
+
+function MemoryIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+      <path d="M3 12a9 3 0 0 0 18 0" />
     </svg>
   )
 }
