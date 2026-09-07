@@ -103,3 +103,11 @@ def test_forget_rejects_traversal(tmp_path, monkeypatch):
     cwd.mkdir()
     mem = RetrievalMemory(str(cwd), RetrievalConfig(tmp_path / "cfg.json"))
     assert "invalid fact id" in mem.forget("../etc")
+
+
+def test_forget_rejects_drive_relative_id(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    mem = RetrievalMemory(str(cwd), RetrievalConfig(tmp_path / "cfg.json"))
+    assert "invalid fact id" in mem.forget("C:deadbeef1234")

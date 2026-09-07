@@ -32,6 +32,7 @@ _GENERIC_QUERIES = frozenset({
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
 _WORD_RE = re.compile(r"[a-zA-Z0-9_]+")
+_FACT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 class RetrievalConfig:
@@ -123,9 +124,13 @@ class RetrievalMemory:
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
         self._config = config
         self._conn = sqlite3.connect(":memory:")
-        self._conn.execute(
-            "CREATE VIRTUAL TABLE fts USING fts5(doc_id UNINDEXED, body, tokenize='trigram')"
-        )
+        try:
+            self._conn.execute(
+                "CREATE VIRTUAL TABLE fts USING fts5(doc_id UNINDEXED, body, tokenize='trigram')"
+            )
+            self._fts_ok = True
+        except sqlite3.Error:
+            self._fts_ok = False
         self._docs: list[Doc] = []
         self._fingerprints: tuple[str, ...] = ()
 
@@ -151,7 +156,7 @@ class RetrievalMemory:
 
     def forget(self, fact_id: str) -> str:
         fact_id = (fact_id or "").strip()
-        if not fact_id or any(c in fact_id for c in "/\\") or fact_id in (".", ".."):
+        if not _FACT_ID_RE.match(fact_id):
             return "Error: invalid fact id."
         for scope in ("global", "project"):
             path = self._facts_dir(scope) / f"{fact_id}.md"
