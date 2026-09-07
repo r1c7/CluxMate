@@ -347,6 +347,7 @@ class AgentLoop:
         sandbox: str = "off",
         hooks: HookManager | None = None,
         cwd: str | None = None,
+        retrieval: Any = None,
     ):
         self.model = model
         self.provider = provider
@@ -359,6 +360,9 @@ class AgentLoop:
         # truth for WHAT a bash call actually changed. None keeps the
         # tool-record-only checks.
         self._cwd = cwd
+        # Retrieval memory (core/retrieval_memory.py). None disables recall.
+        # Only the parent gets one (children are built with retrieval=None).
+        self.retrieval = retrieval
         # Lifecycle hooks (user-configured commands). None disables the feature.
         # Inherited by child agents (see build_child) so subagent tool calls are
         # hooked too.
@@ -402,6 +406,12 @@ class AgentLoop:
     ) -> None:
         if self.session_log is not None:
             self.session_log.append(type, data, surface_op=surface_op)
+
+    def _recall(self, query: str) -> str | None:
+        """Formatted recall block for this turn, or None when disabled/no hits."""
+        if self.retrieval is None:
+            return None
+        return self.retrieval.recall(query)
 
     def _log_assistant(
         self,
@@ -679,8 +689,12 @@ class AgentLoop:
                 history=log.derive_messages() if log is not None else None,
             )
 
+        recall_text = self._recall(user_message)
+
         if log is None:
-            return await self._run_loop(user_message, history, callbacks, injections)
+            return await self._run_loop(
+                user_message, history, callbacks, injections, recall=recall_text
+            )
 
         # The session log is the single source of truth: any caller-provided
         # history must match the log surface, or replay and the live request
@@ -718,10 +732,16 @@ class AgentLoop:
             {"message": {"role": "user", "content": user_message}, "source": "human"},
             surface_op=APPEND,
         )
+        if recall_text:
+            log.append(
+                "user/message",
+                {"message": {"role": "user", "content": recall_text}, "source": "memory-recall"},
+                surface_op=APPEND,
+            )
         end_reason: dict[str, Any] = {"kind": "completed"}
         try:
             return await self._run_loop(
-                user_message, history, callbacks, injections, end_reason
+                user_message, history, callbacks, injections, end_reason, recall_text
             )
         except asyncio.CancelledError:
             end_reason["kind"] = "aborted"
@@ -762,6 +782,7 @@ class AgentLoop:
         callbacks: AgentCallbacks | None,
         injections: list[tuple[str, str]] | None,
         end_reason: dict[str, Any] | None = None,
+        recall: str | None = None,
     ) -> AgentResult:
         messages = [{"role": "system", "content": self.system_prompt}]
         if history:
@@ -769,6 +790,8 @@ class AgentLoop:
         for _source, content in (injections or []):
             messages.append({"role": "user", "content": content})
         messages.append({"role": "user", "content": user_message})
+        if recall:
+            messages.append({"role": "user", "content": recall})
 
         tool_calls_made = 0
         # Accumulate per-LLM-call cache token counts across all turns so the UI
