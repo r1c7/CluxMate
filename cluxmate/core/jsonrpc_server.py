@@ -659,6 +659,10 @@ class JsonRpcServer:
         elif method in ("ssrf/config/set", "ssrf:config:set"):
             result = self._set_ssrf_config(params)
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
+        elif method in ("retrieval/config", "retrieval/config/get", "retrieval:config"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._retrieval_snapshot()})
+        elif method in ("retrieval/config/set", "retrieval:config:set"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._set_retrieval_config(params)})
         elif method in ("egress/config", "egress/config/get", "egress:config"):
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._egress_snapshot()})
         elif method in ("egress/config/set", "egress:config:set"):
@@ -1356,6 +1360,32 @@ class JsonRpcServer:
             [e for e in params.get("allow", []) if isinstance(e, str)],
             [e for e in params.get("block_extra", []) if isinstance(e, str)],
         )
+
+    def _retrieval_snapshot(self) -> dict[str, Any]:
+        cfg = getattr(self, "_retrieval_config", None)
+        if cfg is None:
+            return {
+                "enabled": False,
+                "max_facts": 4,
+                "max_chars": 2400,
+                "include_agents_md": False,
+            }
+        return cfg.snapshot()
+
+    def _set_retrieval_config(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Flip the retrieval-memory `enabled` toggle and rebuild the agent.
+
+        `enabled` gates whether `remember`/`forget` are registered, so a change
+        requires an agent rebuild (mirrors `_set_egress_config`). A non-bool
+        `enabled` raises ValueError (→ error response)."""
+        if getattr(self, "_retrieval_config", None) is None:
+            from cluxmate.core.retrieval_memory import RetrievalConfig
+            self._retrieval_config = RetrievalConfig()
+        result = self._retrieval_config.set_enabled(params.get("enabled"))
+        if self._builder is not None:
+            self._builder.with_retrieval_memory(self._retrieval_config)
+            self._agent = self._builder.build(session_log=self._session_log)
+        return result
 
     def _egress_snapshot(self) -> dict[str, Any]:
         cfg = getattr(self, "_egress_config", None)
