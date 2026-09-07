@@ -46,7 +46,7 @@ It speaks the **OpenAI-compatible API**, so it works with DeepSeek, Qwen, GLM, O
 - **Checkpoints & rewind** — a shadow-git repository per working directory snapshots your files before and after every turn, so you can undo any turn — session-scoped, so other sessions' edits surface as conflicts, never clobbered.
 - **Subagent delegation** — delegate independent tasks to restricted subagents (`general-purpose`, read-only `explore`) with a depth cap of 4, each with its own replayable session log.
 - **Doom-loop guard** — if the agent starts repeating identical tool calls, escalating advisories nudge it back on track; `MAX_TURNS` remains the hard backstop.
-- **Skills, memory & MCP** — project-scoped skill packs, durable project memory (`AGENTS.md`), and Model Context Protocol servers (stdio / HTTP) plug into the same context pipeline.
+- **Skills, memory & MCP** — project-scoped skill packs, durable project memory (`AGENTS.md`), opt-in retrieval memory, and Model Context Protocol servers (stdio / HTTP) plug into the same context pipeline.
 - **Lifecycle hooks** — run your own shell commands at `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` / `SessionStart` / `SessionEnd` / `SubagentStop` / `PreCompact` / `Notification`, receiving context as stdin JSON and deciding to block or inject context via stdout JSON. Hooks are your own trusted config, never sandboxed; crashes/timeouts degrade to a no-op.
 - **Rich toolset, safely capped** — `bash`, file read/write/edit/delete, `grep`, `list_dir`, `web_fetch`, `web_search`, `ask_user_question`, subagents, skills, memory updates and more; every tool's output is capped and truncated to keep context bounded.
 
@@ -160,6 +160,7 @@ Subagents recurse up to a **depth cap of 4** (the `task` tool is withheld at the
 
 - **Skills** — project-scoped instruction packs (`<project>/.cluxmate/skills.json`) that the model can load on demand via the `use_skill` tool.
 - **Memory** — a durable project memory file, `AGENTS.md`, rendered as a tagged synthetic message every turn. A legacy `CLAUDE.md` file is also honored as a read-only fallback.
+- **Retrieval memory (opt-in)** — `remember` / `forget` tools store cross-session facts as individual Markdown files; the most relevant facts are auto-recalled into each turn via lexical FTS5 scoring. Facts are scoped **project** (default) or **global**; off by default (`~/.cluxmate/retrieval-memory.json`).
 - **MCP** — Model Context Protocol servers (stdio or HTTP) plug their tools straight into the agent's context; servers are loaded once per working directory, and stdio servers are OS-sandboxed like `bash`.
 
 

@@ -46,7 +46,7 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 - **检查点与回滚** —— 每个工作目录都有一个 shadow-git 仓库，在每轮前后快照你的文件，因此可以撤销任意一轮——且是会话级的，其他会话的修改会以冲突形式呈现，绝不会被覆盖。
 - **子 agent 委派** —— 把独立任务委派给受限子 agent（`general-purpose`、只读的 `explore`），递归深度上限 4，每个子 agent 都有自己可回放的会话日志。
 - **死循环防护** —— 如果 agent 开始重复相同的工具调用，逐级升级的提醒会把它拉回正轨；`MAX_TURNS` 仍是最终的硬兜底。
-- **技能、记忆与 MCP** —— 项目级技能包、持久化项目记忆（`AGENTS.md`）、以及 Model Context Protocol 服务器（stdio / HTTP）接入同一条上下文管线。
+- **技能、记忆与 MCP** —— 项目级技能包、持久化项目记忆（`AGENTS.md`）、可选的检索记忆，以及 Model Context Protocol 服务器（stdio / HTTP）接入同一条上下文管线。
 - **生命周期 Hooks** —— 在 `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` 时点运行你自己定义的 shell 命令，通过 stdin JSON 收上下文、stdout JSON 决定拦截（block）或注入额外上下文。hooks 是你自己的受信配置，不进沙箱；崩溃/超时一律降级为 no-op。
 - **丰富且受控的工具集** —— `bash`、文件读写/编辑/删除、`grep`、`list_dir`、`web_fetch`、`web_search`、`ask_user_question`、子 agent、技能、记忆更新等；每个工具的输出都有上限与截断，保证上下文有界。
 
@@ -160,6 +160,7 @@ MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配�
 
 - **技能（Skills）** —— 项目级指令包（`<项目>/.cluxmate/skills.json`），模型可通过 `use_skill` 工具按需加载。
 - **记忆（Memory）** —— 持久化项目记忆文件 `AGENTS.md`，每轮以带标签的合成消息渲染。旧版遗留的 `CLAUDE.md` 文件也会作为只读回退被兼容。
+- **检索记忆（可选）** —— `remember` / `forget` 工具把跨会话事实存成一条条 Markdown，每轮按词法相关性自动召回并注入。事实分**项目级**（默认）与**全局**两种作用域；默认关闭，`~/.cluxmate/retrieval-memory.json`。
 - **MCP** —— Model Context Protocol 服务器（stdio 或 HTTP）把它们的工具直接接入 agent 上下文；服务器每个工作目录只加载一次，stdio 服务器像 `bash` 一样被操作系统沙箱保护。
 
 
