@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import { useStore } from '../stores'
+import type { SelectedAgent } from '../stores'
 import MessageBubble from './MessageBubble'
 import PermissionCard from './PermissionCard'
 import BatchEditCard from './BatchEditCard'
@@ -34,6 +35,19 @@ export default function ChatView() {
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledAway = useRef(false)
+  const prevFocusRef = useRef<SelectedAgent | null>(null)
+
+  // Leaving a subagent focus view remounts the transcript scroll container at
+  // scrollTop 0 (the first turn's user input). Jump back to the turn that owned
+  // the subagent — its assistant message — at the final output instead.
+  useEffect(() => {
+    const prev = prevFocusRef.current
+    prevFocusRef.current = focusAgent
+    if (prev && !focusAgent) {
+      const el = document.querySelector(`[data-msg-id="${prev.messageId}"]`)
+      el?.scrollIntoView({ block: 'end' })
+    }
+  }, [focusAgent])
 
   // Detect user scrolls — if they pull up away from the bottom, disable
   // auto-scroll until they explicitly go back to the bottom.
