@@ -752,6 +752,11 @@ class AgentBuilder:
         has_todo_write = any(
             getattr(t, "name", "") == "todo_write" for t in tools
         )
+        # remember is always registered together with forget, so checking one
+        # name gates the retrieval-memory prompt block.
+        has_retrieval = any(
+            getattr(t, "name", "") == "remember" for t in tools
+        )
         return render_system_prompt(
             os_name=os_name,
             shell_path=shell_path,
@@ -759,6 +764,7 @@ class AgentBuilder:
             current_date=datetime.now().strftime("%Y-%m-%d"),
             has_update_memory=has_update_memory,
             has_todo_write=has_todo_write,
+            has_retrieval=has_retrieval,
         )
 
     def render_injections(self) -> list[tuple[str, str]]:

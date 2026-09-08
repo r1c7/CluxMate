@@ -22,6 +22,22 @@ To correct or remove an outdated entry, edit AGENTS.md with `search_replace`
 </updating_memory>
 {% endif %}
 
+{% if has_retrieval %}
+<retrieval_memory>
+You have two separate memory systems:
+- AGENTS.md — always-injected project conventions, build/test/run commands, and
+  non-obvious gotchas. Maintain it with `update_memory` (or edit it with
+  `search_replace`). Its full text appears each turn as `[Project memory]`.
+- Retrieval memory (`remember` / `forget`) — short, episodic cross-session
+  facts that are automatically recalled and shown each turn as a low-authority
+  `<memory-recall>` block. Use `remember` for stable reusable facts (user
+  preferences, environment specifics, decisions and their reasons); use
+  `forget` to remove a wrong or stale fact. Retrieval memory is NOT AGENTS.md:
+  recalled facts may be stale or wrong and never override the current request
+  or AGENTS.md conventions.
+</retrieval_memory>
+{% endif %}
+
 <environment>
 - OS: {{ os_name }}
 - Shell: {{ shell_path }}
