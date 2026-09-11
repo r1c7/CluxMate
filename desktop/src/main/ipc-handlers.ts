@@ -6,6 +6,7 @@ import { IPC } from '../shared/ipc-channels'
 import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { AgentBridge } from './agent-bridge'
+import { setAttention } from './attention'
 import * as sessionStore from './session-store'
 import * as gitService from './git-service'
 import { version as appVersion } from '../../package.json'
@@ -583,6 +584,10 @@ export function registerIpcHandlers() {
   })
   ipcMain.handle(IPC.WINDOW_CLOSE, () => { getMainWindow().close() })
   ipcMain.handle(IPC.WINDOW_IS_MAXIMIZED, () => getMainWindow().isMaximized())
+  // Taskbar attention signal from the renderer's pending-prompt state (see
+  // attention.ts). Fire-and-forget: nothing to return, and a stale value can't
+  // hurt — the main process re-syncs on focus/blur anyway.
+  ipcMain.handle(IPC.WINDOW_SET_ATTENTION, (_e, flag: unknown) => { setAttention(flag === true) })
 
   ipcMain.handle(IPC.SESSION_LIST, () => {
     const sessions = sessionStore.listSessions()

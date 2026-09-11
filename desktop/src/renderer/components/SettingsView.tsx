@@ -8,7 +8,7 @@ import { reasoningValuesFor } from '../../shared/reasoning'
 import { isValidSsrEntry } from '../../shared/ssrf'
 import type { ModelEntry } from '../../shared/types'
 
-type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'memory' | 'language'
+type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'memory' | 'notification' | 'language'
 
 // Built-in sensitive-file template (mirrors cluxmate/core/read_denies.py) —
 // shown read-only in the forbid-read card; the toggle turns them all on.
@@ -71,6 +71,15 @@ const SECTIONS: { id: Section; labelKey: MessageKey; icon: React.ReactNode }[] =
     ),
   },
   {
+    id: 'notification', labelKey: 'settings.section.notification',
+    icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+        <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+      </svg>
+    ),
+  },
+  {
     id: 'language', labelKey: 'settings.section.language',
     icon: (
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -121,6 +130,8 @@ export default function SettingsView() {
   const setFontSize = useStore((s) => s.setFontSize)
   const lang = useStore((s) => s.lang)
   const setLanguage = useStore((s) => s.setLanguage)
+  const attentionFlash = useStore((s) => s.attentionFlash)
+  const setAttentionFlash = useStore((s) => s.setAttentionFlash)
 
   const [section, setSection] = useState<Section>('model')
 
@@ -828,6 +839,39 @@ export default function SettingsView() {
                 <p className="text-[11px] text-ink-faint">{t('settings.memory.footnote')}</p>
               </SectionCard>
             </div>
+          ) : section === 'notification' ? (
+            <div className="space-y-4">
+              <SectionCard
+                icon={<BellIcon className="w-4 h-4" />}
+                title={t('settings.notification.title')}
+                badge={
+                  <button
+                    onClick={() => setAttentionFlash(!attentionFlash)}
+                    role="switch"
+                    aria-checked={attentionFlash}
+                    aria-label={t('settings.notification.title')}
+                    className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 hover:opacity-80 ${
+                      attentionFlash ? 'bg-accent' : 'bg-surface-border'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${
+                        attentionFlash ? 'left-[22px]' : 'left-0.5'
+                      }`}
+                    />
+                  </button>
+                }
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${attentionFlash ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                  <span className={`text-xs font-medium ${attentionFlash ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {attentionFlash ? t('settings.notification.on') : t('settings.notification.off')}
+                  </span>
+                </div>
+                <p className="text-xs text-ink-soft leading-relaxed">{t('settings.notification.hint')}</p>
+                <p className="text-[11px] text-ink-faint">{t('settings.notification.footnote')}</p>
+              </SectionCard>
+            </div>
           ) : (
             <>
               <p className="text-xs text-ink-faint mb-3">{t('settings.language.hint')}</p>
@@ -1018,6 +1062,15 @@ function MemoryIcon({ className = 'w-4 h-4' }: { className?: string }) {
       <ellipse cx="12" cy="5" rx="9" ry="3" />
       <path d="M3 5v14a9 3 0 0 0 18 0V5" />
       <path d="M3 12a9 3 0 0 0 18 0" />
+    </svg>
+  )
+}
+
+function BellIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
     </svg>
   )
 }

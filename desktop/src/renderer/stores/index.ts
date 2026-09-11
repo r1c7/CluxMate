@@ -12,6 +12,7 @@ import { defaultReasoningValue } from '../../shared/reasoning'
 import { editsFromToolInput } from '../components/MultiEditDiff'
 import { saveTheme, DEFAULT_THEME } from '../themes'
 import { saveFontFamily, saveFontSize, loadFontFamily, loadFontSize } from '../fonts'
+import { loadAttentionFlash, saveAttentionFlash } from '../notifications'
 import { applyLang, loadLang, saveLang, tGlobal, type Lang } from '../i18n'
 
 // Replacement agent reply shown when the turn ends in a non-recoverable error
@@ -255,6 +256,9 @@ interface AppState {
   fontSize: number
   // UI language (see renderer/i18n.ts): 'en' | 'zh'. Persisted to localStorage.
   lang: Lang
+  // Flash the taskbar button while a permission prompt / question card waits and
+  // the window is in the background (see renderer/notifications.ts). Persisted.
+  attentionFlash: boolean
   // Development mode: plan (read-only) / default / acceptEdits (writes auto) /
   // yolo (everything auto, incl. dangerous). Per-session, not persisted.
   mode: PermissionMode
@@ -328,6 +332,7 @@ interface AppState {
   setFontFamily: (id: string) => void
   setFontSize: (size: number) => void
   setLanguage: (lang: Lang) => void
+  setAttentionFlash: (enabled: boolean) => void
   setWorkingDir: (dir: string) => void
   refreshGitInfo: () => Promise<void>
   createSession: (cwd?: string) => Promise<void>
@@ -446,6 +451,7 @@ export const useStore = create<AppState>((set, get) => ({
   fontFamily: loadFontFamily(),
   fontSize: loadFontSize(),
   lang: applyLang(loadLang()),
+  attentionFlash: loadAttentionFlash(),
   mode: 'default',
   error: null,
   bridgeStatuses: {},
@@ -632,6 +638,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   setLanguage: (lang) => {
     set({ lang: saveLang(lang) })
+  },
+
+  setAttentionFlash: (enabled) => {
+    set({ attentionFlash: saveAttentionFlash(enabled) })
   },
 
   setWorkingDir: async (dir: string) => {

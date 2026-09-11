@@ -805,6 +805,11 @@ export interface ElectronAPI {
   // treated as false (offline) for backward compatibility.
   onBridgeStatusChanged: (callback: (payload: { sessionIds: string[]; running?: boolean }) => void) => () => void
 
+  // Taskbar attention signal (see main/attention.ts): true while a permission
+  // prompt / question card is waiting AND the user's notification preference is
+  // on. The main process flashes the window only while it is not focused.
+  setAttention: (flag: boolean) => Promise<void>
+
   // Custom (frameless) title bar window controls.
   minimizeWindow: () => Promise<void>
   toggleMaximizeWindow: () => Promise<void>

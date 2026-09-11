@@ -3,6 +3,7 @@ import { join } from 'path'
 import { setupSecurity } from './security'
 import { registerIpcHandlers, killAllBridges, stopIdleReaper } from './ipc-handlers'
 import { createTray } from './tray'
+import { attachAttention } from './attention'
 import { resolveIconPath } from './icon'
 import { IPC } from '../shared/ipc-channels'
 
@@ -23,6 +24,10 @@ function createWindow() {
       sandbox: false,
     },
   })
+
+  // Flash the taskbar button while a permission prompt is waiting and this
+  // window is in the background (see attention.ts).
+  attachAttention(win)
 
   // Keep the renderer's maximize/restore icon in sync with the real state
   // (the user can also toggle it via Win+Up, snap layouts, double-click, …).

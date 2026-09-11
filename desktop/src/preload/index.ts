@@ -91,6 +91,8 @@ const api: ElectronAPI = {
 
   getBridgeStatuses: (sessionIds: string[]) => ipcRenderer.invoke(IPC.BRIDGE_STATUS, sessionIds),
 
+  setAttention: (flag: boolean) => ipcRenderer.invoke(IPC.WINDOW_SET_ATTENTION, flag),
+
   // Custom (frameless) title bar window controls.
   minimizeWindow: () => ipcRenderer.invoke(IPC.WINDOW_MINIMIZE),
   toggleMaximizeWindow: () => ipcRenderer.invoke(IPC.WINDOW_MAXIMIZE_TOGGLE),

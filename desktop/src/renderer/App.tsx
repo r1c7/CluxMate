@@ -131,6 +131,23 @@ function AppInner() {
       .catch(() => setReady(true))
   }, [])
 
+  // Taskbar attention signal: report to the main process whether a prompt is
+  // waiting, so it can flash the window while it is in the background (see
+  // main/attention.ts). Derived from EVERY session's state rather than the
+  // active one's — a background session blocked on approval is precisely the
+  // case this signal exists for. Deriving (instead of maintaining a flag at each
+  // of the many places pending* is assigned) keeps it from ever going stale.
+  const attention = useStore((s) => {
+    for (const ss of s.sessionStates.values()) {
+      if (ss.pendingPermission || ss.pendingBatchEdit || ss.pendingQuestion) return true
+    }
+    return false
+  })
+  const attentionFlash = useStore((s) => s.attentionFlash)
+  useEffect(() => {
+    window.electronAPI.setAttention(attentionFlash && attention)
+  }, [attentionFlash, attention])
+
   useEffect(() => {
     if (!ready || !workingDir) return
     if (activeSessionId) return
