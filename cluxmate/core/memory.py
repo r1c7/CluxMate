@@ -27,8 +27,11 @@ from pathlib import Path
 
 from cluxmate.tools._fileio import read_normalized, write_preserving
 
-# Cap each file so a huge AGENTS.md can't blow up the context window.
-_MAX_MEMORY_BYTES = 32 * 1024
+# Cap each file so a huge AGENTS.md can't blow up the context window. Measured
+# in CHARACTERS: the unit the token estimate (chars/4) and the model actually pay
+# for. A byte cap would be a different number for the same content (CJK is ~3
+# bytes/char) and the two call sites below would disagree about it.
+MAX_MEMORY_CHARS = 64 * 1024
 
 MEMORY_FILENAME = "AGENTS.md"
 LEGACY_FILENAME = "CLAUDE.md"
@@ -64,13 +67,17 @@ class MemoryManager:
         legacy = self._legacy_path(scope)
         return legacy if legacy.is_file() else primary
 
-    def _read(self, path: Path) -> str:
+    def _read_text(self, path: Path) -> str:
+        """Raw file text (UTF-8; unreadable -> "")."""
         try:
-            text = path.read_text("utf-8", errors="replace")
+            return path.read_text("utf-8", errors="replace")
         except OSError:
             return ""
-        if len(text) > _MAX_MEMORY_BYTES:
-            text = text[:_MAX_MEMORY_BYTES] + "\n\n[memory truncated]"
+
+    def _read(self, path: Path) -> str:
+        text = self._read_text(path)
+        if len(text) > MAX_MEMORY_CHARS:
+            text = text[:MAX_MEMORY_CHARS] + "\n\n[memory truncated]"
         return text.strip()
 
     def render(self) -> str:
@@ -109,9 +116,11 @@ class MemoryManager:
         return path
 
     def is_over_limit(self, scope: str = "project") -> bool:
-        """True when the scoped file exceeds the read cap (append still allowed)."""
-        path = self.path_for(scope)
-        try:
-            return path.stat().st_size > _MAX_MEMORY_BYTES
-        except OSError:
-            return False
+        """True when the scoped memory is being truncated (append still allowed).
+
+        Measures exactly what _read clamps: characters of the file actually read
+        (AGENTS.md, else the CLAUDE.md fallback). Sharing both the unit and the
+        source resolution is the point -- a stat() size check on path_for()
+        reported a different answer for CJK files and for the legacy fallback.
+        """
+        return len(self._read_text(self._read_source(scope))) > MAX_MEMORY_CHARS

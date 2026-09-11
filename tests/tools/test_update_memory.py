@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from cluxmate.core.memory import MEMORY_FILENAME, LEGACY_FILENAME
+from cluxmate.core.memory import MEMORY_FILENAME, LEGACY_FILENAME, MAX_MEMORY_CHARS
 from cluxmate.tools.update_memory import UpdateMemoryTool
 
 
@@ -72,3 +72,22 @@ async def test_execute_writes_agent_not_claude(tmp_path, monkeypatch):
     assert (cwd / MEMORY_FILENAME).is_file()
     assert "New agent rule." in (cwd / MEMORY_FILENAME).read_text("utf-8")
     assert (cwd / LEGACY_FILENAME).read_text("utf-8") == "Legacy claude rule."
+
+
+@pytest.mark.asyncio
+async def test_execute_warns_when_over_cap(tmp_path, monkeypatch):
+    _, cwd = _redirect_home(tmp_path, monkeypatch)
+    (cwd / MEMORY_FILENAME).write_text("x" * MAX_MEMORY_CHARS, encoding="utf-8")
+    tool = UpdateMemoryTool(cwd=str(cwd))
+    result = await tool.execute(content="One entry too many.")
+    # Entry is still recorded; the note names the cap it just crossed.
+    assert "Recorded to" in result
+    assert str(MAX_MEMORY_CHARS // 1024) + "K-character read cap" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_no_warning_under_cap(tmp_path, monkeypatch):
+    _, cwd = _redirect_home(tmp_path, monkeypatch)
+    tool = UpdateMemoryTool(cwd=str(cwd))
+    result = await tool.execute(content="Small entry.")
+    assert "read cap" not in result

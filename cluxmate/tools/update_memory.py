@@ -11,7 +11,7 @@ text is already shown in the ``[Project memory]`` injection each turn.
 from typing import Any
 
 from .base import BaseTool
-from cluxmate.core.memory import MemoryManager
+from cluxmate.core.memory import MemoryManager, MAX_MEMORY_CHARS
 
 
 class UpdateMemoryTool(BaseTool):
@@ -80,8 +80,9 @@ class UpdateMemoryTool(BaseTool):
         msg = f"Recorded to {path} ({scope} memory)."
         if mgr.is_over_limit(scope):
             msg += (
-                " Note: this memory file now exceeds the 32KB read cap and will "
-                "be truncated when loaded — consider condensing it with "
-                "search_replace."
+                f" Note: this memory file now exceeds the "
+                f"{MAX_MEMORY_CHARS // 1024}K-character read cap, so its tail is "
+                "no longer injected into context. Condense it with search_replace "
+                "so the newest entries stay visible."
             )
         return msg

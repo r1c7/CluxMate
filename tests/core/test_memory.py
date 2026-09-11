@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from cluxmate.core.memory import MemoryManager, MEMORY_FILENAME, LEGACY_FILENAME
+from cluxmate.core.memory import (
+    MemoryManager, MEMORY_FILENAME, LEGACY_FILENAME, MAX_MEMORY_CHARS,
+)
 
 
 def _mgr(tmp_path: Path, monkeypatch) -> tuple[MemoryManager, Path, Path]:
@@ -43,9 +45,19 @@ def test_global_and_project_order(tmp_path, monkeypatch):
 
 def test_truncation(tmp_path, monkeypatch):
     mgr, _, cwd = _mgr(tmp_path, monkeypatch)
-    (cwd / MEMORY_FILENAME).write_text("x" * (40 * 1024), encoding="utf-8")
+    (cwd / MEMORY_FILENAME).write_text("x" * (MAX_MEMORY_CHARS + 1), encoding="utf-8")
     out = mgr.render()
     assert "[memory truncated]" in out
+
+
+def test_truncation_is_measured_in_characters(tmp_path, monkeypatch):
+    mgr, _, cwd = _mgr(tmp_path, monkeypatch)
+    # 3 bytes/char, so a byte-based cap would cut this ~3x earlier. The cut must
+    # land at exactly MAX_MEMORY_CHARS characters of the file's text.
+    (cwd / MEMORY_FILENAME).write_text("记" * (MAX_MEMORY_CHARS + 10), encoding="utf-8")
+    out = mgr.render()
+    body = out.split("<project_memory>\n", 1)[1].removesuffix("\n</project_memory>")
+    assert body == "记" * MAX_MEMORY_CHARS + "\n\n[memory truncated]"
 
 
 def test_paths(tmp_path, monkeypatch):
@@ -101,8 +113,38 @@ def test_append_preserves_crlf(tmp_path, monkeypatch):
 def test_is_over_limit(tmp_path, monkeypatch):
     mgr, _, cwd = _mgr(tmp_path, monkeypatch)
     assert mgr.is_over_limit() is False
-    (cwd / MEMORY_FILENAME).write_text("x" * (33 * 1024), encoding="utf-8")
+    # Exactly at the cap is still fully injected; one char more is not.
+    (cwd / MEMORY_FILENAME).write_text("x" * MAX_MEMORY_CHARS, encoding="utf-8")
+    assert mgr.is_over_limit() is False
+    (cwd / MEMORY_FILENAME).write_text("x" * (MAX_MEMORY_CHARS + 1), encoding="utf-8")
     assert mgr.is_over_limit() is True
+
+
+def test_is_over_limit_counts_characters_not_bytes(tmp_path, monkeypatch):
+    mgr, _, cwd = _mgr(tmp_path, monkeypatch)
+    path = cwd / MEMORY_FILENAME
+    path.write_text("记" * (MAX_MEMORY_CHARS - 10), encoding="utf-8")
+    # Over the cap in bytes, under it in characters -> nothing is truncated,
+    # so is_over_limit must agree with render().
+    assert path.stat().st_size > MAX_MEMORY_CHARS
+    assert mgr.is_over_limit() is False
+    assert "[memory truncated]" not in mgr.render()
+
+
+def test_is_over_limit_follows_read_source(tmp_path, monkeypatch):
+    mgr, _, cwd = _mgr(tmp_path, monkeypatch)
+    # Only the legacy CLAUDE.md exists, so that is the file being read (and cut).
+    (cwd / LEGACY_FILENAME).write_text("x" * (MAX_MEMORY_CHARS + 1), encoding="utf-8")
+    assert mgr.is_over_limit() is True
+    # AGENTS.md wins once it exists, even while CLAUDE.md is still oversized.
+    (cwd / MEMORY_FILENAME).write_text("small", encoding="utf-8")
+    assert mgr.is_over_limit() is False
+
+
+def test_is_over_limit_false_when_no_file(tmp_path, monkeypatch):
+    mgr, _, _ = _mgr(tmp_path, monkeypatch)
+    assert mgr.is_over_limit() is False
+    assert mgr.is_over_limit("global") is False
 
 
 def test_read_prefers_agent_over_claude(tmp_path, monkeypatch):
