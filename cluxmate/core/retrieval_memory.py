@@ -147,7 +147,13 @@ def _chunk_text(text: str, max_chars: int = 1600) -> list[str]:
 
 
 def _tokenize(q: str) -> list[str]:
-    """Latin words (>=2 chars) + CJK bigrams, deduped, order-preserving."""
+    """Latin words (>=2 chars) + CJK bigrams and trigrams, deduped, order-preserving.
+
+    The bigrams stay for recall: they cover 2-char words and non-adjacent
+    matches that no query-side trigram can reach. The 3-char windows are what
+    makes Chinese use the FTS5 index at all -- ``tokenize='trigram'`` needs >=3
+    characters to MATCH, and every bigram is one short of that.
+    """
     tokens: list[str] = []
     for word in _WORD_RE.findall(q):
         if len(word) >= 2:
@@ -155,8 +161,10 @@ def _tokenize(q: str) -> list[str]:
     for run in _CJK_RE.findall(q):
         if len(run) == 1:
             tokens.append(run)
-        else:
-            tokens.extend(run[i:i + 2] for i in range(len(run) - 1))
+            continue
+        tokens.extend(run[i:i + 2] for i in range(len(run) - 1))
+        if len(run) >= 3:
+            tokens.extend(run[i:i + 3] for i in range(len(run) - 2))
     seen: set[str] = set()
     out: list[str] = []
     for t in tokens:

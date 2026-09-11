@@ -10,6 +10,7 @@ from cluxmate.core.retrieval_memory import (
     RetrievalConfig,
     RetrievalMemory,
     _chunk_text,
+    _tokenize,
 )
 
 
@@ -160,6 +161,52 @@ def test_recall_cjk_bigram(tmp_path, monkeypatch):
     out = mem.recall("数据库索引怎么建")
     assert out is not None
     assert "B-tree" in out
+
+
+def test_tokenize_cjk_emits_three_char_windows():
+    # FTS5's trigram tokenizer needs >= 3 characters to MATCH, so a Chinese
+    # query can only reach the index through 3-char windows.
+    toks = _tokenize("数据库索引")
+    assert "数据库" in toks
+    assert "据库索" in toks
+    assert "库索引" in toks
+
+
+def test_tokenize_keeps_cjk_bigrams():
+    # Bigrams stay: they cover 2-char words and non-adjacent matches that no
+    # query-side trigram can reach.
+    assert "数据" in _tokenize("数据库")
+    assert "缓存" in _tokenize("缓存")
+
+
+def test_recall_cjk_terms_reach_the_fts_index(tmp_path, monkeypatch):
+    mem = _enabled_mem(tmp_path, monkeypatch)
+    mem.remember("数据库使用 B-tree 索引。")
+    seen: list[tuple[str, int]] = []
+    original = mem._fts_match
+
+    def spy(term: str):
+        hits = original(term)
+        seen.append((term, len(hits)))
+        return hits
+
+    monkeypatch.setattr(mem, "_fts_match", spy)
+    out = mem.recall("数据库索引怎么建")
+    assert out is not None
+    assert "B-tree" in out
+    cjk = [t for t, _ in seen if len(t) >= 3 and all("\u4e00" <= c <= "\u9fff" for c in t)]
+    assert cjk, f"no CJK term reached the FTS index; saw {seen}"
+    assert any(n for t, n in seen if t in cjk), "the index returned no CJK match"
+
+
+def test_recall_short_cjk_word_still_matches(tmp_path, monkeypatch):
+    # A 2-char word that never forms a query-side trigram with its neighbours
+    # must still be recalled -- trigram-only tokenizing would miss this.
+    mem = _enabled_mem(tmp_path, monkeypatch)
+    mem.remember("用 Redis 做缓存。")
+    out = mem.recall("缓存怎么实现")
+    assert out is not None
+    assert "Redis" in out
 
 
 def test_recall_respects_max_facts(tmp_path, monkeypatch):
