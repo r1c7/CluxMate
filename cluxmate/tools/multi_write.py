@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTool
+from ._diagnostics import diagnostics_suffix
 from ._fileio import detect_newline, write_preserving
 from ._fence import WriteFence
 from ._sandbox import ESCALATION_SCHEMA_FIELDS
@@ -15,12 +16,17 @@ class MultiWriteTool(BaseTool):
     The batch counterpart to write_file: the user reviews every file's content
     as a diff before any is written, then approves the whole set at once. Use
     when creating several new files together (e.g. scaffolding a module) instead
-    of firing many separate write_file calls.
+    of firing many separate write_file calls. Any language-server error
+    introduced in a written file is reported in the result.
     """
 
-    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None):
+    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None,
+                 lsp: Any = None):
         self._workdir = workdir
         self._fence = fence or WriteFence(workdir)
+        # Optional LSPManager: each written file's ERROR diagnostics are appended
+        # to the result (see tools/_diagnostics.py).
+        self._lsp = lsp
 
     @property
     def name(self) -> str:
@@ -88,6 +94,7 @@ class MultiWriteTool(BaseTool):
         escalate = sandbox_permissions == "danger-full-access"
 
         results: list[tuple[int, str, str]] = []  # (index, status, message)
+        written: list[str] = []
         for i in indices:
             if i < 0 or i >= len(files):
                 results.append((i, "✗", f"index {i} out of range"))
@@ -133,10 +140,11 @@ class MultiWriteTool(BaseTool):
 
             verb = "overwrote" if existed else "created"
             results.append((i, "✓", f"{verb} {path_str}"))
+            written.append(str(file_path))
 
         applied = sum(1 for _, status, _ in results if status == "✓")
         total = len(results)
         lines = [f"Wrote {applied}/{total} files:"]
         for _, status, msg in results:
             lines.append(f"  {status} {msg}")
-        return "\n".join(lines)
+        return "\n".join(lines) + await diagnostics_suffix(self._lsp, written)

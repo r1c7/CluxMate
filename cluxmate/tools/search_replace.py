@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTool
+from ._diagnostics import diagnostics_suffix
 from ._fileio import read_normalized, write_preserving
 from ._fence import WriteFence
 from ._sandbox import ESCALATION_SCHEMA_FIELDS
@@ -12,9 +13,13 @@ from ._sandbox import ESCALATION_SCHEMA_FIELDS
 class SearchReplaceTool(BaseTool):
     """Search for a string in a file and replace it."""
 
-    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None):
+    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None,
+                 lsp: Any = None):
         self._workdir = workdir
         self._fence = fence or WriteFence(workdir)
+        # Optional LSPManager: the edited file's ERROR diagnostics are appended
+        # to the result (see tools/_diagnostics.py).
+        self._lsp = lsp
 
     @property
     def name(self) -> str:
@@ -25,7 +30,9 @@ class SearchReplaceTool(BaseTool):
         return (
             "Search for a string in a file and replace it. "
             "The old_string must match exactly, including whitespace. "
-            "Use replace_all=True to replace all occurrences."
+            "Use replace_all=True to replace all occurrences. Any "
+            "language-server error introduced in the file is reported in the "
+            "result."
         )
 
     @property
@@ -125,4 +132,5 @@ class SearchReplaceTool(BaseTool):
         except Exception as e:
             return f"Error writing file: {e}"
 
-        return f"Replaced {count} occurrence(s) in {file_path}"
+        result = f"Replaced {count} occurrence(s) in {file_path}"
+        return result + await diagnostics_suffix(self._lsp, [str(file_path)])

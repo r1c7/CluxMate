@@ -547,6 +547,13 @@ _MAX_RESULT_CHARS = 16_000
 # textDocument/publishDiagnostics after didOpen/didChange before returning the
 # cached set (bounded — never blocks the turn on a silent server).
 _DIAGNOSTICS_DRAIN_SECONDS = 1.5
+# Post-write auto-report (P0-5). Writes are far more frequent than an explicit
+# `lsp` diagnostics query, so this wait is shorter — it is paid on every write
+# that touches a language server's file, and the server either pushes promptly
+# or not at all. Only ERROR items are reported, capped per file, and errors are
+# also what the cap counts (see _format_error_diagnostics).
+_AUTO_DIAGNOSTICS_DRAIN_SECONDS = 1.0
+_AUTO_DIAGNOSTICS_MAX = 20
 # Ceiling for one auto-install attempt (npm/rustup can be slow); the install
 # runs synchronously inside the triggering tool call, which is why it is
 # strictly opt-in (top-level lsp.json auto_install, default False).
@@ -623,35 +630,69 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
+def _diagnostic_line(d: Any) -> str | None:
+    """One ``line:col [severity] message (source, code)`` line, or None when the
+    payload is malformed — a server's shape is not ours to trust."""
+    if not isinstance(d, dict):
+        return None
+    rng = d.get("range")
+    if not isinstance(rng, dict):
+        return None
+    start = rng.get("start")
+    if not isinstance(start, dict):
+        return None
+    line = _coerce_int(start.get("line")) + 1
+    col = _coerce_int(start.get("character")) + 1
+    severity = _SEVERITY_LABELS.get(d.get("severity"), "diagnostic")
+    message = str(d.get("message") or "")
+    source = d.get("source")
+    code = d.get("code")
+    suffix = ""
+    if source or code:
+        suffix = f" ({source}, {code})" if source and code else f" ({source or code})"
+    return f"{line}:{col} [{severity}] {message}{suffix}"
+
+
+def _is_error(d: Any) -> bool:
+    """True for a diagnostic of ERROR severity.
+
+    LSP leaves an omitted ``severity`` to the client; we follow the reference
+    client and read it as an error (``_diagnostic_line`` labels the same case
+    "diagnostic", which is display-only).
+    """
+    if not isinstance(d, dict):
+        return False
+    severity = d.get("severity")
+    return _coerce_int(1 if severity is None else severity) == 1
+
+
 def _format_diagnostics(diags: list[dict]) -> str:
     if not diags:
         return "no diagnostics"
-    out: list[str] = []
-    for d in diags:
-        if not isinstance(d, dict):
-            continue
-        rng = d.get("range")
-        if not isinstance(rng, dict):
-            continue
-        start = rng.get("start")
-        if not isinstance(start, dict):
-            continue
-        line = _coerce_int(start.get("line")) + 1
-        col = _coerce_int(start.get("character")) + 1
-        severity = _SEVERITY_LABELS.get(d.get("severity"), "diagnostic")
-        message = str(d.get("message") or "")
-        source = d.get("source")
-        code = d.get("code")
-        suffix = ""
-        if source or code:
-            suffix = f" ({source}, {code})" if source and code else f" ({source or code})"
-        out.append(f"{line}:{col} [{severity}] {message}{suffix}")
+    out = [line for line in (_diagnostic_line(d) for d in diags) if line]
     if not out:
         return "no diagnostics"
     rendered = "\n".join(out[:_MAX_LOCATIONS])
     if len(out) > _MAX_LOCATIONS:
         rendered += f"\n\n[truncated: {len(out)} diagnostics, showing first {_MAX_LOCATIONS}]"
     return rendered[:_MAX_RESULT_CHARS]
+
+
+def _format_error_diagnostics(file: str, diags: list[dict]) -> str:
+    """``<diagnostics>`` block for a file's ERROR-severity items, "" when clean.
+
+    Warnings and hints are deliberately dropped: a mid-refactor edit routinely
+    leaves a few (an unused import, an unreferenced helper), and reporting them
+    after every write trains the model to chase noise instead of the errors the
+    edit actually introduced. Mirrors OpenCode's post-edit ``Diagnostic.report``.
+    """
+    errors = [line for line in (_diagnostic_line(d) for d in diags if _is_error(d)) if line]
+    if not errors:
+        return ""
+    more = len(errors) - _AUTO_DIAGNOSTICS_MAX
+    suffix = f"\n... and {more} more" if more > 0 else ""
+    body = "\n".join(errors[:_AUTO_DIAGNOSTICS_MAX])
+    return f'<diagnostics file="{file}">\n{body}{suffix}\n</diagnostics>'
 
 
 class LSPManager:
@@ -940,6 +981,70 @@ class LSPManager:
         except RuntimeError as e:
             return f"Error: {e}"
 
+    def _display_path(self, path: str) -> str:
+        """Path relative to the workspace root when it is inside it, else absolute."""
+        try:
+            rel = os.path.relpath(path, self.ws_root)
+            if not rel.startswith(".."):
+                return rel
+        except ValueError:
+            pass
+        return path
+
+    def _startable(self, path: str) -> LSPClient | None:
+        """Client for ``path``'s language, or None when one must not be started.
+
+        The no-install gate for the post-write report: a client already running
+        is reused, otherwise the server is started ONLY when its binary is
+        already on PATH. ``shutil.which`` is the same probe ``LSPClient.start``
+        uses, so a missing binary here means the install path would have been
+        taken — which an edit must never trigger on its own.
+        """
+        lang = self._ext_index.get(os.path.splitext(path)[1].lower())
+        if lang is None:
+            return None
+        existing = self._clients.get(lang)
+        if existing is not None:
+            return existing
+        spec = self.specs.get(lang)
+        if spec is None or not spec.command or shutil.which(spec.command) is None:
+            return None
+        try:
+            return self.resolve(path)
+        except Exception:
+            return None
+
+    def auto_diagnostics(self, file: str, timeout_seconds: float | None = None) -> str:
+        """ERROR diagnostics for a file that was just written, or "" if quiet.
+
+        Called by the write tools after a successful edit, so the result reads
+        "Overwrote X ..." plus, only when the edit actually broke something, a
+        ``<diagnostics>`` block the model can act on in the same step.
+
+        Best-effort by contract: never raises, never installs a language server
+        (see :meth:`_startable`), reports only ERROR severity, and returns "" for
+        a clean file, a silent server, an unknown language, or any failure — so a
+        broken language server can never turn a successful write into an error
+        result or garble it.
+        """
+        try:
+            path = self._abs(file)
+            client = self._startable(path)
+            if client is None:
+                return ""
+            uri = _path_to_uri(path)
+            client.ensure_synced(uri, path)
+            client.drain_pending(
+                _AUTO_DIAGNOSTICS_DRAIN_SECONDS
+                if timeout_seconds is None
+                else timeout_seconds
+            )
+            return _format_error_diagnostics(
+                self._display_path(path), client.diagnostics_for(uri)
+            )
+        except Exception:
+            return ""
+
     def diagnostics(self, file: str) -> str:
         path = self._abs(file)
         try:
@@ -955,13 +1060,9 @@ class LSPManager:
             return f"Error: {e}"
         if rendered == "no diagnostics":
             return rendered
-        try:
-            rel = os.path.relpath(path, self.ws_root)
-            if rel.startswith(".."):
-                rel = path
-        except ValueError:
-            rel = path
-        return "\n".join(f"{rel}:{line}" for line in rendered.split("\n"))
+        return "\n".join(
+            f"{self._display_path(path)}:{line}" for line in rendered.split("\n")
+        )
 
     def document_symbol(self, file: str) -> str:
         path = self._abs(file)

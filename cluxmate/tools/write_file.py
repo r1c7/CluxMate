@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTool
+from ._diagnostics import diagnostics_suffix
 from ._fileio import detect_newline, write_preserving
 from ._fence import WriteFence
 from ._sandbox import ESCALATION_SCHEMA_FIELDS
@@ -18,9 +19,13 @@ class WriteFileTool(BaseTool):
     works identically across platforms.
     """
 
-    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None):
+    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None,
+                 lsp: Any = None):
         self._workdir = workdir
         self._fence = fence or WriteFence(workdir)
+        # Optional LSPManager: the written file's ERROR diagnostics are appended
+        # to the result (see tools/_diagnostics.py).
+        self._lsp = lsp
 
     @property
     def name(self) -> str:
@@ -31,7 +36,9 @@ class WriteFileTool(BaseTool):
         return (
             "Create a new file or overwrite an existing file with the given "
             "content. Parent directories are created automatically. To edit "
-            "part of an existing file, prefer search_replace."
+            "part of an existing file, prefer search_replace. Any "
+            "language-server error introduced in the file is reported in the "
+            "result."
         )
 
     @property
@@ -97,4 +104,5 @@ class WriteFileTool(BaseTool):
 
         verb = "Overwrote" if existed else "Created"
         n_lines = content.count("\n") + 1 if content else 0
-        return f"{verb} {file_path} ({n_lines} line(s), {len(content)} chars)"
+        result = f"{verb} {file_path} ({n_lines} line(s), {len(content)} chars)"
+        return result + await diagnostics_suffix(self._lsp, [str(file_path)])

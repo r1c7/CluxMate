@@ -601,6 +601,10 @@ class AgentBuilder:
                     self._sandbox_state = "windows-lowil:off(fail-closed)"
                 else:
                     self._sandbox_state = f"{sandbox.name}:{mode}"
+            # One manager shared by the lsp tool and the write tools, so a write
+            # reports this file's diagnostics through the same running server
+            # (and reuses one spawned process rather than starting a second).
+            lsp = self._lsp_manager()
             tools.extend([
                 BashTool(
                     workdir=self._cwd,
@@ -609,16 +613,16 @@ class AgentBuilder:
                     egress_mode=egress_kw["egress_mode"],
                 ),
                 ReadFileTool(workdir=self._cwd, fence=read_fence),
-                SearchReplaceTool(workdir=self._cwd, fence=fence),
-                WriteFileTool(workdir=self._cwd, fence=fence),
+                SearchReplaceTool(workdir=self._cwd, fence=fence, lsp=lsp),
+                WriteFileTool(workdir=self._cwd, fence=fence, lsp=lsp),
                 DeleteFileTool(workdir=self._cwd, fence=fence),
-                MultiEditTool(workdir=self._cwd, fence=fence),
-                MultiWriteTool(workdir=self._cwd, fence=fence),
+                MultiEditTool(workdir=self._cwd, fence=fence, lsp=lsp),
+                MultiWriteTool(workdir=self._cwd, fence=fence, lsp=lsp),
                 GrepTool(workdir=self._cwd, fence=read_fence),
                 ListDirTool(workdir=self._cwd, fence=read_fence),
                 WebFetchTool(ssrf=self._ssrf),
                 WebSearchTool(ssrf=self._ssrf),
-                LspTool(manager=self._lsp_manager()),
+                LspTool(manager=lsp),
             ])
             # Add TaskTool only when subagent types are configured AND we have
             # not hit the recursion cap. Withholding `task` at the cap is what

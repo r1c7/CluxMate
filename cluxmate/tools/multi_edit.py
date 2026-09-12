@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTool
+from ._diagnostics import diagnostics_suffix
 from ._fileio import read_normalized, write_preserving
 from ._fence import WriteFence
 from ._sandbox import ESCALATION_SCHEMA_FIELDS
@@ -12,9 +13,13 @@ from ._sandbox import ESCALATION_SCHEMA_FIELDS
 class MultiEditTool(BaseTool):
     """Apply multiple search-replace edits across files in one batch."""
 
-    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None):
+    def __init__(self, workdir: str | None = None, fence: WriteFence | None = None,
+                 lsp: Any = None):
         self._workdir = workdir
         self._fence = fence or WriteFence(workdir)
+        # Optional LSPManager: each edited file's ERROR diagnostics are appended
+        # to the result (see tools/_diagnostics.py).
+        self._lsp = lsp
 
     @property
     def name(self) -> str:
@@ -27,7 +32,9 @@ class MultiEditTool(BaseTool):
             "Each edit specifies a path, old_string (exact match), and new_string. "
             "Use this when you need to modify several files at once — the user "
             "will review all diffs before any changes are applied. "
-            "Prefer single-file search_replace for one-off edits."
+            "Prefer single-file search_replace for one-off edits. Any "
+            "language-server error introduced in an edited file is reported in "
+            "the result."
         )
 
     @property
@@ -86,6 +93,7 @@ class MultiEditTool(BaseTool):
         escalate = sandbox_permissions == "danger-full-access"
 
         results: list[tuple[int, str, str]] = []  # (index, status, message)
+        written: list[str] = []
         for i in indices:
             if i < 0 or i >= len(edits):
                 results.append((i, "✗", f"index {i} out of range"))
@@ -137,10 +145,11 @@ class MultiEditTool(BaseTool):
                 continue
 
             results.append((i, "✓", path_str))
+            written.append(str(file_path))
 
         applied = sum(1 for _, status, _ in results if status == "✓")
         total = len(results)
         lines = [f"Applied {applied}/{total} edits:"]
         for _, status, msg in results:
             lines.append(f"  {status} {msg}")
-        return "\n".join(lines)
+        return "\n".join(lines) + await diagnostics_suffix(self._lsp, written)
