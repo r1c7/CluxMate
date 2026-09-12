@@ -528,6 +528,7 @@ class SessionLog:
         self._surface: list[SessionEvent] = []
         self._seq = 0
         self._turn_count = 0
+        self._surface_generation = 0
         self._observers: list[Callable[[SessionEvent], None]] = []
 
     # -- construction --------------------------------------------------------
@@ -573,6 +574,23 @@ class SessionLog:
     def surface(self) -> list[SessionEvent]:
         """The ordered surface — message-producing events after ``replace`` ops."""
         return list(self._surface)
+
+    @property
+    def surface_generation(self) -> int:
+        """How many times the surface projection has been mutated (appends +
+        replaces) since the log was created.
+
+        The staleness token for work *prepared* against the surface: an async
+        producer (the compaction summarizer) is handed message indices derived
+        from the surface, awaits, and must re-check this before committing its
+        edit. An uneven value means the surface it measured no longer exists —
+        the indices describe a different message list, so the edit must be
+        recomputed, never applied. Mirrors DSH's ``surface.replaceGeneration``
+        (which invalidates its tool-pairing cache the same way). A log rebuilt
+        with :meth:`from_events` replays the same ops and lands on the same
+        count.
+        """
+        return self._surface_generation
 
     def derive_messages(self) -> list[dict[str, Any]]:
         """Project the surface to the provider-native message list.
@@ -727,6 +745,7 @@ class SessionLog:
         else:  # ReplaceOp
             op = event.surfaceOp
             self._surface[op.start : op.end + 1] = [event]
+        self._surface_generation += 1
 
     def _adopt(self, event: SessionEvent) -> None:
         """Validate and apply an externally-built event (used by from_events)."""

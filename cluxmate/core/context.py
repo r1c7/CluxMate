@@ -6,10 +6,19 @@ validity: an assistant message carrying tool_calls must keep its paired
 tool_results, and the kept recent tail must not begin with an orphaned
 tool_result (both Anthropic and OpenAI 400 otherwise).
 
+Both cut points are therefore *tool-pairing balanced* cuts — positions where no
+tool call is left unanswered across the cut (DSH ``tool-pairing.ts``,
+Grok ``select.rs``). The tail cut is snapped to the nearest balanced position,
+preferring the one that keeps the most recent call/result group in the
+preserved tail: that group is the freshest context the model has, and snapping
+the other way summarizes it away — at the extreme leaving an empty tail.
+
 Compaction is a single region-replace: the middle between the preserved head
 (system + first user message) and the recent tail is collapsed into one summary
 message. The caller records that replacement as a session-log surface op so the
-compacted transcript stays replayable (see ``AgentLoop._log_compaction``). A
+compacted transcript stays replayable (see ``AgentLoop._log_compaction``), and
+guards it with the log's surface generation — the summarizer awaits, so the
+surface it was measured against must still be the surface it is applied to. A
 failed summarize falls back to a truncation note so a turn never hard-fails.
 
 Token counts are char/4 estimates (no tokenizer dependency); the agent loop
@@ -100,6 +109,52 @@ def _is_environment(source: str | None) -> bool:
     return source in ENV_SOURCES
 
 
+def _unanswered_delta(msg: dict[str, Any]) -> int:
+    """Net change in unanswered tool calls contributed by one message.
+
+    OpenAI declares calls on the assistant message (``tool_calls``) and answers
+    each with a ``role: "tool"`` message; the Anthropic shape uses ``tool_use`` /
+    ``tool_result`` content blocks. Mirrors DSH ``tool-pairing.eventDelta``.
+    """
+    tool_calls = msg.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        return len(tool_calls)
+    content = msg.get("content")
+    if isinstance(content, list):
+        kinds = [b.get("type") for b in content if isinstance(b, dict)]
+        calls = kinds.count("tool_use")
+        if calls:
+            return calls
+        results = kinds.count("tool_result")
+        if results:
+            return -results
+    if msg.get("role") == "tool":
+        return -1
+    return 0
+
+
+def _balance_prefix(messages: list[dict[str, Any]]) -> list[int]:
+    """``balance[i]`` — unanswered tool calls immediately BEFORE message ``i``.
+
+    A cut at index ``i`` is *balanced* when ``balance[i] == 0``: no tool call is
+    left open across it, so an assistant message carrying ``tool_calls`` always
+    keeps its paired results on the same side of the cut. The last entry is the
+    balance after the final message.
+    """
+    balance = [0] * (len(messages) + 1)
+    for i, msg in enumerate(messages):
+        balance[i + 1] = balance[i] + _unanswered_delta(msg)
+    return balance
+
+
+def _snap_forward(balance: list[int], index: int) -> int:
+    """First balanced cut at or after ``index`` (``index`` when there is none)."""
+    for i in range(index, len(balance)):
+        if balance[i] == 0:
+            return i
+    return index
+
+
 def _split_head(
     messages: list[dict[str, Any]], sources: list[str | None] | None = None,
 ) -> tuple[list[dict], int]:
@@ -130,11 +185,13 @@ def _split_head(
     return head, i
 
 
-def _tail_start(messages: list[dict[str, Any]], head_end: int, budget_tokens: int) -> int:
-    """Index where the preserved recent tail begins.
+def _tail_target(
+    messages: list[dict[str, Any]], head_end: int, budget_tokens: int
+) -> int:
+    """Unsnapped index where a ~``budget_tokens`` recent tail would begin.
 
-    Walks back from the end accumulating until ~budget_tokens, then advances
-    forward past any leading tool-result so the tail never starts orphaned.
+    Walks back from the end accumulating until the budget is spent. The result is
+    a size estimate only — :func:`_pairing_cut` moves it to a legal cut.
     """
     acc = 0
     start = len(messages)
@@ -143,13 +200,47 @@ def _tail_start(messages: list[dict[str, Any]], head_end: int, budget_tokens: in
         start = i
         if acc >= budget_tokens:
             break
-    # Don't begin the tail on an orphaned tool-result (its assistant call would
-    # be in the dropped/summarized middle). Also skip an assistant message that
-    # carries tool_calls whose results would land in the tail but whose call we
-    # keep — that's fine; the risk is only a LEADING tool_result.
-    while start < len(messages) and _is_tool_result(messages[start]):
-        start += 1
     return start
+
+
+def _pairing_cut(
+    messages: list[dict[str, Any]],
+    head_end: int,
+    target: int,
+    balance: list[int],
+) -> int:
+    """Move ``target`` to a tool-pairing-balanced tail cut (:func:`_balance_prefix`).
+
+    Preference order:
+
+    1. ``target`` itself when it is already balanced.
+    2. **Backward** to the cut that opens the call/result group ``target`` fell
+       inside. That group is the freshest context in the conversation and belongs
+       in the preserved tail; snapping forward instead would summarize the tool
+       results the model just asked for — and when the walk lands inside the last
+       group, forward snapping leaves an *empty* tail, i.e. the whole recent
+       conversation becomes a summary. Overshoot is bounded by that one group.
+    3. **Forward** past the group, the only option when backward would leave
+       nothing to summarize (the group starts at the head boundary).
+    4. A malformed transcript with no balanced cut nearby (a result with no call)
+       degrades to the shape rule this module always had — never begin the tail
+       on a tool-result — instead of raising.
+    """
+    if balance[target] == 0:
+        return target
+    back = target
+    while back > head_end and balance[back] != 0:
+        back -= 1
+    if back > head_end and balance[back] == 0:
+        return back
+    fwd = target
+    while fwd < len(messages) and balance[fwd] != 0:
+        fwd += 1
+    if balance[fwd] == 0:
+        return fwd
+    while fwd < len(messages) and _is_tool_result(messages[fwd]):
+        fwd += 1
+    return fwd
 
 
 async def compact(
@@ -171,14 +262,26 @@ async def compact(
     recent tail is collapsed into one summary message; a failed summarize falls
     back to a truncation note. ``sources`` is parallel to ``messages`` and marks
     each message's ``user/message`` source so the anchor skips injections.
+
+    Both boundaries are tool-pairing balanced cuts, so the returned list is a
+    valid transcript (see :func:`_pairing_cut`).
     """
     limit = int(threshold * window)
     if estimate_tokens(messages) <= limit:
         return messages, False, None
 
     head, head_end = _split_head(messages, sources)
+    balance = _balance_prefix(messages)
+    # The head must not end inside a call group either: advance the cut past the
+    # group rather than let the summarized region open on a bare tool-result.
+    snapped_head_end = _snap_forward(balance, head_end)
+    if snapped_head_end != head_end:
+        head_end = snapped_head_end
+        head = messages[:head_end]
     tail_budget = int(tail_fraction * window)
-    tstart = _tail_start(messages, head_end, tail_budget)
+    tstart = _pairing_cut(
+        messages, head_end, _tail_target(messages, head_end, tail_budget), balance
+    )
     if tstart <= head_end:
         # Nothing in the middle to compact (tail already spans everything).
         return messages, False, None

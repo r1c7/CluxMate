@@ -44,6 +44,13 @@ from cluxmate.core.completion_audit import (
 # Compact when the running context estimate exceeds this fraction of the window.
 COMPACT_THRESHOLD = 0.8
 
+# How many times a compaction whose prepared surface changed under the
+# summarizer is recomputed before this step gives up on compacting. The
+# summarizer is an await, so the message indices it was prepared from can go
+# stale; recomputing is cheap next to committing an edit that would desync the
+# logged surface from the request actually sent (see AgentLoop._compact_step).
+MAX_COMPACTION_RECOMPUTES = 1
+
 # Friendly fallback shown when the provider call fails for anything other than
 # quota exhaustion: network unreachable, model unavailable, request timeouts,
 # auth/server errors. Quota errors (LLMQuotaError) surface the provider's own
@@ -398,6 +405,9 @@ class AgentLoop:
         # and its consecutive run length.
         self._repeat_key: str | None = None
         self._repeat_count = 0
+        # Compactions discarded this turn because the surface moved while the
+        # summarizer ran; reported in turn/end.reason for the audit trail.
+        self._compaction_stale_retries = 0
 
     # ── session-log helpers ────────────────────────────────────────────────
 
@@ -500,6 +510,52 @@ class AgentLoop:
             surface_op=ReplaceOp(start=start, end=end),
             source_event_seqs=shadowed,
         )
+
+    def _conversation_from_log(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Rebuild the request list from the log's CURRENT surface.
+
+        The system message is never on the surface, so it is re-attached from
+        the caller's list (index 0).
+        """
+        if self.session_log is None or not messages:
+            return messages
+        return [messages[0], *self.session_log.derive_messages()]
+
+    async def _compact_step(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Compact ``messages`` if over budget. Returns ``(messages, did_compact)``.
+
+        Generation guard (P0-4): ``compact`` awaits the summarizer, and the edit
+        it returns is expressed as indices into the surface it measured. If that
+        surface moved while the summarizer ran — another compaction rewrote it, or
+        a message was appended — those indices describe a message list that no
+        longer exists, and committing the replace would silently desync the log
+        from the request (violating "model-visible ⟺ logged"). So the generation
+        is captured before the summarize and re-checked before the commit; on a
+        mismatch the input is re-derived from the CURRENT surface and recomputed,
+        at most :data:`MAX_COMPACTION_RECOMPUTES` times. A surface that keeps
+        moving leaves this step uncompacted (the next step retries) rather than
+        committing an edit it cannot vouch for.
+        """
+        log = self.session_log
+        for _attempt in range(MAX_COMPACTION_RECOMPUTES + 1):
+            generation = log.surface_generation if log is not None else None
+            sources = [None] + log.message_sources() if log is not None else None
+            new_messages, did, edit = await compact(
+                messages, self.context_window, self.provider,
+                threshold=COMPACT_THRESHOLD, sources=sources,
+            )
+            if not did:
+                return messages, False
+            if log is None or log.surface_generation == generation:
+                self._log_compaction(edit)
+                return new_messages, True
+            self._compaction_stale_retries += 1
+            messages = self._conversation_from_log(messages)
+        return messages, False
 
     def _last_turn_end(self) -> tuple[int, dict[str, Any]] | None:
         """``(turn, reason)`` of the most recent ``turn/end`` event, if any."""
@@ -668,6 +724,7 @@ class AgentLoop:
         self._turn_write_paths: set[str] = set()
         self._turn_any_bash = False
         self._turn_start_ts = time.time()
+        self._compaction_stale_retries = 0
         log = self.session_log
 
         # UserPromptSubmit hook: fires before the prompt reaches the model. A
@@ -770,6 +827,13 @@ class AgentLoop:
                 end_reason["completion_audit"] = {
                     "reminders": self._completion_audit_retries
                 }
+            if self._compaction_stale_retries:
+                # Audit trail: compactions discarded because the surface moved
+                # under the summarizer (see _compact_step) — they cost a
+                # summarizer call each and explain a turn that stayed over budget.
+                end_reason["compaction"] = {
+                    "stale_retries": self._compaction_stale_retries
+                }
             log.append("turn/end", {"turn": session_turn, "reason": end_reason})
             self._log_turn = None
             self._log_step = None
@@ -859,16 +923,9 @@ class AgentLoop:
                         )
                     skip_compact = hr.blocked
                 if not skip_compact:
-                    sources = None
-                    if self.session_log is not None:
-                        sources = [None] + self.session_log.message_sources()
-                    messages, did, edit = await compact(
-                        messages, self.context_window, self.provider,
-                        threshold=COMPACT_THRESHOLD, sources=sources,
-                    )
+                    messages, did = await self._compact_step(messages)
                     if did:
                         self.compacted_this_turn = True
-                        self._log_compaction(edit)
                         ctx_tokens = estimate_tokens(messages)
 
             # Emit step/start, then a request/header snapshot only when the

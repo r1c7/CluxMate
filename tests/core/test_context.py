@@ -5,7 +5,9 @@ import pytest
 from cluxmate.core.context import (
     compact,
     estimate_tokens,
+    _balance_prefix,
     _is_tool_result,
+    _pairing_cut,
     _split_head,
 )
 from cluxmate.core.providers.base import LLMResponse
@@ -252,3 +254,187 @@ async def test_summarize_failure_falls_back_to_note():
     # The fallback is still a single region-replace.
     start, end, replacement = edit
     assert out == msgs[:start] + replacement + msgs[end:]
+
+
+# ── tool-pairing balance (P0-3) ────────────────────────────
+
+
+def _call(*ids: str) -> dict:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": i, "type": "function",
+             "function": {"name": "read", "arguments": "{}"}}
+            for i in ids
+        ],
+    }
+
+
+def _result(call_id: str, chars: int) -> dict:
+    return {"role": "tool", "tool_call_id": call_id, "content": _big(chars)}
+
+
+def _open_calls(messages: list[dict]) -> int:
+    """Replay the OPEN tool-call balance of a message list (DSH's invariant)."""
+    from cluxmate.core.context import _unanswered_delta
+
+    balance = 0
+    for msg in messages:
+        balance += _unanswered_delta(msg)
+        assert balance >= 0, "a tool result appeared before its tool call"
+    return balance
+
+
+def test_balance_prefix_openai_shape():
+    msgs = [
+        {"role": "system", "content": "sys"},
+        _call("a", "b"),
+        _result("a", 4),
+        _result("b", 4),
+        {"role": "user", "content": "next"},
+    ]
+    assert _balance_prefix(msgs) == [0, 0, 2, 1, 0, 0]
+
+
+def test_balance_prefix_anthropic_shape():
+    msgs = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "a"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a"}]},
+    ]
+    assert _balance_prefix(msgs) == [0, 1, 0]
+
+
+def test_pairing_cut_snaps_back_to_the_freshest_group():
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {"role": "user", "content": "followup"},
+        _call("a"),
+        _result("a", 4000),
+    ]
+    balance = _balance_prefix(msgs)
+    # Landing inside the group snaps back to the cut that opens it, so the
+    # call/result pair stays whole on the tail side.
+    assert _pairing_cut(msgs, head_end=2, target=4, balance=balance) == 3
+
+
+def test_pairing_cut_snaps_forward_when_backward_leaves_nothing():
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        _call("a"),
+        _result("a", 4000),
+        {"role": "user", "content": "followup"},
+    ]
+    balance = _balance_prefix(msgs)
+    # Backward would be the head boundary itself (nothing left to summarize), so
+    # the cut goes forward past the whole group instead.
+    assert _pairing_cut(msgs, head_end=2, target=3, balance=balance) == 4
+
+
+def test_pairing_cut_balanced_target_is_untouched():
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        _call("a"),
+        _result("a", 4000),
+        {"role": "user", "content": "followup"},
+    ]
+    assert _pairing_cut(msgs, head_end=2, target=4, balance=_balance_prefix(msgs)) == 4
+
+
+def test_pairing_cut_malformed_history_degrades_to_shape_rule():
+    # A result with no call: no balanced cut exists, so the cut keeps the old
+    # shape rule (never begin the tail on a tool-result) instead of raising.
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        _result("orphan", 4),
+        _result("orphan2", 4),
+    ]
+    balance = _balance_prefix(msgs)
+    assert balance == [0, 0, 0, -1, -2]
+    cut = _pairing_cut(msgs, head_end=2, target=3, balance=balance)
+    assert cut == len(msgs)  # skip both orphans rather than cut between them
+
+
+@pytest.mark.parametrize("tail_fraction", [0.05, 0.1, 0.2, 0.3, 0.5, 0.9])
+@pytest.mark.parametrize("per_step", [1, 3])
+@pytest.mark.asyncio
+async def test_compacted_output_is_always_pairing_balanced(tail_fraction, per_step):
+    """The returned transcript never splits a tool_call from its results, and
+    every declared call is answered inside the output."""
+    provider = SummarizeProvider(summary="recap")
+    window = 4_000
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+    ]
+    for i in range(6):
+        ids = [f"t{i}{chr(97 + k)}" for k in range(per_step)]
+        msgs.append(_call(*ids))
+        for cid in ids:
+            msgs.append(_result(cid, 4_000))
+
+    out, did, edit = await compact(
+        msgs, window=window, provider=provider, tail_fraction=tail_fraction
+    )
+    assert did is True
+    start, end, replacement = edit
+    assert out == msgs[:start] + replacement + msgs[end:]
+    # Every call answered, no orphan result, and the tail keeps whole steps.
+    assert _open_calls(out) == 0
+    tail = msgs[end:]
+    if tail:
+        assert not _is_tool_result(tail[0])
+        assert _open_calls(tail) == 0
+
+
+@pytest.mark.asyncio
+async def test_freshest_step_stays_in_the_tail():
+    """A cut landing inside the last step must not summarize that step away."""
+    provider = SummarizeProvider()
+    window = 4_000
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+    ]
+    for i in range(6):
+        msgs.append(_call(f"t{i}a", f"t{i}b"))
+        msgs.append(_result(f"t{i}a", 4_000))
+        msgs.append(_result(f"t{i}b", 4_000))
+
+    out, did, edit = await compact(msgs, window=window, provider=provider)
+    assert did is True
+    _start, end, _replacement = edit
+    tail = msgs[end:]
+    # tail_fraction 0.3 * 4000 = 1200 tokens, each result ~1000: the walk lands
+    # inside the LAST step, so the tail is exactly that step — the model keeps
+    # the results it just asked for (previously the tail was emptied instead).
+    assert len(tail) == 3
+    assert [t["id"] for t in tail[0]["tool_calls"]] == ["t5a", "t5b"]
+    assert [m["tool_call_id"] for m in tail[1:]] == ["t5a", "t5b"]
+
+
+@pytest.mark.asyncio
+async def test_oldest_step_is_what_gets_summarized():
+    """The complementary rule: a mid-step cut drops older steps, never newer."""
+    provider = SummarizeProvider()
+    window = 2_000
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        _call("t0"),
+        _result("t0", 4_000),
+        _call("t1"),
+        _result("t1", 4_000),
+    ]
+    out, did, edit = await compact(msgs, window=window, provider=provider)
+    assert did is True
+    start, end, replacement = edit
+    assert out == msgs[:start] + replacement + msgs[end:]
+    # t0 is summarized; t1 survives verbatim in the tail.
+    assert msgs[start:end] == msgs[2:4]
+    assert out[-2] is msgs[-2]
+    assert out[-1] is msgs[-1]
