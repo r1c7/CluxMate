@@ -1134,7 +1134,15 @@ export const useStore = create<AppState>((set, get) => ({
             ? updateNode(m, aid!, (n) => nodePatchTool(n, event.call_id, patch))
             : patchTool(m, event.call_id, patch)
         )
-        if (!isSub) { css.pendingPermission = null; css.pendingBatchEdit = null; css.pendingQuestion = null }
+        // Only the question's OWN tool_result dismisses the card: a step's tool
+        // calls run concurrently, so a sibling call settling here used to close a
+        // still-unanswered card — leaving the Python side (and the turn) waiting
+        // for an answer the user could no longer give.
+        if (!isSub) {
+          css.pendingPermission = null
+          css.pendingBatchEdit = null
+          if (css.pendingQuestion?.call_id === event.call_id) css.pendingQuestion = null
+        }
         commit(css, s2)
       } else if (event.type === 'turn_diff') {
         // Files this turn changed — attach to the root agent message so the
@@ -1842,7 +1850,15 @@ export const useStore = create<AppState>((set, get) => ({
             ? updateNode(m, aid!, (n) => nodePatchTool(n, event.call_id, patch))
             : patchTool(m, event.call_id, patch)
         )
-        if (!isSub) { css.pendingPermission = null; css.pendingBatchEdit = null; css.pendingQuestion = null }
+        // Only the question's OWN tool_result dismisses the card: a step's tool
+        // calls run concurrently, so a sibling call settling here used to close a
+        // still-unanswered card — leaving the Python side (and the turn) waiting
+        // for an answer the user could no longer give.
+        if (!isSub) {
+          css.pendingPermission = null
+          css.pendingBatchEdit = null
+          if (css.pendingQuestion?.call_id === event.call_id) css.pendingQuestion = null
+        }
         commit(css, s2)
       } else if (event.type === 'turn_diff') {
         css.messages = mapAgentMsg(css.messages, agentMsgId, (m) => ({
