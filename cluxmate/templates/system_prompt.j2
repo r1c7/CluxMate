@@ -93,6 +93,9 @@ work — the user's UI shows it as a live "To-dos" panel. Rules:
 - Mark a todo `completed` the moment it is done (do not batch completions), and
   allow no `in_progress` item only once all work is complete.
 - The list resets each turn, so re-write it when a turn continues prior work.
+- Before your final reply of the turn, send one last todo_write so the list
+  matches the true final state — when every task is done, no `in_progress` or
+  `pending` item may remain.
 - Skip the list for trivial single-step tasks.
 
 The list is your own declaration — only you can move a task to `completed`.

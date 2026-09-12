@@ -899,6 +899,13 @@ export const useStore = create<AppState>((set, get) => ({
     // Fire-and-forget: restore the persisted task list from the Python JSONL
     // (todo/write fold). Skipped while the session is streaming — the turn
     // already reset the list and live todo_update events own it from here.
+    // The RPC can take a while when the bridge was cold (spawn + initialize),
+    // so the apply below re-checks that nothing changed in the meantime: if a
+    // turn started after this switch (sendMessage resets the list, then live
+    // todo_update events own it) the stale fold must NOT overwrite the live
+    // list — that would resurrect a pre-turn "not yet completed" plan over the
+    // current turn's real state.
+    const todosBeforeRestore = ss.todos
     if (!ss.isStreaming) {
       void (async () => {
         try {
@@ -908,6 +915,9 @@ export const useStore = create<AppState>((set, get) => ({
           const states2 = new Map(cur.sessionStates)
           const s2 = states2.get(id)
           if (!s2) return
+          // Stale-response guard: skip if a turn started (streaming) or the
+          // list already moved on since the switch — live events win.
+          if (s2.isStreaming || s2.todos !== todosBeforeRestore) return
           s2.todos = todos
           set({
             sessionStates: states2,
@@ -1711,6 +1721,10 @@ export const useStore = create<AppState>((set, get) => ({
     ss.pendingPermission = null
     ss.pendingBatchEdit = null
     ss.pendingQuestion = null
+    // Retry restarts the turn — the previous attempt's list is stale (mirrors
+    // sendMessage; the turn_start event's reset cannot be relied on because the
+    // Python side only emits it when checkpoints/git are available).
+    ss.todos = null
     window.electronAPI.saveDisplay(sid, ss.messages).catch(() => {})
 
     set({
@@ -1722,6 +1736,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: null,
       pendingBatchEdit: null,
       pendingQuestion: null,
+      todos: null,
       bridgeStatuses: { ...get().bridgeStatuses, [sid]: true },
     })
 

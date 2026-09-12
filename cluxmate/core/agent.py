@@ -24,6 +24,7 @@ from cluxmate.core.session_log import (
     STAGE_APPROVAL,
     STAGE_STREAMING,
     STAGE_TOOL_EXECUTING,
+    TODO_WRITE_EVENT,
     ReplaceOp,
     SessionLog,
     canonical_header,
@@ -1434,23 +1435,16 @@ class AgentLoop:
                                 hook_feedback.extend(hr.feedback)
                     if callbacks is not None:
                         await callbacks.on_tool_end(tc.id, result)
-                        # State-carrying tool (todo_write): forward the
-                        # canonical whole list so frontends can update their
-                        # plan strip. Failed/denied calls never reach here with
-                        # data (see run_safe), so this is a committed update.
-                        if (
-                            tc.name == "todo_write"
-                            and not getattr(result, "is_error", False)
-                            and result.data is not None
-                        ):
-                            await callbacks.on_todo_update(
-                                list(result.data.get("todos") or [])
-                            )
                     return result
 
                 # on_tool_end fires inside _execute_one (incl. on cancellation),
                 # so there is no separate notify loop after gather.
                 results = await asyncio.gather(*[_execute_one(tc) for tc in tool_calls])
+
+                # The canonical whole list to emit as THIS step's single live
+                # todo_update — set from the last executed todo_write in input
+                # order below, None when the step has none (or all failed).
+                todo_update_payload: list[dict[str, Any]] | None = None
 
                 # Completion-audit trace: record executed (non-denied,
                 # non-error) write paths and bash calls — the only
@@ -1484,6 +1478,23 @@ class AgentLoop:
                         and result.data is not None
                     ):
                         self._log_append(tool.session_event, result.data)
+                        if tool.session_event == TODO_WRITE_EVENT:
+                            # Remember the batch's FINAL list so the live
+                            # todo_update below matches the log fold exactly.
+                            todo_update_payload = list(
+                                result.data.get("todos") or []
+                            )
+                # Live todo_update emission is deliberately OUTSIDE
+                # _execute_one: a step's tool calls run concurrently, so
+                # per-call emission could surface an older snapshot after a
+                # newer one (a todo marked completed re-appearing as
+                # in_progress when a parallel todo_write settles last), and
+                # the live order could disagree with the log's input-order
+                # fold. Emitting exactly once — the last executed todo_write
+                # in input order, the same winner the todo/write fold picks —
+                # keeps the frontends and the persisted log in lockstep.
+                if callbacks is not None and todo_update_payload is not None:
+                    await callbacks.on_todo_update(todo_update_payload)
 
                 # Append tool results to messages
                 appended: list[dict[str, Any]] = []
