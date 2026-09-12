@@ -583,6 +583,7 @@ class MCPManager:
                     description=tool.get("description", ""),
                     input_schema=tool.get("inputSchema", {}) or {"type": "object", "properties": {}},
                     risk_level=client.config.risk_level,
+                    cwd=self._cwd,
                 ))
 
     def _start_and_handshake(self, client: MCPClient) -> None:
@@ -621,12 +622,16 @@ class MCPToolWrapper(BaseTool):
         description: str,
         input_schema: dict[str, Any],
         risk_level: str = "write",
+        cwd: str | None = None,
     ):
         self._client = client
         self._tool_name = tool_name
         self._description = description
         self._input_schema = input_schema
         self._risk_level = risk_level
+        # _workdir feeds BaseTool.spill_cwd, so an oversized MCP result is
+        # spilled like a native one (None → inline truncation only).
+        self._workdir = cwd
 
     @property
     def name(self) -> str:

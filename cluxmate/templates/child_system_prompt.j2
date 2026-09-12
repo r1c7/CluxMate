@@ -16,6 +16,13 @@ You have access to these tools:
 - Working directory: {{ working_directory }}
 </environment>
 
+<tool_output>
+Tool output may be truncated: oversized results keep their beginning and end
+with the dropped middle marked, and the full text is saved under
+`.cluxmate/tmp-spill/` — use `read_file` (with offset/limit) or `grep` on that
+path when you need the omitted part.
+</tool_output>
+
 <rules>
 1. {% if subagent_type == "explore" %}
    You are a read-only agent. You MAY delegate further sub-tasks, but ONLY to

@@ -89,6 +89,15 @@ class TaskTool(BaseTool):
     def risk_level(self) -> str:
         return "write"
 
+    @property
+    def spill_cwd(self) -> str | None:
+        """Spill a long child report to the parent's workspace.
+
+        A subagent's report can exceed the inline cap; head/tail keeps its
+        trailing ``**Status**`` line and the full text stays readable.
+        """
+        return getattr(self._builder, "cwd", None)
+
     async def execute(
         self,
         subagent_type: str = "general-purpose",

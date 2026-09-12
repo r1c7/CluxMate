@@ -4,7 +4,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-# Hard limit on tool output to avoid blowing up context window
+from ._output import bound_output
+
+# Hard limit on tool output to avoid blowing up context window. Results above it
+# keep their head and tail; the full text is spilled to
+# <cwd>/.cluxmate/tmp-spill/ when the tool knows its working directory.
 MAX_OUTPUT_CHARS = 40_000
 
 
@@ -50,6 +54,16 @@ class BaseTool(ABC):
     #: complete post-call state, never a delta (see ``todo/write``).
     session_event: str | None = None
 
+    @property
+    def spill_cwd(self) -> str | None:
+        """Working directory for spill artifacts (None → inline truncation only).
+
+        Tools receive their workspace as ``_workdir`` or ``_cwd``; tools with no
+        workspace (web_search, web_fetch) leave this None and simply get the
+        bounded head/tail preview.
+        """
+        return getattr(self, "_workdir", None) or getattr(self, "_cwd", None)
+
     def result_data(self, args: dict[str, Any], output: str) -> dict[str, Any] | None:
         """Whole-value state payload for :attr:`session_event` (default: none).
 
@@ -65,13 +79,15 @@ class BaseTool(ABC):
         ...
 
     async def run_safe(self, tool_call_id: str, **kwargs) -> ToolResult:
-        """Run execute() with error handling and output truncation."""
+        """Run execute() with error handling and output bounding."""
         try:
             output = await self.execute(**kwargs)
             if len(output) > MAX_OUTPUT_CHARS:
-                output = (
-                    output[:MAX_OUTPUT_CHARS]
-                    + f"\n\n[Output truncated at {MAX_OUTPUT_CHARS} characters]"
+                output = bound_output(
+                    output,
+                    cwd=self.spill_cwd,
+                    tool_name=self.name,
+                    max_chars=MAX_OUTPUT_CHARS,
                 )
             return ToolResult(
                 tool_call_id=tool_call_id,

@@ -60,6 +60,9 @@ class GrepTool(BaseTool):
         skip_dirs = {
             ".git", "__pycache__", "node_modules", ".venv", "venv",
             ".tox", ".mypy_cache", ".pytest_cache", "dist", "build",
+            # Spilled tool output (see tools/_output.py) lives under
+            # <cwd>/.cluxmate/; never let a scratch copy pollute a search.
+            "tmp-spill",
         }
 
         results = []

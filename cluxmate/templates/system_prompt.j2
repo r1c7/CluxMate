@@ -105,5 +105,10 @@ claim.
 {% endif %}
 
 <tool_output>
-Tool output may be truncated. If you need more data, use offset/limit or grep to narrow down.
+Tool output may be truncated. Oversized results keep their beginning and end
+(the dropped middle is marked), and the full text is saved to a file under
+`.cluxmate/tmp-spill/` in the working directory — when a result names such a
+path, use `read_file` (with offset/limit) or `grep` on that path to recover the
+omitted part. When a result is merely too broad, narrow it with offset/limit or
+grep instead of re-running the command.
 </tool_output>

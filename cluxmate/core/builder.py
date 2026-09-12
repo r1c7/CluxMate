@@ -233,6 +233,11 @@ class AgentBuilder:
         self._retrieval_config: RetrievalConfig | None = None
         self._retrieval: RetrievalMemory | None = None
 
+    @property
+    def cwd(self) -> str:
+        """The session working directory this builder was constructed with."""
+        return self._cwd
+
     def with_default_tools(self) -> "AgentBuilder":
         self._include_default_tools = True
         return self
