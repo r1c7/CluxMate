@@ -143,6 +143,9 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._pending_categories: dict[str, frozenset[str]] = {}
         self._question_events: dict[str, threading.Event] = {}
         self._question_answers: dict[str, dict[str, Any]] = {}
+        # One outstanding question batch at a time (see ask_question). Created
+        # lazily so it binds to the turn's own event loop.
+        self._question_lock: asyncio.Lock | None = None
         self._cancelled = False
 
     def cancel(self):
@@ -202,25 +205,45 @@ class JsonRpcCallbacks(AgentCallbacks):
         event loop stays free for other tools / streamed text / cancel. Returns
         ``{"answers": [...]}``, or None when there is nothing to ask (an empty
         batch), and raises ``_CancelledError`` when the turn is cancelled.
+
+        Two guards keep the turn from parking on a question the user has no way
+        to answer:
+
+        * ONE batch is outstanding at a time. A step's tool calls execute
+          concurrently, but every front-end renders a single question batch (the
+          desktop keeps one ``pendingQuestion`` slot), so a model that splits its
+          questions across two calls would have the second card replace the first
+          and strand it. The lock makes the later batch wait its turn — the
+          serialization the approval gate gets for free by being prompted from
+          the loop rather than from the executor.
+        * The waiter is registered BEFORE the event is emitted: an answer that
+          lands while the event is being written would otherwise be stored in
+          ``_question_answers`` and never consumed.
         """
         if self._cancelled:
             raise _CancelledError()
         if not questions:
             return None
-        _write_dict({
-            "jsonrpc": "2.0", "method": "chat/stream",
-            "params": {
-                "type": "question", "call_id": call_id, "questions": questions,
-            },
-        })
-        evt = threading.Event()
-        self._question_events[call_id] = evt
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, evt.wait)
-        self._question_events.pop(call_id, None)
-        if self._cancelled:
-            raise _CancelledError()
-        return self._question_answers.pop(call_id, None)
+        lock = self._question_lock
+        if lock is None:
+            lock = self._question_lock = asyncio.Lock()
+        async with lock:
+            if self._cancelled:
+                raise _CancelledError()
+            evt = threading.Event()
+            self._question_events[call_id] = evt
+            _write_dict({
+                "jsonrpc": "2.0", "method": "chat/stream",
+                "params": {
+                    "type": "question", "call_id": call_id, "questions": questions,
+                },
+            })
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, evt.wait)
+            self._question_events.pop(call_id, None)
+            if self._cancelled:
+                raise _CancelledError()
+            return self._question_answers.pop(call_id, None)
 
     async def on_tool_start(
         self,
