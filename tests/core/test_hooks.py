@@ -449,7 +449,7 @@ class _StubChild:
     async def run(self, prompt, history=None, callbacks=None):
         if self._error is not None:
             raise RuntimeError(self._error)
-        return type("R", (), {"text": self._text, "cache_usage": {}, "out_tokens": 0})()
+        return type("R", (), {"text": self._text, "cache_usage": {}, "out_tokens": 0, "turns": 0})()
 
 
 class _StubBuilder:
@@ -483,7 +483,10 @@ async def test_subagent_stop_block_replaces_reply(tmp_path, monkeypatch):
         subagent_type="general-purpose", description="survey", prompt="do it",
     )
 
-    assert out == "hook says no"
+    # The result header (Task 2) frames the hook's replacement: block →
+    # status=blocked, and the hook's reason stays the reply body.
+    assert out.startswith("[subagent: general-purpose | status=blocked")
+    assert out.endswith("\n\nhook says no")
 
 
 @pytest.mark.asyncio
@@ -496,7 +499,8 @@ async def test_subagent_stop_feedback_appended_to_reply(tmp_path, monkeypatch):
         subagent_type="general-purpose", description="survey", prompt="do it",
     )
 
-    assert out == "SUB RESULT\n\n[SubagentStop hook context]\nHELLO_FROM_HOOK"
+    assert out.startswith("[subagent: general-purpose | status=")
+    assert out.endswith("SUB RESULT\n\n[SubagentStop hook context]\nHELLO_FROM_HOOK")
 
 
 @pytest.mark.asyncio
@@ -510,4 +514,5 @@ async def test_subagent_stop_fires_on_failure_path(tmp_path, monkeypatch):
         subagent_type="general-purpose", description="survey", prompt="do it",
     )
 
-    assert out == "hook says no"
+    assert out.startswith("[subagent: general-purpose | status=failed")
+    assert out.endswith("\n\nhook says no")

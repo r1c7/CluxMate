@@ -1100,7 +1100,7 @@ class AgentBuilder:
             sandbox=child._sandbox_state,
             hooks=child._hooks_manager(),
             cwd=self._cwd,
-            # Task 2: max_turns=profile.max_turns
+            max_turns=profile.max_turns,
         )
 
     def _make_child_log(

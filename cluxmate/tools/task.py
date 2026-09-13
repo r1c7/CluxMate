@@ -1,5 +1,7 @@
 """TaskTool — spawn subagents for independent work."""
 
+import re
+import time
 import uuid
 from typing import Any, TYPE_CHECKING
 
@@ -146,22 +148,34 @@ class TaskTool(BaseTool):
             child_persister = IncrementalPersister(store, child_id, child.session_log)
 
         try:
+            started = time.monotonic()
             result = await child.run(prompt, history=[], callbacks=child_cbs)
             text = result.text or "(subagent returned no output)"
             # Completion honesty gate: the child's own event log is the source
             # of truth for how its turn actually ended — its reply text alone
-            # may claim success. A non-completed end reason (aborted, max
-            # turns/tokens, error) is surfaced explicitly so the parent never
-            # treats a truncated/aborted child result as a clean completion.
+            # may claim success. The end kind drives the machine-readable
+            # header below, so the parent can't miss a truncated child.
             end_kind = self._child_end_kind(child)
-            if end_kind in self._ABNORMAL_END_KINDS:
-                text = (
-                    f"[Subagent did not complete normally ({end_kind}). "
-                    f"Treat its output as partial and do not rely on it as a "
-                    f"finished result.]\n\n{text}"
-                )
-            text = await self._run_subagent_stop_hook(
+            abnormal = end_kind in self._ABNORMAL_END_KINDS
+            status = _normalize_status(_reported_status(text), end_kind)
+            text, blocked = await self._run_subagent_stop_hook(
                 subagent_type, description, prompt, child_id, text, error=None,
+            )
+            if blocked:
+                status = "blocked"
+            text = (
+                _result_header(
+                    subagent_type,
+                    status,
+                    end_kind=end_kind if abnormal else None,
+                    turns=result.turns,
+                    max_turns=getattr(child, "max_turns", None),
+                    out_tokens=result.out_tokens,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    queued_ms=0,  # Task 3 replaces this with the measured wait
+                )
+                + "\n\n"
+                + text
             )
             if tracker is not None:
                 # Mirror the reload path's classification
@@ -182,9 +196,10 @@ class TaskTool(BaseTool):
             return text
         except Exception as e:
             msg = f"Subagent failed: {e}"
-            msg = await self._run_subagent_stop_hook(
+            msg, _ = await self._run_subagent_stop_hook(
                 subagent_type, description, prompt, child_id, msg, error=str(e),
             )
+            msg = _result_header(subagent_type, "failed") + "\n\n" + msg
             if tracker is not None:
                 await tracker.on_agent_end(child_id, "error", msg)
             return msg
@@ -204,20 +219,21 @@ class TaskTool(BaseTool):
         text: str,
         *,
         error: str | None,
-    ) -> str:
+    ) -> tuple[str, bool]:
         """Run SubagentStop hooks after a subagent settles and adjust the reply.
 
-        The subagent has already finished, so "block" cannot stop it — instead
-        the block reason REPLACES the subagent's reply in the parent's tool
-        result (the model is told the result was rejected). Feedback is appended
-        to the reply as extra context. Not run on cancellation: a cancelled
-        subagent (turn cancelled) propagates CancelledError, which is not caught
-        by ``except Exception`` above.
+        Returns ``(text, blocked)``. The subagent has already finished, so
+        "block" cannot stop it — instead the block reason REPLACES the
+        subagent's reply in the parent's tool result (the model is told the
+        result was rejected). Feedback is appended to the reply as extra
+        context. Not run on cancellation: a cancelled subagent (turn cancelled)
+        propagates CancelledError, which is not caught by ``except Exception``
+        above.
         """
         hooks_manager = getattr(self._builder, "_hooks_manager", None)
         hooks = hooks_manager() if hooks_manager is not None else None
         if hooks is None or not hooks.has_event("SubagentStop"):
-            return text
+            return text, False
         hr = await hooks.run_event(
             "SubagentStop",
             extra={
@@ -230,7 +246,69 @@ class TaskTool(BaseTool):
             },
         )
         if hr.blocked:
-            return hr.reason or "[SubagentStop hook blocked the subagent result]"
+            return hr.reason or "[SubagentStop hook blocked the subagent result]", True
         for fb in hr.feedback:
             text = f"{text}\n\n[SubagentStop hook context]\n{fb}"
-        return text
+        return text, False
+
+
+# The child prompt requires a `**Status**: ...` line; we parse it back instead
+# of trusting prose. Bounded scan: a status line buried 40 lines down is not a
+# status line.
+_STATUS_LINE_RE = re.compile(
+    r"^\s*\*\*Status\*\*\s*:\s*(success|partial|failed|blocked)\b", re.IGNORECASE
+)
+_STATUS_SCAN_LINES = 20
+
+
+def _reported_status(text: str) -> str | None:
+    """The child's own **Status** claim, if it made one."""
+    for line in (text or "").splitlines()[:_STATUS_SCAN_LINES]:
+        m = _STATUS_LINE_RE.match(line)
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def _normalize_status(reported: str | None, end_kind: str | None) -> str:
+    """Reconcile the child's claim with how its turn actually ended.
+
+    The child's own ``turn/end`` is authoritative: a child that claims success
+    but was cut off at max-turns is reported as partial. A child that already
+    admits a worse outcome keeps its word (more specific than ours).
+    """
+    if reported in ("partial", "failed", "blocked"):
+        return reported
+    if end_kind in TaskTool._ABNORMAL_END_KINDS:
+        return "partial"
+    return reported or "unknown"
+
+
+def _fmt_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _result_header(
+    slug: str,
+    status: str,
+    *,
+    end_kind: str | None = None,
+    turns: int | None = None,
+    max_turns: int | None = None,
+    out_tokens: int = 0,
+    elapsed_ms: int = 0,
+    queued_ms: int = 0,
+) -> str:
+    """One machine-readable line prepended to every subagent report."""
+    parts = [f"subagent: {slug}", f"status={status}"]
+    if end_kind:
+        parts.append(f"end={end_kind}")
+    if turns is not None:
+        parts.append(f"turns={turns}/{max_turns}" if max_turns else f"turns={turns}")
+    if out_tokens:
+        parts.append(f"out={_fmt_tokens(out_tokens)} tok")
+    if elapsed_ms > 0:
+        parts.append(f"{elapsed_ms / 1000:.0f}s")
+    if queued_ms > 50:
+        parts.append(f"wait={queued_ms / 1000:.1f}s")
+    return "[" + " | ".join(parts) + "]"
