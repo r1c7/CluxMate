@@ -314,15 +314,26 @@ class LSPClient:
                 encoding="utf-8",
                 errors="replace",
             )
-        result = self.request("initialize", {
-            "processId": os.getpid(),
-            "rootUri": _path_to_uri(self.root),
-            "capabilities": {
-                "general": {"positionEncodings": ["utf-8", "utf-16"]},
-                "textDocument": {"publishDiagnostics": {"versionSupport": True}},
-            },
-            "initializationOptions": self.spec.initialization_options,
-        }, retries=0)
+        try:
+            result = self.request("initialize", {
+                "processId": os.getpid(),
+                "rootUri": _path_to_uri(self.root),
+                "capabilities": {
+                    "general": {"positionEncodings": ["utf-8", "utf-16"]},
+                    "textDocument": {"publishDiagnostics": {"versionSupport": True}},
+                },
+                "initializationOptions": self.spec.initialization_options,
+            }, retries=0, timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            # A server that never answers initialize must not hold a write
+            # tool's result hostage: kill it and let the caller
+            # (auto_diagnostics / the explicit lsp ops) degrade to a
+            # best-effort empty result.
+            self._terminate()
+            raise RuntimeError(
+                f"language server \"{self.spec.command}\" did not answer "
+                f"initialize within {_HANDSHAKE_TIMEOUT_SECONDS}s"
+            ) from None
         caps = (result or {}).get("capabilities", {}) or {}
         enc = caps.get("positionEncoding")
         if enc in ("utf-8", "utf-16"):
@@ -380,15 +391,19 @@ class LSPClient:
         except Exception:
             pass
 
-    def request(self, method: str, params: dict, retries: int = 5) -> Any:
+    def request(
+        self, method: str, params: dict, retries: int = 5, timeout: float | None = None
+    ) -> Any:
         """Send a request, await the matching response, return its `result`.
 
         ContentModified (-32801) means the server is mid-reindex: retry a few
-        times with a short backoff before surfacing it.
+        times with a short backoff before surfacing it. ``timeout`` bounds the
+        wait for a response: a server that never answers raises TimeoutError
+        instead of blocking the caller forever.
         """
         delay = 0.4
         for attempt in range(retries + 1):
-            msg = self._send(method, params)
+            msg = self._send(method, params, timeout=timeout)
             if msg is None:
                 raise RuntimeError(f"{method}: language server exited")
             if "error" in msg:
@@ -400,13 +415,31 @@ class LSPClient:
             return msg.get("result")
         raise RuntimeError(f"{method}: language server still indexing")
 
-    def _send(self, method: str, params: dict) -> dict | None:
+    def _send(
+        self, method: str, params: dict, timeout: float | None = None
+    ) -> dict | None:
+        """Write a request and read until its response arrives.
+
+        ``timeout`` bounds the wait: a server that stays silent past the
+        deadline raises TimeoutError. Without it, a silent server blocked the
+        readline forever — the post-write diagnostics path hung a whole turn on
+        a broken pyright install (it starts but never answers initialize).
+        """
         req_id = self._next_request_id()
         req = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
         assert self._proc is not None and self._proc.stdin and self._proc.stdout
         with self._lock:
             self._write(req)
+            deadline = None if timeout is None else time.monotonic() + timeout
             while True:
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"{method}: language server did not respond within {timeout}s"
+                        )
+                    if not _pipe_readable(self._proc.stdout.fileno(), min(remaining, 0.5)):
+                        continue
                 msg = self._read()
                 if msg is None:
                     return None
@@ -529,6 +562,23 @@ class LSPClient:
             })
             self._docs[uri] = (version, st.st_size, st.st_mtime)
 
+    def _terminate(self) -> None:
+        """Best-effort terminate+reap of the server subprocess (handshake timeout)."""
+        if self._proc is None:
+            return
+        try:
+            if self._proc.poll() is None:
+                self._proc.terminate()
+        except OSError:
+            return
+        try:
+            self._proc.wait(timeout=2)
+        except Exception:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+
     def shutdown(self) -> None:
         """Kill subprocess. Idempotent; unblocks readline waiters by killing first."""
         if self._proc is not None:
@@ -553,6 +603,12 @@ _DIAGNOSTICS_DRAIN_SECONDS = 1.5
 # or not at all. Only ERROR items are reported, capped per file, and errors are
 # also what the cap counts (see _format_error_diagnostics).
 _AUTO_DIAGNOSTICS_DRAIN_SECONDS = 1.0
+
+# Initialize handshake budget. A healthy server answers in well under this; a
+# silent one (e.g. a broken pyright install) must not block a write tool's
+# result forever — the post-write diagnostics path has no user-visible cancel
+# to fall back on.
+_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 _AUTO_DIAGNOSTICS_MAX = 20
 # Ceiling for one auto-install attempt (npm/rustup can be slow); the install
 # runs synchronously inside the triggering tool call, which is why it is

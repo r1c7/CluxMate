@@ -130,3 +130,28 @@ def test_missing_severity_counts_as_error():
          "message": "no severity given"},
     ])
     assert "no severity given" in block
+
+
+def _silent_spec() -> ServerSpec:
+    # A "server" that starts but never writes a byte — what this machine's
+    # PATH pyright does. A real sleeping process keeps the test honest about
+    # the blocking readline path.
+    return _spec(command=sys.executable, args=["-c", "import time; time.sleep(120)"])
+
+
+def test_silent_server_times_out_instead_of_hanging(tmp_path, monkeypatch):
+    import time as _time
+
+    from cluxmate.core import lsp as lsp_mod
+
+    monkeypatch.setattr(lsp_mod, "_HANDSHAKE_TIMEOUT_SECONDS", 0.5)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    mgr = _manager(tmp_path, _silent_spec())
+    try:
+        started = _time.monotonic()
+        block = mgr.auto_diagnostics("a.py")
+        elapsed = _time.monotonic() - started
+    finally:
+        mgr.shutdown()
+    assert block == ""  # best-effort contract: a dead server degrades to quiet
+    assert elapsed < 3.0  # ... and it RETURNED, instead of hanging the turn
