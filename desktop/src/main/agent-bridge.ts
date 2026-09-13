@@ -3,7 +3,7 @@ import * as readline from 'readline'
 import { app } from 'electron'
 import { delimiter, join } from 'path'
 import { existsSync, readFileSync } from 'fs'
-import type { StreamEvent } from '../shared/types'
+import type { AgentTypeInfo, StreamEvent } from '../shared/types'
 
 // Prefer the cluxmate source bundled with the app (electron-builder.yml
 // extraResources → <resources>/cluxmate/) over whatever the user may have
@@ -279,6 +279,11 @@ export class AgentBridge {
   async reloadHooks(): Promise<{ hooks: { event: string; matcher: string | null; command: string; timeout: number }[] }> {
     const r = (await this.request('hooks/reload', {})) as { hooks?: { event: string; matcher: string | null; command: string; timeout: number }[] }
     return { hooks: r?.hooks ?? [] }
+  }
+
+  async getAgents(): Promise<{ agents: AgentTypeInfo[]; errors: { path: string; error: string }[] }> {
+    const r = (await this.request('agents/list', {})) as { agents?: AgentTypeInfo[]; errors?: { path: string; error: string }[] }
+    return { agents: r?.agents ?? [], errors: r?.errors ?? [] }
   }
 
   async notifyHooks(message: string): Promise<{ status: string }> {

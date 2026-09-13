@@ -1,6 +1,7 @@
 """Tests for builder wiring of TodoTool and the task_tracking prompt block."""
 
 from cluxmate.core.builder import AgentBuilder
+from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
 from cluxmate.tools.todo import TodoTool
 
 
@@ -35,7 +36,7 @@ def test_child_builder_has_no_todo_write(tmp_path):
     # The task list belongs to the root session the user watches; subagents
     # never register the tool (mirrors update_memory/skill gating).
     b = _builder(tmp_path)
-    child = b._child_builder("general-purpose", "c1")
+    child = b._child_builder(BUILTIN_AGENT_TYPES["general-purpose"], "c1")
     assert "todo_write" not in _names(child._get_tools())
 
 
@@ -52,6 +53,6 @@ def test_system_prompt_mentions_task_tracking_when_tool_present(tmp_path):
 def test_child_prompt_omits_task_tracking(tmp_path):
     # Children get no todo tool, so their prompt must not advertise the rules.
     b = _builder(tmp_path)
-    child = b._child_builder("general-purpose", "c1")
+    child = b._child_builder(BUILTIN_AGENT_TYPES["general-purpose"], "c1")
     prompt = child._render_system_prompt(child._get_tools())
     assert "<task_tracking>" not in prompt

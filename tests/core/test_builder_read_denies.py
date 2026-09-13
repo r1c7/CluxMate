@@ -1,6 +1,7 @@
 """Tests for builder wiring of the read-denylist store + sensitive template."""
 
 from cluxmate.core.builder import AgentBuilder
+from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
 from cluxmate.core.read_denies import ReadDenyStore
 
 
@@ -33,7 +34,7 @@ def test_child_builder_inherits_read_denies(tmp_path):
     store = ReadDenyStore(root=tmp_path)
     b = _builder(tmp_path)
     b.with_read_denies(store)
-    assert b._child_builder("explore", "child-1")._read_denies is store
+    assert b._child_builder(BUILTIN_AGENT_TYPES["explore"], "child-1")._read_denies is store
 
 
 def test_read_tool_fence_receives_protect_flag(tmp_path, monkeypatch):

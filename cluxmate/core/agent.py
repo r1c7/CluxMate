@@ -299,6 +299,10 @@ class AgentResult:
     ttft_ms: int | None = None
     gen_ms: int = 0
     out_tokens: int = 0
+    # Turns the loop actually ran this call (1 for a normal end_turn reply, up
+    # to max_turns when the cap stopped it). Reported to the parent in the
+    # subagent result header.
+    turns: int = 0
 
 
 class AgentLoop:
@@ -356,8 +360,12 @@ class AgentLoop:
         hooks: HookManager | None = None,
         cwd: str | None = None,
         retrieval: Any = None,
+        max_turns: int | None = None,
     ):
         self.model = model
+        # Per-instance turn budget. A subagent gets its type's budget; the root
+        # agent keeps the class default.
+        self.max_turns = max_turns or self.MAX_TURNS
         self.provider = provider
         self.tools = tools
         self.system_prompt = system_prompt
@@ -712,6 +720,10 @@ class AgentLoop:
         self.compacted_this_turn = False
         self._log_stage = None
         self._log_tool_meta = {}
+        # Per-run turn counter reported as AgentResult.turns. Reset on every
+        # run() — a subagent loop runs once, but the same AgentLoop may be
+        # re-entered, and each run() must count from zero.
+        self._turns_used = 0
         # A new user message is a fresh context: repetition across turns is not
         # a loop, so reset the doom-loop chain at the turn boundary.
         self._repeat_key = None
@@ -750,9 +762,11 @@ class AgentLoop:
         recall_text = self._recall(user_message)
 
         if log is None:
-            return await self._run_loop(
+            result = await self._run_loop(
                 user_message, history, callbacks, injections, recall=recall_text
             )
+            result.turns = self._turns_used
+            return result
 
         # The session log is the single source of truth: any caller-provided
         # history must match the log surface, or replay and the live request
@@ -798,9 +812,11 @@ class AgentLoop:
             )
         end_reason: dict[str, Any] = {"kind": "completed"}
         try:
-            return await self._run_loop(
+            result = await self._run_loop(
                 user_message, history, callbacks, injections, end_reason, recall_text
             )
+            result.turns = self._turns_used
+            return result
         except asyncio.CancelledError:
             end_reason["kind"] = "aborted"
             end_reason["reason"] = {"kind": "user"}
@@ -895,8 +911,9 @@ class AgentLoop:
             else None
         )
 
-        for turn in range(self.MAX_TURNS):
+        for turn in range(self.max_turns):
             step = turn + 1
+            self._turns_used = step
             # Compact before the call if we're over budget — inside the loop so a
             # single multi-tool turn can't overflow the window mid-turn.
             if ctx_tokens > limit:

@@ -36,6 +36,8 @@ const api: ElectronAPI = {
   openHooksSettings: (sessionId: string, scope: 'global' | 'project') =>
     ipcRenderer.invoke(IPC.HOOKS_OPEN, sessionId, scope),
 
+  getAgents: (sessionId: string) => ipcRenderer.invoke(IPC.AGENTS_GET, sessionId),
+
   getSandboxGrants: () => ipcRenderer.invoke(IPC.SANDBOX_GRANTS_GET),
   setSandboxGrants: (paths: string[]) => ipcRenderer.invoke(IPC.SANDBOX_GRANTS_SET, paths),
   getForbidRead: () => ipcRenderer.invoke(IPC.SANDBOX_FORBID_READ_GET),

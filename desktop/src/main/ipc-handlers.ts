@@ -3,7 +3,7 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { AgentBridge } from './agent-bridge'
 import { setAttention } from './attention'
@@ -871,6 +871,15 @@ export function registerIpcHandlers() {
     const bridge = bridges.get(sid)
     if (bridge && bridge.isRunning) return await bridge.getHooks()
     return { hooks: [] }
+  })
+
+  // Subagent type catalog, used by the `task` approval card. Bridge-only: a task
+  // approval can only come from a running turn, so the bridge is always warm
+  // here; a cold bridge degrades to "unknown type" in the card.
+  ipcMain.handle(IPC.AGENTS_GET, async (_, sid: string): Promise<AgentsConfig> => {
+    const bridge = bridges.get(sid)
+    if (bridge && bridge.isRunning) return await bridge.getAgents()
+    return { agents: [], errors: [] }
   })
 
   // Re-read settings.json in place (no session restart) and return the new list.

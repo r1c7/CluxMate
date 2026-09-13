@@ -27,6 +27,7 @@ from cluxmate.core.grants import GrantStore
 from cluxmate.core.read_denies import ReadDenyStore
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.permissions import PermissionPolicy
+from cluxmate.core.subagents import SubagentRegistry
 from cluxmate.core.session_log import (
     SessionHeader,
     SessionLog,
@@ -691,6 +692,8 @@ class JsonRpcServer:
         elif method in ("egress/config/set", "egress:config:set"):
             result = self._set_egress_config(params)
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": result})
+        elif method in ("agents/list", "agents:list"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._agents_snapshot(params)})
         elif method in ("chat/set_mode", "chat:set_mode"):
             self._set_mode(params.get("mode", "default"))
             if req_id is not None:
@@ -881,7 +884,7 @@ class JsonRpcServer:
                 }})
                 return
             self._session_start_feedback = hr.feedback
-        builder.with_subagent_types(["general-purpose", "explore"])
+        builder.with_subagents()
         builder.with_mode(mode)
         if model_name:
             builder.with_model(model_name)
@@ -1413,6 +1416,15 @@ class JsonRpcServer:
     def _egress_snapshot(self) -> dict[str, Any]:
         cfg = getattr(self, "_egress_config", None)
         return cfg.snapshot() if cfg is not None else {"mode": "shared"}
+
+    def _agents_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Subagent type catalog (builtin + user definitions).
+
+        Read-only and session-independent: it only reads two directories, so the
+        desktop can render a `task` approval card before initialize.
+        """
+        cwd = str(params.get("cwd") or self._cwd or os.getcwd())
+        return SubagentRegistry(cwd).snapshot()
 
     def _set_egress_config(self, params: dict[str, Any]) -> dict[str, Any]:
         """Replace the egress mode and rebuild the agent (the mode is baked

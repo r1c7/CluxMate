@@ -26,6 +26,7 @@ export const IPC = {
   HOOKS_RELOAD:       'hooks:reload',
   HOOKS_NOTIFY:       'hooks:notify',
   HOOKS_OPEN:         'hooks:open',
+  AGENTS_GET:         'agents:get',
 
   SANDBOX_GRANTS_GET: 'sandbox:grants-get',
   SANDBOX_GRANTS_SET: 'sandbox:grants-set',

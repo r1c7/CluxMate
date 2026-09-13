@@ -2,7 +2,8 @@
 
 import pytest
 
-from cluxmate.core.builder import AgentBuilder, SUBAGENT_PROFILES
+from cluxmate.core.builder import AgentBuilder
+from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
 from cluxmate.tools.lsp_tool import LspTool
 
 
@@ -59,14 +60,14 @@ def test_plan_mode_disables_auto_install(tmp_path):
 
 
 def test_subagent_profiles_include_lsp():
-    assert "lsp" in SUBAGENT_PROFILES["explore"]["tools"]
-    assert "lsp" in SUBAGENT_PROFILES["general-purpose"]["tools"]
+    assert "lsp" in BUILTIN_AGENT_TYPES["explore"].tools
+    assert "lsp" in BUILTIN_AGENT_TYPES["general-purpose"].tools
 
 
 def test_child_builder_inherits_lsp_manager(tmp_path):
     b = _builder(tmp_path)
     b._get_tools()
-    child = b._child_builder("explore", "child-1")
+    child = b._child_builder(BUILTIN_AGENT_TYPES["explore"], "child-1")
     assert child._lsp is b._lsp
 
 

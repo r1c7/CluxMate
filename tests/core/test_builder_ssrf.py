@@ -1,6 +1,7 @@
 """Tests for builder wiring of the shared SsrConfig into web tools."""
 
 from cluxmate.core.builder import AgentBuilder
+from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
 from cluxmate.core.ssrf_config import SsrConfig
 from cluxmate.tools.web_fetch import WebFetchTool
 from cluxmate.tools.web_search import WebSearchTool
@@ -41,5 +42,5 @@ def test_child_builder_inherits_ssrf_config(tmp_path):
     cfg = SsrConfig(path=tmp_path / "ssrf.json")
     b = _builder(tmp_path)
     b.with_ssrf(cfg)
-    child = b._child_builder("explore", "child-1")
+    child = b._child_builder(BUILTIN_AGENT_TYPES["explore"], "child-1")
     assert child._ssrf is cfg

@@ -1,5 +1,6 @@
 """AgentBuilder — fluent API for constructing AgentLoop instances."""
 
+import asyncio
 import os
 import platform
 import shutil
@@ -31,6 +32,7 @@ from cluxmate.tools.ask_user_question import AskUserQuestionTool
 from cluxmate.tools.todo import TodoTool
 from cluxmate.core.skills import SkillManager
 from cluxmate.core.memory import MemoryManager
+from cluxmate.core.subagents import AgentType, BUILTIN_AGENT_TYPES, SubagentRegistry
 from cluxmate.core.mcp import MCPManager
 from cluxmate.core.lsp import LSPManager
 from cluxmate.tools.lsp_tool import LspTool
@@ -51,18 +53,6 @@ from .agent import AgentLoop
 # Maximum subagent recursion depth. Root is depth 0; a subagent may spawn its
 # own subagents until this cap, at which point the `task` tool is withheld.
 MAX_SUBAGENT_DEPTH = 4
-
-# Subagent type definitions — each maps to a toolset and description
-SUBAGENT_PROFILES: dict[str, dict[str, Any]] = {
-    "general-purpose": {
-        "description": "General-purpose agent for any sub-task.",
-        "tools": ["bash", "read_file", "search_replace", "multi_edit", "write_file", "delete_file", "multi_write", "grep", "list_dir", "web_fetch", "web_search", "lsp"],
-    },
-    "explore": {
-        "description": "Read-only agent for code exploration and research.",
-        "tools": ["read_file", "grep", "list_dir", "web_fetch", "web_search", "lsp"],
-    },
-}
 
 
 # Mode-specific instruction blocks. These were conditional sections of the
@@ -152,7 +142,15 @@ class AgentBuilder:
         self._context_1m = False
         self._tools: list[BaseTool] = []
         self._include_default_tools = False
-        self._subagent_types: list[str] = []
+        # Subagent types. `_subagents_enabled` is set by with_subagents();
+        # `_subagent_allow` narrows which registry slugs THIS agent may spawn
+        # (None = every registry type; [] = none). Children get theirs from the
+        # spawning type's `subagents_mode` in _child_builder.
+        self._subagents_enabled = False
+        self._subagent_allow: list[str] | None = None
+        self._agents_registry: SubagentRegistry | None = None
+        # Per-event-loop subagent scheduler (core/subagent_scheduler.py).
+        self._scheduler: Any = None
         self._custom_prompt: str | None = None
         self._subagent_type: str | None = None
         self._task_description: str = ""
@@ -237,6 +235,43 @@ class AgentBuilder:
     def cwd(self) -> str:
         """The session working directory this builder was constructed with."""
         return self._cwd
+
+    def _agent_registry(self) -> SubagentRegistry:
+        """Lazy registry of subagent types for this cwd."""
+        if self._agents_registry is None:
+            self._agents_registry = SubagentRegistry(self._cwd)
+        return self._agents_registry
+
+    def agent_type(self, slug: str) -> AgentType | None:
+        return self._agent_registry().get(slug)
+
+    def allowed_subagent_slugs(self) -> list[str]:
+        """Registry slugs THIS agent may spawn, in catalog order."""
+        known = self._agent_registry().slugs()
+        if self._subagent_allow is None:
+            return known
+        allowed = set(self._subagent_allow)
+        return [s for s in known if s in allowed]
+
+    @property
+    def depth(self) -> int:
+        """0 = root agent, ≥1 = subagent (used for the nested-spawn rule)."""
+        return self._depth
+
+    def _scheduler_for_loop(self) -> "SubagentScheduler":
+        """The per-event-loop subagent scheduler (created lazily).
+
+        Bound to the RUNNING loop: every JSON-RPC turn runs on its own fresh
+        loop, and a primitive created on a dead loop cannot be awaited on a new
+        one. Children inherit the same reference — build_child always runs after
+        TaskTool acquired its slot, so a child never mints its own scheduler.
+        """
+        from cluxmate.core.subagent_scheduler import SubagentScheduler
+
+        loop = asyncio.get_running_loop()
+        if self._scheduler is None or self._scheduler.loop is not loop:
+            self._scheduler = SubagentScheduler(loop)
+        return self._scheduler
 
     def with_default_tools(self) -> "AgentBuilder":
         self._include_default_tools = True
@@ -396,8 +431,10 @@ class AgentBuilder:
     def _context_window(self) -> int:
         return 1_000_000 if self._context_1m else 128_000
 
-    def with_subagent_types(self, types: list[str]) -> "AgentBuilder":
-        self._subagent_types = types
+    def with_subagents(self, enabled: bool = True) -> "AgentBuilder":
+        """Enable the `task` tool. Which types exist comes from SubagentRegistry
+        (built-ins + ~/.cluxmate/agents + <cwd>/.cluxmate/agents)."""
+        self._subagents_enabled = enabled
         return self
 
     def with_agent_id(self, agent_id: str) -> "AgentBuilder":
@@ -535,7 +572,7 @@ class AgentBuilder:
             # Reuse the explore subagent's read-only set as the single source of
             # truth for "what counts as read-only".
             if self._mode == "plan":
-                readonly = set(SUBAGENT_PROFILES["explore"]["tools"]) | {"web_fetch", "web_search"}
+                readonly = set(BUILTIN_AGENT_TYPES["explore"].tools) | {"web_fetch", "web_search"}
                 tools.extend([
                     t for t in (
                         ReadFileTool(workdir=self._cwd, fence=read_fence),
@@ -624,10 +661,15 @@ class AgentBuilder:
                 WebSearchTool(ssrf=self._ssrf),
                 LspTool(manager=lsp),
             ])
-            # Add TaskTool only when subagent types are configured AND we have
-            # not hit the recursion cap. Withholding `task` at the cap is what
-            # stops runaway subagent nesting.
-            if self._subagent_types and self._depth < MAX_SUBAGENT_DEPTH:
+            # Add TaskTool only when subagents are enabled, this agent is
+            # actually allowed to spawn something, and we are below the
+            # recursion cap. `task` inside a type's tool list is what makes a
+            # child recurse (see _child_builder).
+            if (
+                self._subagents_enabled
+                and self.allowed_subagent_slugs()
+                and self._depth < MAX_SUBAGENT_DEPTH
+            ):
                 tools.append(TaskTool(builder=self))
             # use_skill only for the parent (depth 0) and only when enabled skills exist.
             # Subagents don't get skills this round (avoids scope creep).
@@ -949,13 +991,13 @@ class AgentBuilder:
             cwd=self._cwd,
         )
 
-    def _child_builder(self, subagent_type: str, agent_id: str) -> "AgentBuilder":
+    def _child_builder(self, profile: AgentType, agent_id: str) -> "AgentBuilder":
         """Construct the deeper AgentBuilder backing a subagent.
 
         The child carries depth+1, the same provider/model/cwd/tracker, and its
-        own agent_id. `general-purpose` children keep the subagent types so they
-        can recurse (still depth-gated in _get_tools); `explore` children recurse
-        only within their own type (`["explore"]`), keeping the chain read-only.
+        own agent_id. Recursion rights come from the type: `inherit` passes the
+        parent's allowlist through, `list` pins an explicit set (the built-in
+        explore stays read-only-only), `none` means no `task` tool at all.
         """
         child = AgentBuilder(self._cwd, self._provider)
         child._model = self._model
@@ -974,43 +1016,74 @@ class AgentBuilder:
         child._egress_proxy_allow = self._egress_proxy_allow
         child._hooks = self._hooks
         child._lsp = self._lsp
-        child._subagent_type = subagent_type
-        if subagent_type == "general-purpose":
-            child._subagent_types = list(self._subagent_types)
+        child._agents_registry = self._agents_registry
+        child._scheduler = self._scheduler
+        child._subagents_enabled = self._subagents_enabled
+        if profile.subagents_mode == "inherit":
+            child._subagent_allow = self._subagent_allow
+        elif profile.subagents_mode == "list":
+            child._subagent_allow = list(profile.subagents)
         else:
-            # explore recurses within its own type only: it gains the `task`
-            # tool (depth-gated), but the TaskTool allowlist forbids spawning
-            # general-purpose grandchildren, which would leak write access
-            # past the read-only gate.
-            child._subagent_types = ["explore"]
+            child._subagent_allow = []
         return child
 
-    def build_child(
-        self, subagent_type: str, task_description: str, agent_id: str = ""
-    ) -> "AgentLoop":
-        """Build a subagent AgentLoop with restricted tools and child prompt.
+    def _resolve_model(self, model_id: str) -> tuple[Any, str, bool] | None:
+        """(provider, model_name, context_1m) for a config model id, or None.
 
-        Mints a child SessionLog (origin="subagent", parentSession=<this agent's
-        session id>) and attaches it, so the subagent's turns are recorded and
-        persisted to its own <child_id>.jsonl (see _make_child_log).
+        Each subagent gets its OWN provider instance: two concurrent children
+        share nothing but the config entry, and provider client state is not
+        assumed safe to share across concurrent streams.
         """
-        profile = SUBAGENT_PROFILES.get(subagent_type, SUBAGENT_PROFILES["general-purpose"])
-        allowed_names = profile["tools"]
+        from cluxmate.core.config import ConfigManager
+        from cluxmate.core.providers.factory import build_provider
+        from cluxmate.core.reasoning import default_for
+
+        entry = ConfigManager().get_model(model_id)
+        if entry is None:
+            return None
+        provider = build_provider(entry)
+        provider.set_reasoning_effort(default_for(entry))
+        return provider, entry.get("model_name", ""), bool(entry.get("context_1m", False))
+
+    def build_child(
+        self,
+        subagent_type: str,
+        task_description: str,
+        agent_id: str = "",
+        *,
+        write_paths: list[str] | None = None,
+        queued_ms: int = 0,
+    ) -> "AgentLoop":
+        """Build a subagent AgentLoop with the type's tools, model and budget."""
+        profile = self.agent_type(subagent_type)
+        if profile is None:
+            raise ValueError(f"unknown subagent type: {subagent_type}")
+        allowed_names = set(profile.tools)
 
         child_id = agent_id or uuid.uuid4().hex
-        child = self._child_builder(subagent_type, child_id)
+        child = self._child_builder(profile, child_id)
         # Subagent logging: the child inherits the store but gets its OWN log/id
         # (never the parent's), so a grandchild links to THIS child, not the root.
-        child._session_log = self._make_child_log(subagent_type, child_id, task_description)
+        child._session_log = self._make_child_log(
+            subagent_type, child_id, task_description,
+            model=profile.model, write_paths=write_paths, queued_ms=queued_ms,
+        )
         child._session_id = child_id if child._session_log is not None else None
-        # The child's own toolset (may include a depth-gated `task` so both
-        # subagent types can recurse — general-purpose to either type,
-        # explore only to explore, enforced by TaskTool's allowlist).
         tools = child._get_tools()
-        # Keep only tools this profile permits; `task` is allowed through so
-        # children can recurse (general-purpose to either type, explore only
-        # to explore — the allowlist in TaskTool.execute is the gate).
-        child_tools = [t for t in tools if t.name in allowed_names or t.name == "task"]
+        # The type's tool list is the whole policy — `task` included, so a type
+        # without it can never recurse.
+        child_tools = [t for t in tools if t.name in allowed_names]
+
+        model_name = self._model
+        context_1m = self._context_1m
+        provider = self._provider
+        if profile.model != "inherit":
+            resolved = self._resolve_model(profile.model)
+            if resolved is not None:
+                provider, model_name, context_1m = resolved
+        child._model = model_name
+        child._provider = provider
+        child._context_1m = context_1m
 
         bridge = ToolBridge()
         for t in child_tools:
@@ -1025,23 +1098,35 @@ class AgentBuilder:
             os_name=os_name,
             shell_path=shell_path,
             working_directory=self._cwd,
+            agent_instructions=profile.instructions,
+            readonly=profile.readonly,
+            delegatable=", ".join(child.allowed_subagent_slugs()),
+            max_turns=profile.max_turns,
         )
 
         return AgentLoop(
-            model=self._model,
-            provider=self._provider,
+            model=model_name,
+            provider=provider,
             tools=bridge,
             system_prompt=system_prompt,
-            context_window=self._context_window(),
+            context_window=(1_000_000 if context_1m else 128_000),
             session_log=child._session_log,
             mode=self._mode,
             sandbox=child._sandbox_state,
             hooks=child._hooks_manager(),
             cwd=self._cwd,
+            max_turns=profile.max_turns,
         )
 
     def _make_child_log(
-        self, subagent_type: str, child_id: str, task_description: str
+        self,
+        subagent_type: str,
+        child_id: str,
+        task_description: str,
+        *,
+        model: str = "inherit",
+        write_paths: list[str] | None = None,
+        queued_ms: int = 0,
     ) -> "SessionLog | None":
         """Create (and persist the header of) a subagent's own SessionLog.
 
@@ -1078,6 +1163,9 @@ class AgentBuilder:
                     "description": task_description,
                     "depth": self._depth + 1,
                     "turn": self._session_log.turn_count,
+                    "model": model,
+                    "write_paths": list(write_paths or []),
+                    "queued_ms": queued_ms,
                 },
             )
         return SessionLog.create(header)
