@@ -64,7 +64,6 @@ PARENT_ONLY_TOOL_NAMES = frozenset({
 })
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_SUBAGENT_MODES = ("none", "inherit", "list")
 
 
 @dataclass(frozen=True)
@@ -221,7 +220,16 @@ class SubagentRegistry:
         types = dict(BUILTIN_AGENT_TYPES)
         errors: list[dict[str, str]] = []
         models = self._known_models()
-        slugs = set(types)
+        # Two passes, so a definition may reference ANY other slug regardless of
+        # filename sort order or which root it lives in (spec §2.1 puts no
+        # ordering precondition on `subagents: [slug, ...]`):
+        #   pass 1 collects every valid-slug file from both roots (global first,
+        #          project second — a later definition of the same slug wins);
+        #   pass 2 builds each type and validates references against the
+        #          built-ins PLUS all candidate slugs.
+        # Per-file isolation (spec §2.3): one unreadable/invalid file lands in
+        # `errors` and is dropped without affecting any other type.
+        candidates: dict[str, tuple[dict[str, Any], str, Path, str]] = {}
         for root, source in self._roots():
             d = root / "agents"
             if not d.is_dir():
@@ -235,19 +243,27 @@ class SubagentRegistry:
                     continue
                 try:
                     text = path.read_text(encoding="utf-8")[:65536]
-                except OSError as e:
+                except (OSError, ValueError) as e:
+                    # UnicodeDecodeError is a ValueError subclass; one non-UTF-8
+                    # file must not take the whole registry down with it.
                     errors.append({"path": str(path), "error": f"unreadable: {e}"})
                     continue
                 lines, body = split_frontmatter(text)
-                fields = parse_fields(lines)
-                atype, err = self._build_type(slug, fields, body, source, path, models, slugs)
-                if atype is None:
-                    err = err or "invalid definition"
-                    errors.append({"path": str(path), "error": err})
-                    print(f"[agents] dropped {path}: {err}", file=sys.stderr)
-                    continue
-                types[slug] = atype
-                slugs.add(slug)
+                candidates[slug] = (parse_fields(lines), body, path, source)
+        valid_slugs = set(types) | set(candidates)
+        for slug, (fields, body, path, source) in candidates.items():
+            try:
+                atype, err = self._build_type(
+                    slug, fields, body, source, path, models, valid_slugs
+                )
+            except Exception as e:  # defensive: one broken file never breaks others
+                atype, err = None, f"unexpected error: {e}"
+            if atype is None:
+                err = err or "invalid definition"
+                errors.append({"path": str(path), "error": err})
+                print(f"[agents] dropped {path}: {err}", file=sys.stderr)
+                continue
+            types[slug] = atype
         self._types = types
         self._errors = errors
 
@@ -279,7 +295,13 @@ class SubagentRegistry:
             return None, f"max_turns must be an integer (got {max_turns_raw!r})"
         if max_turns <= 0:
             return None, f"max_turns must be positive (got {max_turns})"
-        max_turns = min(max_turns, MAX_AGENT_TURNS)
+        if max_turns > MAX_AGENT_TURNS:
+            # spec §2.1: over the cap → clamp to 150 AND log a warning.
+            max_turns = MAX_AGENT_TURNS
+            print(
+                f"[agents] {slug}: max_turns clamped to {MAX_AGENT_TURNS}",
+                file=sys.stderr,
+            )
         mode, subs = "none", ()
         subs_raw = _as_list(fields.get("subagents"))
         if len(subs_raw) == 1 and subs_raw[0] in ("none", "inherit"):

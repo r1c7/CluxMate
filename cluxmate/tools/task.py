@@ -50,12 +50,35 @@ class TaskTool(BaseTool):
             "Launch a subagent to handle a specific sub-task independently. "
             "Use this for clearly independent work that would benefit from "
             "a separate context.\n\n"
+            "Available subagent types (each on its own line with description, "
+            "tool set and model):\n"
+            f"{self._type_catalog()}\n\n"
             "Parameters:\n"
-            "- subagent_type: 'general-purpose' (read+write+execute) or "
-            "'explore' (read-only research)\n"
+            "- subagent_type: one of the types listed above\n"
             "- description: A short summary of the task\n"
-            "- prompt: The detailed task instructions for the subagent"
+            "- prompt: The detailed task instructions for the subagent\n"
+            "- write_paths: Optional. Workspace files/directories this subagent "
+            "will write; omitted it claims the whole workspace and serializes "
+            "against every other writing subagent"
         )
+
+    def _type_catalog(self) -> str:
+        """One line per spawnable type (spec §2.7), in deterministic catalog
+        order: ``- <slug>: <description> (tools: …; model: inherit|id)``."""
+        allowed = (
+            self._builder.allowed_subagent_slugs()
+            or ["general-purpose", "explore"]
+        )
+        lines = []
+        for slug in allowed:
+            atype = self._builder.agent_type(slug)
+            if atype is None:
+                continue
+            lines.append(
+                f"- {slug}: {atype.description} "
+                f"(tools: {', '.join(atype.tools)}; model: {atype.model})"
+            )
+        return "\n".join(lines) if lines else ", ".join(allowed)
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -73,9 +96,7 @@ class TaskTool(BaseTool):
             "properties": {
                 "subagent_type": {
                     "type": "string",
-                    "description": (
-                        f"Type of subagent: {', '.join(allowed)}."
-                    ),
+                    "description": f"Type of subagent:\n{self._type_catalog()}",
                     "enum": allowed,
                 },
                 "description": {
@@ -122,8 +143,20 @@ class TaskTool(BaseTool):
         if profile is None or profile.readonly:
             return frozenset(), []
         cwd = getattr(self._builder, "cwd", None) or os.getcwd()
+        # Type guard: the model can hand over anything despite the array schema.
+        # A non-list counts as "not declared" instead of list("src") exploding
+        # into single-character paths.
+        if not isinstance(write_paths, list):
+            write_paths = None
         if write_paths:
-            return normalize_claim(cwd, list(write_paths))
+            claim, dropped = normalize_claim(cwd, list(write_paths))
+            if not claim:
+                # EVERY declared entry landed outside the workspace. An empty
+                # claim would read as read-only (no serialization at all), which
+                # silently buys MORE parallelism than declaring nothing — fall
+                # back to the conservative whole-workspace claim instead.
+                return workspace_claim(cwd), dropped
+            return claim, dropped
         return workspace_claim(cwd), []
 
     async def execute(
@@ -133,6 +166,10 @@ class TaskTool(BaseTool):
         prompt: str = "",
         write_paths: list[str] | None = None,
     ) -> str:
+        # Schema is an array, but the model can pass anything; a non-list is
+        # treated as "not declared" (a bare string must not become char paths).
+        if not isinstance(write_paths, list):
+            write_paths = None
         # Allowlist gate: an agent may only spawn the subagent types it was
         # configured with. In particular, `explore` children only carry
         # ["explore"] (see _child_builder), so they cannot request a
@@ -155,6 +192,7 @@ class TaskTool(BaseTool):
         claim, dropped = self._claim_for(profile, write_paths)
         scheduler = self._builder._scheduler_for_loop()
         wait_start = time.monotonic()
+        ticket: Any = None
         ticket = await scheduler.acquire(claim, nested=self._nested(), slug=subagent_type)
         queued_ms = int((time.monotonic() - wait_start) * 1000)
         if ticket is None:
@@ -164,42 +202,41 @@ class TaskTool(BaseTool):
                 "slot and deadlock). Finish the current sub-task yourself, or "
                 "reduce parallelism."
             )
-        if dropped:
-            prompt = (
-                "[note: write_paths entries outside the workspace were ignored: "
-                f"{', '.join(dropped)}]\n\n{prompt}"
-            )
         child_id = uuid.uuid4().hex
         tracker = getattr(self._builder, "_tracker", None)
         parent_id = getattr(self._builder, "_agent_id", "root")
         depth = getattr(self._builder, "_depth", 0) + 1
-
-        if tracker is not None:
-            await tracker.on_agent_start(
-                child_id, parent_id, subagent_type, description, depth, prompt
-            )
-
-        child = self._builder.build_child(
-            subagent_type, description, child_id,
-            write_paths=list(write_paths or []), queued_ms=queued_ms,
-        )
-        # Scope callbacks to this child so its tool/text events are tagged with
-        # child_id. Subagents run autonomously (auto-approve) — their tool calls
-        # stream for the tree but never prompt the user.
-        child_cbs = (
-            tracker.scoped(child_id, auto_approve=True)
-            if tracker is not None
-            else None
-        )
-        # Persist the subagent's own event log incrementally (its header was
-        # already written by build_child), so a crash mid-subagent leaves the
-        # partial trace on disk instead of losing it until the finally below.
-        store = getattr(self._builder, "_log_store", None)
         child_persister = None
-        if child.session_log is not None and store is not None:
-            child_persister = IncrementalPersister(store, child_id, child.session_log)
-
         try:
+            # Everything from here on runs inside the try so the finally below
+            # frees the scheduler slot on EVERY path — success, tool error,
+            # cancel, or an on_agent_start/build_child failure.
+            if tracker is not None:
+                await tracker.on_agent_start(
+                    child_id, parent_id, subagent_type, description, depth, prompt
+                )
+
+            child = self._builder.build_child(
+                subagent_type, description, child_id,
+                write_paths=list(write_paths or []), queued_ms=queued_ms,
+            )
+            # Scope callbacks to this child so its tool/text events are tagged with
+            # child_id. Subagents run autonomously (auto-approve) — their tool calls
+            # stream for the tree but never prompt the user.
+            child_cbs = (
+                tracker.scoped(child_id, auto_approve=True)
+                if tracker is not None
+                else None
+            )
+            # Persist the subagent's own event log incrementally (its header was
+            # already written by build_child), so a crash mid-subagent leaves the
+            # partial trace on disk instead of losing it until the finally below.
+            store = getattr(self._builder, "_log_store", None)
+            if child.session_log is not None and store is not None:
+                child_persister = IncrementalPersister(
+                    store, child_id, child.session_log
+                )
+
             started = time.monotonic()
             result = await child.run(prompt, history=[], callbacks=child_cbs)
             text = result.text or "(subagent returned no output)"
@@ -215,20 +252,27 @@ class TaskTool(BaseTool):
             )
             if blocked:
                 status = "blocked"
-            text = (
-                _result_header(
-                    subagent_type,
-                    status,
-                    end_kind=end_kind if abnormal else None,
-                    turns=result.turns,
-                    max_turns=getattr(child, "max_turns", None),
-                    out_tokens=result.out_tokens,
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    queued_ms=queued_ms,
-                )
-                + "\n\n"
-                + text
+            header = _result_header(
+                subagent_type,
+                status,
+                end_kind=end_kind if abnormal else None,
+                turns=result.turns,
+                max_turns=getattr(child, "max_turns", None),
+                out_tokens=result.out_tokens,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                queued_ms=queued_ms,
             )
+            parts = [header]
+            if dropped:
+                # Tell the PARENT (which declared the paths) which entries were
+                # ignored — the child prompt never mentions claims (spec §3.2:
+                # "dropped ... and surfaced in the tool result").
+                parts.append(
+                    "[note: write_paths entries outside the workspace were "
+                    f"ignored: {', '.join(dropped)}]"
+                )
+            parts += ["", text]
+            text = "\n".join(parts)
             if tracker is not None:
                 # Mirror the reload path's classification
                 # (session_log_store.py: "done" for completed/max-tokens/
@@ -251,14 +295,18 @@ class TaskTool(BaseTool):
             msg, _ = await self._run_subagent_stop_hook(
                 subagent_type, description, prompt, child_id, msg, error=str(e),
             )
-            msg = _result_header(subagent_type, "failed") + "\n\n" + msg
+            # spec §4.1: the error text rides INSIDE the header brackets.
+            msg = (
+                _result_header(subagent_type, "failed", note=str(e)) + "\n\n" + msg
+            )
             if tracker is not None:
                 await tracker.on_agent_end(child_id, "error", msg)
             return msg
         finally:
             # Free the scheduler slot on every path — success, tool error,
             # cancel — so a cancelled task call never leaks a claim.
-            scheduler.release(ticket)
+            if ticket is not None:
+                scheduler.release(ticket)
             # Catch-up flush on every path — success, tool error, cancel — then
             # detach the observer so the (now-finished) child log stops flushing.
             if child_persister is not None:
@@ -308,7 +356,7 @@ class TaskTool(BaseTool):
 
 
 # The child prompt requires a `**Status**: ...` line; we parse it back instead
-# of trusting prose. Bounded scan: a status line buried 40 lines down is not a
+# of trusting prose. Bounded scan: a status line buried 20 lines down is not a
 # status line.
 _STATUS_LINE_RE = re.compile(
     r"^\s*\*\*Status\*\*\s*:\s*(success|partial|failed|blocked)\b", re.IGNORECASE
@@ -353,6 +401,7 @@ def _result_header(
     out_tokens: int = 0,
     elapsed_ms: int = 0,
     queued_ms: int = 0,
+    note: str | None = None,
 ) -> str:
     """One machine-readable line prepended to every subagent report."""
     parts = [f"subagent: {slug}", f"status={status}"]
@@ -366,4 +415,6 @@ def _result_header(
         parts.append(f"{elapsed_ms / 1000:.0f}s")
     if queued_ms > 50:
         parts.append(f"wait={queued_ms / 1000:.1f}s")
+    if note:
+        parts.append(note)
     return "[" + " | ".join(parts) + "]"

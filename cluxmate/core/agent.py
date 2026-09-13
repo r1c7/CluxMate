@@ -366,7 +366,6 @@ class AgentLoop:
         # Per-instance turn budget. A subagent gets its type's budget; the root
         # agent keeps the class default.
         self.max_turns = max_turns or self.MAX_TURNS
-        self._turns_used = 0
         self.provider = provider
         self.tools = tools
         self.system_prompt = system_prompt
@@ -418,7 +417,6 @@ class AgentLoop:
         # Compactions discarded this turn because the surface moved while the
         # summarizer ran; reported in turn/end.reason for the audit trail.
         self._compaction_stale_retries = 0
-        self._turns_used = 0
 
     # ── session-log helpers ────────────────────────────────────────────────
 
@@ -722,6 +720,10 @@ class AgentLoop:
         self.compacted_this_turn = False
         self._log_stage = None
         self._log_tool_meta = {}
+        # Per-run turn counter reported as AgentResult.turns. Reset on every
+        # run() — a subagent loop runs once, but the same AgentLoop may be
+        # re-entered, and each run() must count from zero.
+        self._turns_used = 0
         # A new user message is a fresh context: repetition across turns is not
         # a loop, so reset the doom-loop chain at the turn boundary.
         self._repeat_key = None

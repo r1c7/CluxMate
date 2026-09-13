@@ -156,6 +156,51 @@ def test_claude_agents_dir_is_not_read(tmp_path, monkeypatch):
     assert "sneaky" not in _reg(tmp_path).types()
 
 
+def test_forward_reference_across_sort_order_loads(tmp_path, monkeypatch):
+    """alpha.md referencing zeta.md works regardless of filename sort order."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    (tmp_path / "home").mkdir()
+    _write_agent(tmp_path, "zeta", "---\ndescription: z\n---\n")
+    _write_agent(tmp_path, "alpha", (
+        "---\ndescription: a\ntools: [read_file, task]\nsubagents: [zeta]\n---\n"
+    ))
+    types = _reg(tmp_path).types()
+    assert "alpha" in types and "zeta" in types
+    assert types["alpha"].subagents_mode == "list"
+    assert types["alpha"].subagents == ("zeta",)
+
+
+def test_global_definition_can_reference_project_slug(tmp_path, monkeypatch):
+    """A global file may reference a slug defined only in the project root."""
+    home = tmp_path / "home"
+    (home / ".cluxmate" / "agents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    (home / ".cluxmate" / "agents" / "boss.md").write_text(
+        "---\ndescription: b\ntools: [read_file, task]\nsubagents: [helper]\n---\n",
+        encoding="utf-8",
+    )
+    _write_agent(tmp_path, "helper", "---\ndescription: h\n---\n")
+    types = _reg(tmp_path, home).types()
+    assert "boss" in types and "helper" in types
+    assert types["boss"].subagents == ("helper",)
+    assert types["boss"].source == "global"
+
+
+def test_non_utf8_file_is_dropped_in_isolation(tmp_path, monkeypatch):
+    """An arbitrary-bytes .md lands in errors() and must not take down the
+    registry — every other valid type still loads."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    (tmp_path / "home").mkdir()
+    d = tmp_path / ".cluxmate" / "agents"
+    d.mkdir(parents=True)
+    (d / "gbk.md").write_bytes(b"---\ndescription: \xff\xfe\n---\n")
+    _write_agent(tmp_path, "ok", "---\ndescription: fine\n---\n")
+    reg = _reg(tmp_path)
+    types = reg.types()  # must not raise
+    assert "ok" in types and "gbk" not in types
+    assert any("unreadable" in e["error"] for e in reg.errors())
+
+
 def test_new_file_seen_without_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     (tmp_path / "home").mkdir()

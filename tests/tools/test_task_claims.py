@@ -47,6 +47,27 @@ def test_read_only_type_never_claims(tmp_path):
     assert claim == frozenset()
 
 
+def test_all_dropped_write_paths_fall_back_to_workspace_claim(tmp_path):
+    """Every declared entry outside the workspace: the claim falls back to the
+    whole workspace instead of empty (an empty claim would read as read-only
+    and skip serialization entirely — a useless declaration must not buy MORE
+    parallelism than no declaration at all)."""
+    tool = TaskTool(_Builder(str(tmp_path)))
+    claim, dropped = tool._claim_for(
+        BUILTIN_AGENT_TYPES["general-purpose"], ["../downloads", "../../tmp"]
+    )
+    assert claim == frozenset({tmp_path.resolve()})
+    assert dropped == ["../downloads", "../../tmp"]
+
+
+def test_non_list_write_paths_treated_as_not_declared(tmp_path):
+    """A model passing a string (schema violation) must not become char paths."""
+    tool = TaskTool(_Builder(str(tmp_path)))
+    claim, dropped = tool._claim_for(BUILTIN_AGENT_TYPES["general-purpose"], "src")
+    assert claim == frozenset({tmp_path.resolve()})
+    assert dropped == []
+
+
 def test_nested_flag_follows_builder_depth(tmp_path):
     assert TaskTool(_Builder(str(tmp_path), depth=0))._nested() is False
     assert TaskTool(_Builder(str(tmp_path), depth=1))._nested() is True

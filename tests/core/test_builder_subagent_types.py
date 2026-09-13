@@ -94,7 +94,12 @@ def test_task_tool_lists_registry_types(tmp_path, monkeypatch):
     tool = next(t for t in b._get_tools() if t.name == "task")
     enum = tool.input_schema["properties"]["subagent_type"]["enum"]
     assert enum == ["general-purpose", "explore", "reviewer"]
-    # (the per-type catalog text lands on the schema in Task 3)
+    # spec §2.7: the per-type catalog (one line per type: description, tools,
+    # model) lands on the schema, and the tool-level description carries it.
+    assert "review" in tool.description
+    desc = tool.input_schema["properties"]["subagent_type"]["description"]
+    assert "- reviewer: review (tools: " in desc and "model: inherit" in desc
+    assert "- general-purpose: " in desc and "- explore: " in desc
 
 
 def test_builtin_behavior_unchanged(tmp_path, monkeypatch):
