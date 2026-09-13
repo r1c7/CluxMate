@@ -109,3 +109,12 @@ def test_no_subagents_flag_means_no_task_tool(tmp_path, monkeypatch):
     _home(monkeypatch, tmp_path)
     b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools()
     assert "task" not in {t.name for t in b._get_tools()}
+
+
+@pytest.mark.asyncio
+async def test_scheduler_is_shared_with_children(tmp_path, monkeypatch):
+    _home(monkeypatch, tmp_path)
+    b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
+    s = b._scheduler_for_loop()
+    child_builder = b._child_builder(b.agent_type("explore"), "c1")
+    assert child_builder._scheduler is s

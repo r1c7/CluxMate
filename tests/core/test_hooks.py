@@ -466,10 +466,19 @@ class _StubBuilder:
     def allowed_subagent_slugs(self):
         return ["general-purpose", "explore"]
 
+    def agent_type(self, slug):
+        from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
+        return BUILTIN_AGENT_TYPES[slug]
+
+    def _scheduler_for_loop(self):
+        import asyncio
+        from cluxmate.core.subagent_scheduler import SubagentScheduler
+        return SubagentScheduler(asyncio.get_running_loop())
+
     def _hooks_manager(self):
         return self._hooks
 
-    def build_child(self, subagent_type, description, child_id):
+    def build_child(self, subagent_type, description, child_id, **kwargs):
         return _StubChild(error=self._child_error)
 
 

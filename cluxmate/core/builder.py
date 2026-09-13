@@ -258,6 +258,21 @@ class AgentBuilder:
         """0 = root agent, ≥1 = subagent (used for the nested-spawn rule)."""
         return self._depth
 
+    def _scheduler_for_loop(self) -> "SubagentScheduler":
+        """The per-event-loop subagent scheduler (created lazily).
+
+        Bound to the RUNNING loop: every JSON-RPC turn runs on its own fresh
+        loop, and a primitive created on a dead loop cannot be awaited on a new
+        one. Children inherit the same reference — build_child always runs after
+        TaskTool acquired its slot, so a child never mints its own scheduler.
+        """
+        from cluxmate.core.subagent_scheduler import SubagentScheduler
+
+        loop = asyncio.get_running_loop()
+        if self._scheduler is None or self._scheduler.loop is not loop:
+            self._scheduler = SubagentScheduler(loop)
+        return self._scheduler
+
     def with_default_tools(self) -> "AgentBuilder":
         self._include_default_tools = True
         return self

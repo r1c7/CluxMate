@@ -493,8 +493,8 @@ async def test_main_agent_delegates_to_child_subagent():
     # Monkey-patch build_child to use child_provider
     original_build_child = builder.build_child
 
-    def patched_build_child(subagent_type, task_description, agent_id=""):
-        child = original_build_child(subagent_type, task_description, agent_id)
+    def patched_build_child(subagent_type, task_description, agent_id="", **kwargs):
+        child = original_build_child(subagent_type, task_description, agent_id, **kwargs)
         # Replace child's provider with our controlled one
         child.provider = child_provider
         return child
@@ -604,7 +604,7 @@ async def test_child_subagent_reports_failure():
     builder.with_subagents()
 
     original = builder.build_child
-    builder.build_child = lambda t, d, aid="": _inject_child(original(t, d, aid), ChildProvider())
+    builder.build_child = lambda t, d, aid="", **kw: _inject_child(original(t, d, aid, **kw), ChildProvider())
 
     agent = builder.build()
     result = await agent.run("Read the config file")
@@ -1107,8 +1107,8 @@ async def test_subagent_text_streams_through_scoped_callbacks():
 
     original = builder.build_child
 
-    def patched(subagent_type, task_description, agent_id=""):
-        child = original(subagent_type, task_description, agent_id)
+    def patched(subagent_type, task_description, agent_id="", **kwargs):
+        child = original(subagent_type, task_description, agent_id, **kwargs)
         child.provider = _StreamingChildProvider()
         return child
 

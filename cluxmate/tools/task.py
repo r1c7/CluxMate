@@ -1,11 +1,14 @@
 """TaskTool — spawn subagents for independent work."""
 
+import os
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from cluxmate.core.session_log_store import IncrementalPersister
+from cluxmate.core.subagent_scheduler import normalize_claim, workspace_claim
 
 from .base import BaseTool
 
@@ -83,6 +86,16 @@ class TaskTool(BaseTool):
                     "type": "string",
                     "description": "Detailed task instructions for the subagent.",
                 },
+                "write_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional. Files or directories (relative to the workspace) this "
+                        "subagent will write. If you omit it, the subagent claims the WHOLE "
+                        "workspace and is serialized against every other writing subagent — "
+                        "declare disjoint paths when you want two writers to run in parallel."
+                    ),
+                },
             },
             "required": ["subagent_type", "description", "prompt"],
         }
@@ -100,11 +113,25 @@ class TaskTool(BaseTool):
         """
         return getattr(self._builder, "cwd", None)
 
+    def _nested(self) -> bool:
+        """A spawn issued BY a subagent (depth ≥ 1) fails fast when full."""
+        return getattr(self._builder, "depth", 0) > 0
+
+    def _claim_for(self, profile, write_paths):
+        """(claim, dropped) for this spawn — read-only types never claim."""
+        if profile is None or profile.readonly:
+            return frozenset(), []
+        cwd = getattr(self._builder, "cwd", None) or os.getcwd()
+        if write_paths:
+            return normalize_claim(cwd, list(write_paths))
+        return workspace_claim(cwd), []
+
     async def execute(
         self,
         subagent_type: str = "general-purpose",
         description: str = "",
         prompt: str = "",
+        write_paths: list[str] | None = None,
     ) -> str:
         # Allowlist gate: an agent may only spawn the subagent types it was
         # configured with. In particular, `explore` children only carry
@@ -120,6 +147,28 @@ class TaskTool(BaseTool):
                 f"agent (allowed: {allowed}). Use one of the permitted types "
                 f"or complete the work yourself."
             )
+        # Admission control (core/subagent_scheduler.py): take a slot BEFORE
+        # building the child so the child builder inherits this loop's
+        # scheduler. Read-only types never claim; a writing type that declares
+        # nothing claims the whole workspace (parallel writers serialize).
+        profile = self._builder.agent_type(subagent_type)
+        claim, dropped = self._claim_for(profile, write_paths)
+        scheduler = self._builder._scheduler_for_loop()
+        wait_start = time.monotonic()
+        ticket = await scheduler.acquire(claim, nested=self._nested(), slug=subagent_type)
+        queued_ms = int((time.monotonic() - wait_start) * 1000)
+        if ticket is None:
+            return (
+                "Subagent concurrency is full and this spawn is nested, so it was "
+                "refused instead of queued (a queued child would hold its parent's "
+                "slot and deadlock). Finish the current sub-task yourself, or "
+                "reduce parallelism."
+            )
+        if dropped:
+            prompt = (
+                "[note: write_paths entries outside the workspace were ignored: "
+                f"{', '.join(dropped)}]\n\n{prompt}"
+            )
         child_id = uuid.uuid4().hex
         tracker = getattr(self._builder, "_tracker", None)
         parent_id = getattr(self._builder, "_agent_id", "root")
@@ -130,7 +179,10 @@ class TaskTool(BaseTool):
                 child_id, parent_id, subagent_type, description, depth, prompt
             )
 
-        child = self._builder.build_child(subagent_type, description, child_id)
+        child = self._builder.build_child(
+            subagent_type, description, child_id,
+            write_paths=list(write_paths or []), queued_ms=queued_ms,
+        )
         # Scope callbacks to this child so its tool/text events are tagged with
         # child_id. Subagents run autonomously (auto-approve) — their tool calls
         # stream for the tree but never prompt the user.
@@ -172,7 +224,7 @@ class TaskTool(BaseTool):
                     max_turns=getattr(child, "max_turns", None),
                     out_tokens=result.out_tokens,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
-                    queued_ms=0,  # Task 3 replaces this with the measured wait
+                    queued_ms=queued_ms,
                 )
                 + "\n\n"
                 + text
@@ -204,6 +256,9 @@ class TaskTool(BaseTool):
                 await tracker.on_agent_end(child_id, "error", msg)
             return msg
         finally:
+            # Free the scheduler slot on every path — success, tool error,
+            # cancel — so a cancelled task call never leaks a claim.
+            scheduler.release(ticket)
             # Catch-up flush on every path — success, tool error, cancel — then
             # detach the observer so the (now-finished) child log stops flushing.
             if child_persister is not None:
