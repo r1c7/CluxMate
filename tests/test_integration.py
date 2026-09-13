@@ -10,6 +10,7 @@ from cluxmate.core.agent import (
     AgentResult,
 )
 from cluxmate.core.builder import AgentBuilder
+from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
 from cluxmate.core.providers.base import LLMProvider, LLMResponse, ToolCall
 from cluxmate.core.session_log import (
     SessionHeader,
@@ -487,7 +488,7 @@ async def test_main_agent_delegates_to_child_subagent():
 
     builder = AgentBuilder(cwd, main_provider)
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
 
     # Monkey-patch build_child to use child_provider
     original_build_child = builder.build_child
@@ -600,7 +601,7 @@ async def test_child_subagent_reports_failure():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, MainProvider())
     builder.with_default_tools()
-    builder.with_subagent_types(["explore"])
+    builder.with_subagents()
 
     original = builder.build_child
     builder.build_child = lambda t, d, aid="": _inject_child(original(t, d, aid), ChildProvider())
@@ -622,7 +623,7 @@ def test_plan_mode_hard_isolates_to_readonly_tools():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, FakeProvider([]))
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
     builder.with_mode("plan")
 
     names = {t.name for t in builder._get_tools()}
@@ -642,7 +643,7 @@ def test_plan_mode_includes_ask_user_question():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, FakeProvider([]))
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
     builder.with_mode("plan")
 
     names = {t.name for t in builder._get_tools()}
@@ -656,9 +657,9 @@ def test_subagent_has_no_ask_user_question():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, FakeProvider([]))
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
 
-    child = builder._child_builder("general-purpose", "c1")
+    child = builder._child_builder(BUILTIN_AGENT_TYPES["general-purpose"], "c1")
     names = {t.name for t in child._get_tools()}
     assert "ask_user_question" not in names
 
@@ -670,7 +671,7 @@ def test_default_mode_keeps_write_tools():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, FakeProvider([]))
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
     builder.with_mode("yolo")  # any non-plan mode
 
     names = {t.name for t in builder._get_tools()}
@@ -685,7 +686,7 @@ def test_depth_cap_withholds_task_tool():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, FakeProvider([]))
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
 
     # Below the cap: task tool is present.
     builder._depth = MAX_SUBAGENT_DEPTH - 1
@@ -703,16 +704,16 @@ def test_general_purpose_child_can_recurse():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, FakeProvider([]))
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
 
-    gp = builder._child_builder("general-purpose", "c1")
+    gp = builder._child_builder(BUILTIN_AGENT_TYPES["general-purpose"], "c1")
     assert gp._depth == 1
-    assert gp._subagent_types == ["general-purpose", "explore"]
+    assert gp.allowed_subagent_slugs() == ["general-purpose", "explore"]
     assert "task" in [t.name for t in gp._get_tools()]
 
-    ex = builder._child_builder("explore", "c2")
+    ex = builder._child_builder(BUILTIN_AGENT_TYPES["explore"], "c2")
     assert ex._depth == 1
-    assert ex._subagent_types == ["explore"]
+    assert ex.allowed_subagent_slugs() == ["explore"]
     assert "task" in [t.name for t in ex._get_tools()]
 
 
@@ -726,9 +727,9 @@ async def test_explore_child_can_only_spawn_explore():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, FakeProvider([]))
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
 
-    ex = builder._child_builder("explore", "c1")
+    ex = builder._child_builder(BUILTIN_AGENT_TYPES["explore"], "c1")
     assert "task" in [t.name for t in ex._get_tools()]
 
     tool = TaskTool(ex)
@@ -830,7 +831,7 @@ async def test_two_level_delegation_tracks_parent_and_depth():
     cwd = os.getcwd()
     builder = AgentBuilder(cwd, _RouterProvider())
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
     builder.set_tracker(tracker)
 
     agent = builder.build()
@@ -1101,7 +1102,7 @@ async def test_subagent_text_streams_through_scoped_callbacks():
     tracker = _Tracker()
     builder = AgentBuilder(os.getcwd(), _MainProvider())
     builder.with_default_tools()
-    builder.with_subagent_types(["explore"])
+    builder.with_subagents()
     builder.set_tracker(tracker)
 
     original = builder.build_child

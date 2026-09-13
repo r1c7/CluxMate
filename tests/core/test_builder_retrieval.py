@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from cluxmate.core.builder import AgentBuilder
+from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
 from cluxmate.core.retrieval_memory import RetrievalConfig, RetrievalMemory
 
 
@@ -54,7 +55,7 @@ def test_plan_mode_excludes_tools(tmp_path, monkeypatch):
 def test_child_builder_does_not_inherit_retrieval(tmp_path, monkeypatch):
     b = _builder(tmp_path, monkeypatch).with_default_tools().with_mode("default")
     b.with_retrieval_memory(_enabled_config(tmp_path))
-    child = b._child_builder("explore", "child-1")
+    child = b._child_builder(BUILTIN_AGENT_TYPES["explore"], "child-1")
     assert child._retrieval_config is None
     assert child._retrieval_manager() is None
 
@@ -86,6 +87,6 @@ def test_child_builder_prompt_omits_retrieval(tmp_path, monkeypatch):
     # test_builder_todo child-prompt assertion).
     b = _builder(tmp_path, monkeypatch).with_default_tools().with_mode("default")
     b.with_retrieval_memory(_enabled_config(tmp_path))
-    child = b._child_builder("general-purpose", "child-1")
+    child = b._child_builder(BUILTIN_AGENT_TYPES["general-purpose"], "child-1")
     prompt = child._render_system_prompt(child._get_tools())
     assert "<retrieval_memory>" not in prompt

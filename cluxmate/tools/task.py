@@ -60,7 +60,7 @@ class TaskTool(BaseTool):
         # configured types never registers this tool, so the fallback is only
         # a safety net.
         allowed = (
-            getattr(self._builder, "_subagent_types", None)
+            self._builder.allowed_subagent_slugs()
             or ["general-purpose", "explore"]
         )
         return {
@@ -111,7 +111,7 @@ class TaskTool(BaseTool):
         # read-only gate. Returns an error string (not a raise) so the
         # denied result feeds back into the agent loop and it picks another
         # path.
-        allowed = getattr(self._builder, "_subagent_types", None) or []
+        allowed = self._builder.allowed_subagent_slugs()
         if subagent_type not in allowed:
             return (
                 f"Subagent type '{subagent_type}' is not allowed from this "

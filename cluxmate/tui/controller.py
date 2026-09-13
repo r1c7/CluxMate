@@ -237,7 +237,7 @@ class TuiController:
         llm_provider.set_reasoning_effort(self._reasoning_effort)
         builder = AgentBuilder(cwd, llm_provider)
         builder.with_default_tools()
-        builder.with_subagent_types(["general-purpose", "explore"])
+        builder.with_subagents()
         builder.with_mode(mode)
         if entry.get("model_name"):
             builder.with_model(entry["model_name"])

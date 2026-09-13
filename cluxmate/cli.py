@@ -111,7 +111,7 @@ async def run_headless(
 
     builder = AgentBuilder(cwd, provider)
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
     builder.with_model(entry.get("model_name", ""))
     builder.with_context_1m(entry.get("context_1m", False))
 
@@ -157,7 +157,7 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
 
     builder = AgentBuilder(cwd, provider)
     builder.with_default_tools()
-    builder.with_subagent_types(["general-purpose", "explore"])
+    builder.with_subagents()
     builder.with_model(entry.get("model_name", ""))
     builder.with_context_1m(entry.get("context_1m", False))
 

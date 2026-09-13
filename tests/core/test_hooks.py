@@ -458,11 +458,13 @@ class _StubBuilder:
     def __init__(self, hooks: HookManager, child_error: str | None = None):
         self._hooks = hooks
         self._child_error = child_error
-        self._subagent_types = ["general-purpose", "explore"]
         self._tracker = None
         self._agent_id = "root"
         self._depth = 0
         self._log_store = None
+
+    def allowed_subagent_slugs(self):
+        return ["general-purpose", "explore"]
 
     def _hooks_manager(self):
         return self._hooks

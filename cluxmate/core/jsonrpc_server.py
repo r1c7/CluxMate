@@ -881,7 +881,7 @@ class JsonRpcServer:
                 }})
                 return
             self._session_start_feedback = hr.feedback
-        builder.with_subagent_types(["general-purpose", "explore"])
+        builder.with_subagents()
         builder.with_mode(mode)
         if model_name:
             builder.with_model(model_name)

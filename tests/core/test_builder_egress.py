@@ -1,6 +1,7 @@
 """Tests for builder wiring of EgressConfig + the proxy lifecycle."""
 
 from cluxmate.core.builder import AgentBuilder
+from cluxmate.core.subagents import BUILTIN_AGENT_TYPES
 from cluxmate.core.egress_config import EgressConfig
 from cluxmate.core.ssrf_config import SsrConfig
 
@@ -24,7 +25,7 @@ def test_child_builder_inherits_egress_config(tmp_path):
     cfg = EgressConfig(path=tmp_path / "egress.json")
     b = _builder(tmp_path)
     b.with_egress(cfg)
-    assert b._child_builder("explore", "child-1")._egress is cfg
+    assert b._child_builder(BUILTIN_AGENT_TYPES["explore"], "child-1")._egress is cfg
 
 
 def test_default_egress_mode_is_shared(tmp_path):
@@ -79,7 +80,7 @@ def test_child_builder_inherits_egress_proxy(tmp_path):
     b = _builder(tmp_path)
     b.with_egress(cfg)
     b._ensure_egress_proxy()
-    child = b._child_builder("explore", "child-1")
+    child = b._child_builder(BUILTIN_AGENT_TYPES["explore"], "child-1")
     assert child._egress_proxy is b._egress_proxy
     assert child._egress_proxy_allow == b._egress_proxy_allow
     b.shutdown_egress()
