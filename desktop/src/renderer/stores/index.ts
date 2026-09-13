@@ -670,6 +670,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   refreshGitInfo: async () => {
     const cwd = get().workingDir
+    // Keep the main-process .git watcher pointed at the active working dir so a
+    // branch switch (incl. one the agent performs mid-turn via its shell) pushes
+    // a GIT_CHANGED event immediately.
+    window.electronAPI.watchGit(cwd || '').catch(() => {})
     if (!cwd) { set({ git: null }); return }
     try {
       const git = await window.electronAPI.getGitInfo(cwd)
@@ -1332,6 +1336,10 @@ export const useStore = create<AppState>((set, get) => ({
       set({ _activeUnsub: null })
       // Bridge may have exited (crashed / finished) — refresh sidebar dots.
       get().refreshBridgeStatuses()
+      // Fallback for a branch switch done by the agent's shell this turn (the
+      // watcher normally pushes sooner; this covers watcher-less cases like a
+      // worktree/submodule where `.git` is a file).
+      get().refreshGitInfo()
     }
   },
 
@@ -2004,6 +2012,7 @@ export const useStore = create<AppState>((set, get) => ({
       unsub()
       set({ _activeUnsub: null })
       get().refreshBridgeStatuses()
+      get().refreshGitInfo()
     }
   },
 
@@ -2330,4 +2339,12 @@ window.electronAPI.onBridgeStatusChanged(({ sessionIds, running }) => {
   const bridgeStatuses = { ...useStore.getState().bridgeStatuses }
   for (const sid of sessionIds) bridgeStatuses[sid] = running ?? false
   useStore.setState({ bridgeStatuses })
+})
+
+// Live branch-change push: the main-process .git watcher fires this the moment
+// HEAD/state changes (agent git checkout mid-turn, external git, etc.). Guard on
+// cwd so a stale event from a just-switched-away project can't clobber the new
+// working dir's git state.
+window.electronAPI.onGitChanged(({ cwd }) => {
+  if (cwd === useStore.getState().workingDir) useStore.getState().refreshGitInfo()
 })

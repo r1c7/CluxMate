@@ -1235,6 +1235,14 @@ export function registerIpcHandlers() {
     }
   })
 
+  ipcMain.handle(IPC.GIT_WATCH, (_e, cwd: string) => {
+    gitService.watchGit(cwd, (changedCwd) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(IPC.GIT_CHANGED, { cwd: changedCwd })
+      }
+    })
+  })
+
   ipcMain.handle(IPC.APP_VERSION, () => appVersion)
 
   ipcMain.handle(IPC.GET_DEFAULT_CWD, () => path.resolve(__dirname, '../../..'))

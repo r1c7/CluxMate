@@ -1,4 +1,6 @@
 import { execFile } from 'child_process'
+import * as fs from 'fs'
+import * as path from 'path'
 import type { GitInfo, GitBranchList, GitCheckoutStrategy, GitCheckoutResult } from '../shared/types'
 
 // Run git directly (no shell) against a working directory. Mirrors the Python
@@ -115,4 +117,43 @@ export async function checkout(
   } catch (e: any) {
     return { ok: false, message: e?.message || 'git checkout failed' }
   }
+}
+
+// ---- live branch-change watch ----
+// The agent switches branches by running git in its own (sandboxed) shell, so the
+// Python side can't reliably tell us; instead the main process watches the repo's
+// .git directory and notifies the renderer the moment HEAD/state files change.
+// Watching the PARENT directory (not .git/HEAD itself) matters: git replaces HEAD
+// atomically via rename, which a direct file watcher misses on Windows.
+
+let gitWatcher: fs.FSWatcher | null = null
+let gitWatchRoot: string | null = null
+let gitWatchTimer: ReturnType<typeof setTimeout> | null = null
+
+export async function watchGit(cwd: string, onChange: (cwd: string) => void): Promise<void> {
+  const root = await repoRoot(cwd)
+  if (!root) { stopGitWatch(); return }
+  const gitDir = path.join(root, '.git')
+  // Already watching this repo's .git dir — nothing to do.
+  if (gitWatcher && gitWatchRoot === gitDir) return
+  stopGitWatch()
+  try {
+    gitWatcher = fs.watch(gitDir, () => {
+      if (gitWatchTimer) clearTimeout(gitWatchTimer)
+      gitWatchTimer = setTimeout(() => {
+        gitWatchTimer = null
+        onChange(cwd)
+      }, 250)
+    })
+    gitWatcher.on('error', () => stopGitWatch())
+    gitWatchRoot = gitDir
+  } catch {
+    stopGitWatch()
+  }
+}
+
+export function stopGitWatch(): void {
+  if (gitWatchTimer) { clearTimeout(gitWatchTimer); gitWatchTimer = null }
+  if (gitWatcher) { gitWatcher.close(); gitWatcher = null }
+  gitWatchRoot = null
 }

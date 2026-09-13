@@ -68,6 +68,7 @@ const api: ElectronAPI = {
   listGitBranches: (cwd: string) => ipcRenderer.invoke(IPC.GIT_BRANCHES, cwd),
   checkoutBranch: (cwd: string, branch: string, strategy) =>
     ipcRenderer.invoke(IPC.GIT_CHECKOUT, cwd, branch, strategy),
+  watchGit: (cwd: string) => ipcRenderer.invoke(IPC.GIT_WATCH, cwd),
 
   listMcp: (sessionId: string) => ipcRenderer.invoke(IPC.MCP_LIST, sessionId),
   setMcpDisabled: (sessionId: string, name: string, disabled: boolean) =>
@@ -116,6 +117,12 @@ const api: ElectronAPI = {
     const handler = (_: unknown, data: SessionStreamEvent) => callback(data)
     ipcRenderer.on(IPC.STREAM_EVENT, handler)
     return () => { ipcRenderer.removeListener(IPC.STREAM_EVENT, handler) }
+  },
+
+  onGitChanged: (callback: (payload: { cwd: string }) => void) => {
+    const handler = (_: unknown, data: { cwd: string }) => callback(data)
+    ipcRenderer.on(IPC.GIT_CHANGED, handler)
+    return () => { ipcRenderer.removeListener(IPC.GIT_CHANGED, handler) }
   },
 }
 

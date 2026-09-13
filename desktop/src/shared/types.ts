@@ -802,6 +802,10 @@ export interface ElectronAPI {
   getGitInfo: (cwd: string) => Promise<GitInfo>
   listGitBranches: (cwd: string) => Promise<GitBranchList>
   checkoutBranch: (cwd: string, branch: string, strategy: GitCheckoutStrategy) => Promise<GitCheckoutResult>
+  // Arm the main-process `.git` watcher for this working dir; a branch switch
+  // (incl. one the agent performs via its shell) pushes `git:changed`.
+  watchGit: (cwd: string) => Promise<void>
+  onGitChanged: (callback: (payload: { cwd: string }) => void) => () => void
 
   // Fetch live MCP server status + tool list from the per-session Python
   // process (which owns the MCP client connections). Returns an empty list

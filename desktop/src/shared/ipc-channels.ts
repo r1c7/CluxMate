@@ -60,6 +60,8 @@ export const IPC = {
   GIT_INFO:      'git:info',
   GIT_BRANCHES:  'git:branches',
   GIT_CHECKOUT:  'git:checkout',
+  GIT_WATCH:     'git:watch',
+  GIT_CHANGED:   'git:changed',
 
   MCP_LIST:        'mcp:list',
   MCP_SET_DISABLED: 'mcp:set-disabled',
