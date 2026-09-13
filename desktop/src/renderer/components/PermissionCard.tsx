@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useStore } from '../stores'
-import type { RiskLevel } from '../../shared/types'
+import type { AgentTypeInfo, RiskLevel } from '../../shared/types'
+import { loadAgentTypes } from '../agentTypes'
 import { toolDisplayName, relativePath, editsFromToolInput, uniquePaths } from './MultiEditDiff'
 import { useT } from '../useI18n'
 
@@ -14,11 +15,65 @@ const RISK_STYLE: Record<RiskLevel, { border: string; badge: string; labelKey: s
 // Human-readable body for a pending tool call, replacing a raw JSON dump. Known
 // tools get a purpose-built line (delete → "Delete file: <path>", bash → the
 // command); anything else falls back to formatted JSON so nothing is hidden.
-function PermissionBody({ tool, params, cwd }: { tool: string; params: Record<string, unknown>; cwd: string }) {
+function TaskRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex gap-2 text-xs">
+      <span className="w-16 shrink-0 text-ink-faint">{label}</span>
+      <span className="min-w-0 font-mono text-ink break-all whitespace-pre-wrap">{value}</span>
+    </div>
+  )
+}
+
+// The `task` tool: show WHAT is being delegated to — the resolved type, its
+// tool scope and its model — instead of a raw JSON dump. The type catalog comes
+// from agents/list; an unknown type still shows the slug and the prompt.
+function TaskBody({
+  params, types,
+}: { params: Record<string, unknown>; types: Map<string, AgentTypeInfo> }) {
+  const t = useT()
+  const slug = typeof params.subagent_type === 'string' ? params.subagent_type : ''
+  const info = types.get(slug)
+  const prompt = typeof params.prompt === 'string' ? params.prompt : ''
+  const writePaths = Array.isArray(params.write_paths) ? (params.write_paths as string[]) : []
+  return (
+    <div className="px-3 py-2.5 space-y-1.5">
+      <TaskRow
+        label={t('permission.subagent')}
+        value={slug + (info && !info.builtin ? ` (${t('permission.customType')})` : '')}
+      />
+      {info ? (
+        <>
+          <TaskRow label={t('permission.purpose')} value={info.description} />
+          <TaskRow
+            label={t('permission.tools')}
+            value={info.tools.join(', ') + (info.readonly ? ` — ${t('permission.readonly')}` : '')}
+          />
+          <TaskRow label={t('permission.model')} value={info.model} />
+        </>
+      ) : (
+        <div className="text-[11px] text-ink-faint">{t('permission.typeUnknown')}</div>
+      )}
+      {writePaths.length > 0 && (
+        <TaskRow label={t('permission.writePaths')} value={writePaths.join(', ')} />
+      )}
+      {prompt && (
+        <div className="text-[11px] text-ink-faint whitespace-pre-wrap break-words max-h-20 overflow-hidden">
+          {prompt.slice(0, 200)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PermissionBody({ tool, params, cwd, agentTypes }: { tool: string; params: Record<string, unknown>; cwd: string; agentTypes: Map<string, AgentTypeInfo> }) {
   const t = useT()
   const str = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v))
   const path = (v: unknown) => (typeof v === 'string' && v ? relativePath(v, cwd) : str(v))
   const p = params || {}
+
+  if (tool === 'task') {
+    return <TaskBody params={p} types={agentTypes} />
+  }
 
   if (tool === 'delete_file') {
     return (
@@ -95,8 +150,19 @@ export default function PermissionCard() {
   const t = useT()
   const pending = useStore((s) => s.pendingPermission)
   const cwd = useStore((s) => s.workingDir)
+  const sid = useStore((s) => s.activeSessionId)
   const approve = useStore((s) => s.approveTool)
   const deny = useStore((s) => s.denyTool)
+  const [agentTypes, setAgentTypes] = useState<Map<string, AgentTypeInfo>>(new Map())
+
+  // The task card needs the type catalog; load it once per session (cached in
+  // agentTypes.ts) and only when a task approval is actually on screen.
+  useEffect(() => {
+    if (!sid || pending?.tool_name !== 'task') return
+    let alive = true
+    loadAgentTypes(sid).then((m) => { if (alive) setAgentTypes(m) })
+    return () => { alive = false }
+  }, [sid, pending?.tool_name])
 
   // Keyboard shortcuts: y = approve, a = always, n/esc = deny.
   useEffect(() => {
@@ -133,7 +199,7 @@ export default function PermissionCard() {
 
       <EscalationNotice params={pending.params as Record<string, unknown>} />
 
-      <PermissionBody tool={pending.tool_name} params={pending.params} cwd={cwd} />
+      <PermissionBody tool={pending.tool_name} params={pending.params} cwd={cwd} agentTypes={agentTypes} />
 
       <div className="flex gap-2 px-3 py-2 border-t border-surface-border">
         <button

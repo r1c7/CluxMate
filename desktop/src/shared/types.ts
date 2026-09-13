@@ -368,6 +368,26 @@ export interface HooksConfig {
   hooks: HookEntry[]
 }
 
+// One subagent type from the agent's registry: built-in (general-purpose /
+// explore) or a user definition under ~/.cluxmate/agents / <cwd>/.cluxmate/agents.
+export interface AgentTypeInfo {
+  slug: string
+  name: string
+  description: string
+  tools: string[]
+  readonly: boolean
+  model: string          // "inherit" or a config.json model id
+  max_turns: number
+  builtin: boolean
+  source: 'builtin' | 'global' | 'project'
+  path: string
+}
+
+export interface AgentsConfig {
+  agents: AgentTypeInfo[]
+  errors: { path: string; error: string }[]
+}
+
 // Which settings.json to open/edit: the per-user global one or the active
 // session's project one. Both are read by the agent (project runs after global).
 export type HooksScope = 'global' | 'project'
@@ -700,6 +720,10 @@ export interface ElectronAPI {
   // settings.json, `project` → <session cwd>/.cluxmate/settings.json. Creates the
   // file (with an empty {"hooks":{}} skeleton) if it doesn't exist, then opens it.
   openHooksSettings: (sessionId: string, scope: HooksScope) => Promise<void>
+
+  // Subagent type catalog (built-ins + ~/.cluxmate/agents + <cwd>/.cluxmate/agents)
+  // used by the `task` approval card. Empty while the bridge is warming up.
+  getAgents: (sessionId: string) => Promise<AgentsConfig>
 
   // Writable-folder grants (sandbox-grants.json) — user-global. get reads the
   // current set; set replaces it (revoked folders are restored Low → Medium on
