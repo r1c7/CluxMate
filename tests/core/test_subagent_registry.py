@@ -8,6 +8,7 @@ from cluxmate.core.subagents import (
     BUILTIN_AGENT_TYPES,
     DEFAULT_SUBAGENT_MAX_TURNS,
     EDIT_TOOL_NAMES,
+    MAX_AGENT_TURNS,
     SubagentRegistry,
 )
 
@@ -253,6 +254,10 @@ def test_builtin_reviewer_can_verify_but_never_edit():
     assert rv.readonly is False
     assert rv.builtin is True
     assert rv.instructions.strip()
+    # A review that dies at the turn cap delivers nothing, and the measured cost
+    # of a real review is ~50 turns, so the reviewer gets the full agent budget
+    # rather than the 50 a user-defined type defaults to.
+    assert rv.max_turns == MAX_AGENT_TURNS > DEFAULT_SUBAGENT_MAX_TURNS
 
 
 def test_can_edit_separates_running_from_editing():

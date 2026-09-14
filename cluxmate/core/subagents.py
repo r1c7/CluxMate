@@ -192,7 +192,14 @@ BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
         ),
         tools=_REVIEW_TOOLS,
         instructions=_REVIEWER_INSTRUCTIONS,
-        max_turns=DEFAULT_SUBAGENT_MAX_TURNS,
+        # The general-purpose budget, not the 50 a user type gets. Measured: a
+        # review of a 9-file diff spent its first 50-turn budget exactly to the
+        # turn (a complete verdict, zero slack), and the next review of the SAME
+        # area ran out at the cap and returned NO verdict at all. A review is
+        # all-or-nothing — half a review has no value to the parent — and the
+        # budget is a ceiling, not a target, so headroom costs nothing unless the
+        # work actually needs it.
+        max_turns=MAX_AGENT_TURNS,
         builtin=True,
     ),
 }
