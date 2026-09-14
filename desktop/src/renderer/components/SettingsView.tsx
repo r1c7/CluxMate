@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useStore } from '../stores'
 import { THEMES } from '../themes'
 import { FONT_OPTIONS } from '../fonts'
@@ -6,7 +6,8 @@ import { useT } from '../useI18n'
 import type { MessageKey } from '../i18n'
 import { reasoningValuesFor } from '../../shared/reasoning'
 import { isValidSsrEntry } from '../../shared/ssrf'
-import type { ModelEntry } from '../../shared/types'
+import { formatTime } from '../../shared/format-time'
+import type { MemoryFact, MemoryFactList, ModelEntry } from '../../shared/types'
 
 type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'memory' | 'notification' | 'language'
 
@@ -291,6 +292,43 @@ export default function SettingsView() {
       const r = await window.electronAPI.setRetrievalConfig(enabled)
       setRetrievalEnabled(r.enabled)
     } catch { /* keep the optimistic value on failure */ }
+  }
+
+  // Recorded facts (Settings → Memory). Read straight from disk in the main
+  // process — no bridge — and deleting one needs no restart: the Python recall
+  // index reconciles by mtime+size before the next recall.
+  const activeSessionId = useStore((s) => s.activeSessionId)
+  const sessions = useStore((s) => s.sessions)
+  const workingDir = useStore((s) => s.workingDir)
+  const setError = useStore((s) => s.setError)
+  // Same resolution the skills view uses: the active session's project, else
+  // the app working dir. '' means "global facts only".
+  const factsCwd = sessions.find((s) => s.id === activeSessionId)?.cwd || workingDir
+  const [facts, setFacts] = useState<MemoryFactList | null>(null)
+  const [expandedFact, setExpandedFact] = useState<string | null>(null)
+
+  const loadFacts = useCallback(async () => {
+    try {
+      setFacts(await window.electronAPI.listMemoryFacts(factsCwd))
+    } catch (e: any) {
+      setError(t('error.listFactsFailed', { msg: e?.message }))
+    }
+  }, [factsCwd, setError, t])
+
+  // Re-scan on entering the section and whenever the active project changes —
+  // the list is global + that project's facts.
+  useEffect(() => {
+    if (section === 'memory') loadFacts()
+  }, [section, loadFacts])
+
+  const removeFact = async (f: MemoryFact) => {
+    if (!window.confirm(t('settings.memory.facts.deleteConfirm', { id: f.id }))) return
+    try {
+      setFacts(await window.electronAPI.deleteMemoryFact(factsCwd, f.scope, f.id))
+      if (expandedFact === `${f.scope}:${f.id}`) setExpandedFact(null)
+    } catch (e: any) {
+      setError(t('error.deleteFactFailed', { msg: e?.message }))
+    }
   }
 
   const addSsrAllow = () => {
@@ -838,6 +876,73 @@ export default function SettingsView() {
                 <p className="text-xs text-ink-soft leading-relaxed">{t('settings.memory.hint')}</p>
                 <p className="text-[11px] text-ink-faint">{t('settings.memory.footnote')}</p>
               </SectionCard>
+
+              {/* Recorded facts, straight off disk (no bridge involved). */}
+              <SectionCard
+                icon={<ListIcon className="w-4 h-4" />}
+                title={t('settings.memory.facts.title')}
+                badge={facts ? <CountBadge n={facts.total} /> : undefined}
+              >
+                <p className="text-xs text-ink-soft leading-relaxed">{t('settings.memory.facts.hint')}</p>
+                {!factsCwd && (
+                  <p className="text-[11px] text-amber-600">{t('settings.memory.facts.noSession')}</p>
+                )}
+                {!facts ? (
+                  <p className="text-sm text-ink-faint py-2 text-center">{t('common.loading')}</p>
+                ) : facts.facts.length === 0 ? (
+                  <EmptyState text={t('settings.memory.facts.empty')} />
+                ) : (
+                  <div className="space-y-2">
+                    {facts.facts.map((f) => {
+                      const key = `${f.scope}:${f.id}`
+                      const open = expandedFact === key
+                      return (
+                        <div key={key} className="rounded-lg border border-surface-border bg-surface px-3 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full border flex-shrink-0 ${
+                              f.scope === 'global'
+                                ? 'bg-accent/15 text-accent border-accent/30'
+                                : 'bg-emerald-500/10 text-emerald-700 border-emerald-500/30'
+                            }`}>
+                              {f.scope === 'global'
+                                ? t('settings.memory.facts.scopeGlobal')
+                                : t('settings.memory.facts.scopeProject')}
+                            </span>
+                            {/* The id is how a recalled entry in the chat
+                                context (`[global fact <id>]`) is matched back
+                                to a row here — keep it visible. */}
+                            <span className="text-[10px] font-mono text-ink-faint flex-shrink-0">{f.id}</span>
+                            {/* Absolute timestamp, not "3 days ago": staleness
+                                is judged by the date, and this reuses the
+                                shared formatter instead of cloning
+                                CheckpointTimeline's relativeTime helper. */}
+                            <span className="text-[10px] text-ink-faint flex-shrink-0">{formatTime(f.mtimeMs)}</span>
+                            <button
+                              onClick={() => setExpandedFact(open ? null : key)}
+                              className="ml-auto text-xs text-ink-faint hover:text-ink px-2 py-0.5 rounded transition-colors"
+                            >{open ? t('settings.memory.facts.collapse') : t('settings.memory.facts.expand')}</button>
+                            <button
+                              onClick={() => removeFact(f)}
+                              className="text-xs text-ink-faint hover:text-red-600 px-2 py-0.5 rounded transition-colors"
+                            >{t('common.delete')}</button>
+                          </div>
+                          <pre className={`mt-1.5 text-[11px] leading-relaxed whitespace-pre-wrap break-words text-ink-soft font-mono ${open ? '' : 'line-clamp-3'}`}>{f.body}</pre>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+                {facts && facts.total > facts.facts.length && (
+                  <p className="text-[11px] text-amber-600">
+                    {t('settings.memory.facts.capped', { total: facts.total, shown: facts.facts.length })}
+                  </p>
+                )}
+                <button
+                  onClick={loadFacts}
+                  className="text-xs text-ink-soft hover:text-ink px-2 py-1 rounded border border-surface-border transition-colors"
+                >{t('settings.memory.facts.refresh')}</button>
+                <p className="text-[11px] text-ink-faint">{t('settings.memory.facts.footnote')}</p>
+              </SectionCard>
             </div>
           ) : section === 'notification' ? (
             <div className="space-y-4">
@@ -1081,6 +1186,19 @@ function GlobeIcon({ className = 'w-4 h-4' }: { className?: string }) {
       <circle cx="12" cy="12" r="10" />
       <path d="M2 12h20" />
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </svg>
+  )
+}
+
+function ListIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="8" y1="6" x2="21" y2="6" />
+      <line x1="8" y1="12" x2="21" y2="12" />
+      <line x1="8" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" />
+      <line x1="3" y1="12" x2="3.01" y2="12" />
+      <line x1="3" y1="18" x2="3.01" y2="18" />
     </svg>
   )
 }
