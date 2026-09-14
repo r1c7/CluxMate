@@ -399,10 +399,19 @@ class LSPClient:
             # (auto_diagnostics / the explicit lsp ops) degrade to a
             # best-effort empty result.
             self._terminate()
+            self.shutdown()
             raise RuntimeError(
                 f"language server \"{self.spec.command}\" did not answer "
                 f"initialize within {_HANDSHAKE_TIMEOUT_SECONDS}s"
             ) from None
+        except Exception:
+            # Any other start failure after the I/O threads are up must also
+            # join them — the writer thread exits only on the shutdown sentinel,
+            # so an abandoned failed start would leak one idle daemon thread
+            # per attempt over a long-running session.
+            self._terminate()
+            self.shutdown()
+            raise
         caps = (result or {}).get("capabilities", {}) or {}
         enc = caps.get("positionEncoding")
         if enc in ("utf-8", "utf-16"):

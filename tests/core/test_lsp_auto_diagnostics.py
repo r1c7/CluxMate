@@ -179,3 +179,30 @@ def test_server_that_stops_reading_stdin_cannot_park_the_write_path(tmp_path, mo
         mgr.shutdown()
     assert block == ""          # best-effort contract: a stuck server degrades to quiet
     assert elapsed < 5.0        # ... and it RETURNED
+
+
+def test_failed_start_joins_its_io_threads(tmp_path, monkeypatch):
+    """Regression (2026-09-14): a failed start must join its I/O threads.
+
+    A broken-but-present server (the silent pyright case) starts the pump and
+    writer threads, then fails the initialize handshake. The writer thread
+    exits only on the shutdown sentinel, so without the fix a failed start
+    leaks one idle daemon thread per attempt over a long-running session.
+    """
+    import threading
+
+    from cluxmate.core import lsp as lsp_mod
+    from cluxmate.core.lsp import LSPClient
+
+    monkeypatch.setattr(lsp_mod, "_HANDSHAKE_TIMEOUT_SECONDS", 0.5)
+
+    def io_threads() -> set[str]:
+        return {t.name for t in threading.enumerate()
+                if t.name in ("lsp-pump", "lsp-writer")}
+
+    before = io_threads()
+    client = LSPClient(_silent_spec(), language_id="python", root=str(tmp_path))
+    with pytest.raises(RuntimeError):
+        client.start()
+    after = io_threads()
+    assert after == before  # the failed start's pump + writer threads are gone
