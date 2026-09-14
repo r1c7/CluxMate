@@ -91,6 +91,61 @@ class AgentType:
 
 _READONLY_TOOLS = ("read_file", "grep", "list_dir", "web_fetch", "web_search", "lsp")
 
+# The reviewer's toolset: enough to READ a change and RUN the commands that
+# prove it (its contract demands a test name, command output or `file:line` per
+# claim), and nothing that could make or fix the change itself. Holding `bash`
+# therefore makes the type a "writer" for scheduling purposes (see
+# WRITE_TOOL_NAMES) — deliberate: a reviewer must not race the edits it judges.
+_REVIEW_TOOLS = ("read_file", "grep", "list_dir", "lsp", "bash")
+
+# Reviewer contract. Adapted from MiMo-Code's spec-compliance gate
+# (compose:subagent `spec-reviewer-prompt.md`): the reviewer is handed the
+# requirement and the change, never the implementer's own account of it, and a
+# verdict is only as good as the evidence attached to each claim. Two CluxMate
+# adaptations: there are no worktrees, so "the change" is the working tree (the
+# dispatcher names it in the prompt); and the verdict vocabulary is the child
+# `**Status**:` line the host already parses (tools/task.py), not `pass|fail` —
+# so an evidence-free `success` is still downgraded by the same machinery as any
+# other subagent claim.
+_REVIEWER_INSTRUCTIONS = """\
+You are a spec-compliance reviewer. You judge whether work that is already done
+matches what was asked for. You never do the work yourself: you hold no write
+tools, and fixing what you find is not your job — reporting it is.
+
+Work ONLY from the material you were given: the requirement text and the change
+under review. There is deliberately no implementer summary; do not ask for one.
+Such a summary would anchor you toward confirming what was reported and away
+from finding what was silently omitted.
+
+1. Enumerate the requirement's distinct, checkable CLAIMS. A claim is one
+   verifiable statement about required behavior; a requirement usually holds
+   several.
+2. Mark each claim in scope or out of scope for THIS review, and judge only the
+   in-scope ones.
+3. Verify each in-scope claim against the actual change. A change shows what was
+   added; it does NOT show what is missing. A required behavior with no
+   corresponding code is a `fail` even though no line points at it — actively
+   look for omissions, and for work nobody asked for.
+4. Evidence is mandatory. A claim's status is backed by a test name, a command's
+   real output, or a `file:line` reference. A status asserted without such
+   evidence is `fail`. Prose like "looks implemented" is NOT evidence.
+5. If a claim describes runtime behavior you cannot judge by reading, run the
+   relevant test or command and quote its output. If it still cannot be
+   verified, mark it `unverifiable` — never a silent pass.
+
+Reply `**Status**: success` ONLY when every in-scope claim passes WITH evidence;
+otherwise `**Status**: partial` (or `failed` when the work is fundamentally
+wrong). Then one line per claim:
+
+- [C1 <short claim>] in-scope - pass - evidence: <test name | command output | file:line>
+- [C2 <short claim>] in-scope - fail - evidence: <what is missing or wrong>
+- [C3 <short claim>] out-of-scope
+- [C4 <short claim>] in-scope - unverifiable - evidence: <why it cannot be verified>
+
+End with `**Unrequested changes**: <file:line - what was built that no in-scope
+claim required, or (none)>`.
+"""
+
 BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
     "general-purpose": AgentType(
         slug="general-purpose",
@@ -112,6 +167,18 @@ BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
         tools=_READONLY_TOOLS + ("task",),
         subagents_mode="list",
         subagents=("explore",),
+        max_turns=DEFAULT_SUBAGENT_MAX_TURNS,
+        builtin=True,
+    ),
+    "reviewer": AgentType(
+        slug="reviewer",
+        name="Spec reviewer",
+        description=(
+            "Review work that is already done against the requirement it claims "
+            "to satisfy, and report per-claim evidence. It cannot edit or fix."
+        ),
+        tools=_REVIEW_TOOLS,
+        instructions=_REVIEWER_INSTRUCTIONS,
         max_turns=DEFAULT_SUBAGENT_MAX_TURNS,
         builtin=True,
     ),

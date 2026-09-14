@@ -93,6 +93,8 @@ def test_task_tool_lists_registry_types(tmp_path, monkeypatch):
     b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
     tool = next(t for t in b._get_tools() if t.name == "task")
     enum = tool.input_schema["properties"]["subagent_type"]["enum"]
+    # The project file overrides the built-in reviewer slug in place, so it
+    # appears exactly once.
     assert enum == ["general-purpose", "explore", "reviewer"]
     # spec §2.7: the per-type catalog (one line per type: description, tools,
     # model) lands on the schema, and the tool-level description carries it.
@@ -108,6 +110,29 @@ def test_builtin_behavior_unchanged(tmp_path, monkeypatch):
     gp = b.build_child("general-purpose", "d", "c1")
     assert {"bash", "write_file", "task"} <= {d["name"] for d in gp.tools.definitions()}
     assert gp.provider is b._provider
+
+
+def test_system_prompt_advertises_the_review_gate(tmp_path, monkeypatch):
+    """The gate prose ships with the capability, and only with it: an agent that
+    cannot spawn a reviewer is never told to dispatch one."""
+    _home(monkeypatch, tmp_path)
+    b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
+    assert "<review_gate>" in b._render_system_prompt(b._get_tools())
+
+    no_subs = AgentBuilder(str(tmp_path), _Provider()).with_default_tools()
+    assert "<review_gate>" not in no_subs._render_system_prompt(no_subs._get_tools())
+
+
+def test_builtin_reviewer_child_prompt_carries_its_contract(tmp_path, monkeypatch):
+    _home(monkeypatch, tmp_path)
+    b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
+    child = b.build_child("reviewer", "review this change", "c1")
+    # The registry instructions land in <agent_instructions> …
+    assert "spec-compliance reviewer" in child.system_prompt
+    # … and the toolset really is verify-but-never-edit.
+    names = {d["name"] for d in child.tools.definitions()}
+    assert names == {"read_file", "grep", "list_dir", "lsp", "bash"}
+    assert "task" not in names
 
 
 def test_no_subagents_flag_means_no_task_tool(tmp_path, monkeypatch):

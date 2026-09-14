@@ -708,7 +708,9 @@ def test_general_purpose_child_can_recurse():
 
     gp = builder._child_builder(BUILTIN_AGENT_TYPES["general-purpose"], "c1")
     assert gp._depth == 1
-    assert gp.allowed_subagent_slugs() == ["general-purpose", "explore"]
+    assert gp.allowed_subagent_slugs() == [
+        "general-purpose", "explore", "reviewer"
+    ]
     assert "task" in [t.name for t in gp._get_tools()]
 
     ex = builder._child_builder(BUILTIN_AGENT_TYPES["explore"], "c2")

@@ -7,6 +7,7 @@ import pytest
 from cluxmate.core.subagents import (
     BUILTIN_AGENT_TYPES,
     DEFAULT_SUBAGENT_MAX_TURNS,
+    WRITE_TOOL_NAMES,
     SubagentRegistry,
 )
 
@@ -27,7 +28,7 @@ def test_no_config_yields_builtins_only(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
     reg = _reg(tmp_path, home)
-    assert list(reg.types()) == ["general-purpose", "explore"]
+    assert list(reg.types()) == ["general-purpose", "explore", "reviewer"]
     assert reg.errors() == []
     assert reg.types()["general-purpose"].max_turns == 150
     assert reg.types()["explore"].readonly is True
@@ -144,7 +145,9 @@ def test_order_is_deterministic_and_builtins_first(tmp_path, monkeypatch):
     for slug in ("zeta", "alpha", "mid"):
         _write_agent(tmp_path, slug, "---\ndescription: x\n---\n")
     reg = _reg(tmp_path)
-    assert list(reg.types()) == ["general-purpose", "explore", "alpha", "mid", "zeta"]
+    assert list(reg.types()) == [
+        "general-purpose", "explore", "reviewer", "alpha", "mid", "zeta"
+    ]
 
 
 def test_claude_agents_dir_is_not_read(tmp_path, monkeypatch):
@@ -214,7 +217,9 @@ def test_snapshot_shape(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     (tmp_path / "home").mkdir()
     snap = _reg(tmp_path).snapshot()
-    assert [a["slug"] for a in snap["agents"]][:2] == ["general-purpose", "explore"]
+    assert [a["slug"] for a in snap["agents"]][:3] == [
+        "general-purpose", "explore", "reviewer"
+    ]
     first = snap["agents"][0]
     assert set(first) == {
         "slug", "name", "description", "tools", "readonly", "model",
@@ -230,3 +235,32 @@ def test_builtin_definitions_stay_intact():
     assert gp.readonly is False and gp.max_turns == 150
     assert "task" in ex.tools and ex.readonly is True
     assert ex.subagents_mode == "list" and ex.subagents == ("explore",)
+
+
+def test_builtin_reviewer_can_verify_but_never_edit():
+    """The reviewer holds exactly the tools its contract needs: read a change,
+    run the command that proves a claim — and nothing that could make or fix
+    the change it is judging."""
+    rv = BUILTIN_AGENT_TYPES["reviewer"]
+    assert set(rv.tools) == {"read_file", "grep", "list_dir", "lsp", "bash"}
+    assert not (set(rv.tools) & (WRITE_TOOL_NAMES - {"bash"}))
+    # No recursion: a reviewer reviews.
+    assert "task" not in rv.tools
+    assert rv.subagents_mode == "none"
+    # Holding bash makes it a scheduling writer; a reviewer must not race the
+    # edits it judges, but it must not claim a write scope either.
+    assert rv.readonly is False
+    assert rv.builtin is True
+    assert rv.instructions.strip()
+
+
+def test_reviewer_instructions_carry_the_gate_contract():
+    text = BUILTIN_AGENT_TYPES["reviewer"].instructions
+    # The requirement taxonomy: in/out of scope per claim.
+    assert "out of scope" in text and "in-scope" in text
+    # Evidence or it is a fail; prose is not evidence.
+    assert "file:line" in text and "is NOT evidence" in text
+    # Silence is not a pass, and neither is an unsupported one.
+    assert "unverifiable" in text
+    # The verdict vocabulary must be what tools/task.py parses back.
+    assert "**Status**: success" in text and "**Status**: partial" in text

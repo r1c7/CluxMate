@@ -808,6 +808,13 @@ class AgentBuilder:
         has_retrieval = any(
             getattr(t, "name", "") == "remember" for t in tools
         )
+        # The review gate is advertised only when THIS agent can actually
+        # dispatch a reviewer — it holds the `task` tool AND its allowlist still
+        # contains the slug (a custom registry can override the built-in away).
+        # Prose telling the model to do something its tool schema forbids is
+        # worse than silence.
+        has_task = any(getattr(t, "name", "") == "task" for t in tools)
+        has_reviewer = has_task and "reviewer" in self.allowed_subagent_slugs()
         return render_system_prompt(
             os_name=os_name,
             shell_path=shell_path,
@@ -816,6 +823,7 @@ class AgentBuilder:
             has_update_memory=has_update_memory,
             has_todo_write=has_todo_write,
             has_retrieval=has_retrieval,
+            has_reviewer=has_reviewer,
         )
 
     def render_injections(self) -> list[tuple[str, str]]:
