@@ -435,7 +435,10 @@ class LSPClient:
             self._mark_broken(
                 f"language server {self.spec.command} stopped reading its stdin"
             )
-            self._terminate()
+            try:
+                self._terminate()
+            except Exception:
+                pass  # a fake proc (no poll()) must not mask the OSError below
             raise OSError(
                 f"language server {self.spec.command} did not drain its stdin "
                 f"within {_WRITE_TIMEOUT_SECONDS}s"

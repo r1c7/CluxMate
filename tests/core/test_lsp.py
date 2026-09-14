@@ -645,16 +645,39 @@ def test_pump_delivers_a_response_without_a_caller_reading(tmp_path):
 
 
 def test_broken_server_wakes_a_waiting_caller(tmp_path):
-    """A server that exits must not leave a caller parked on its waiter."""
+    """A server that exits must wake a caller parked on its waiter."""
     client = _lsp_client(tmp_path)
+    outcome = []
     try:
         assert client.start() is True
-        client._terminate()          # out-of-band death, no shutdown() bookkeeping
+
+        def _work():
+            try:
+                client.request(
+                    # The fake server has no answer for this method, so the
+                    # request registers its waiter and parks in event.wait(None).
+                    "textDocument/semanticTokens/full",
+                    {"textDocument": {"uri": "file:///x.py"}},
+                    timeout=None,
+                )
+            except BaseException as e:  # noqa: BLE001 - reported below
+                outcome.append(e)
+
+        t = threading.Thread(target=_work, daemon=True)
+        t.start()
+        # Let the request register its waiter and park before killing the
+        # server out-of-band (no shutdown() bookkeeping).
+        deadline = time.monotonic() + 5
+        while not client._waiters and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert client._waiters, "request never registered its waiter"
+        time.sleep(0.2)  # let the small request frame finish flushing first
+        client._terminate()
         t0 = time.monotonic()
-        with pytest.raises(RuntimeError, match="language server exited"):
-            client.request("textDocument/definition",
-                           {"textDocument": {"uri": "file:///x.py"},
-                            "position": {"line": 0, "character": 0}})
+        t.join(timeout=10)
+        assert not t.is_alive(), "caller stayed parked after the server exited"
         assert time.monotonic() - t0 < 10
+        assert outcome and isinstance(outcome[0], RuntimeError)
+        assert "language server exited" in str(outcome[0])
     finally:
         client.shutdown()
