@@ -40,6 +40,8 @@ export const IPC = {
   EGRESS_CONFIG_SET: 'egress:config-set',
   RETRIEVAL_CONFIG_GET: 'retrieval:config-get',
   RETRIEVAL_CONFIG_SET: 'retrieval:config-set',
+  MEMORY_FACTS_LIST: 'memory:facts-list',
+  MEMORY_FACT_DELETE: 'memory:fact-delete',
 
   CHECKPOINT_LIST:    'checkpoint:list',
   CHECKPOINT_DIFF:    'checkpoint:diff',

@@ -786,6 +786,12 @@ export interface ElectronAPI {
   // remember/forget + recall.
   getRetrievalConfig: () => Promise<RetrievalConfigPayload>
   setRetrievalConfig: (enabled: boolean) => Promise<RetrievalConfigPayload>
+  // Retrieval-memory facts on disk (Settings → Memory). Both run in the main
+  // process with plain fs — no bridge is involved, and deleting one needs no
+  // restart: the Python recall index reconciles by mtime+size on the next turn.
+  // `cwd` selects the project scope; '' lists global facts only.
+  listMemoryFacts: (cwd: string) => Promise<MemoryFactList>
+  deleteMemoryFact: (cwd: string, scope: 'global' | 'project', id: string) => Promise<MemoryFactList>
 
   listCheckpoints: (sessionId: string) => Promise<Checkpoint[]>
   diffCheckpoint: (sessionId: string, checkpointId: string) => Promise<CheckpointFileDiff[]>

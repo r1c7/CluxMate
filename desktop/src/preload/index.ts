@@ -50,6 +50,9 @@ const api: ElectronAPI = {
   setEgressConfig: (mode: EgressConfigPayload['mode']) => ipcRenderer.invoke(IPC.EGRESS_CONFIG_SET, mode),
   getRetrievalConfig: () => ipcRenderer.invoke(IPC.RETRIEVAL_CONFIG_GET),
   setRetrievalConfig: (enabled: boolean) => ipcRenderer.invoke(IPC.RETRIEVAL_CONFIG_SET, enabled),
+  listMemoryFacts: (cwd: string) => ipcRenderer.invoke(IPC.MEMORY_FACTS_LIST, cwd),
+  deleteMemoryFact: (cwd: string, scope: 'global' | 'project', id: string) =>
+    ipcRenderer.invoke(IPC.MEMORY_FACT_DELETE, cwd, scope, id),
 
   listCheckpoints: (sessionId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_LIST, sessionId),
   diffCheckpoint: (sessionId: string, checkpointId: string) => ipcRenderer.invoke(IPC.CHECKPOINT_DIFF, sessionId, checkpointId),

@@ -3,12 +3,13 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { AgentBridge } from './agent-bridge'
 import { setAttention } from './attention'
 import * as sessionStore from './session-store'
 import * as gitService from './git-service'
+import { deleteFact, scanFacts } from './memory-facts'
 import { version as appVersion } from '../../package.json'
 
 const bridges = new Map<string, AgentBridge>()
@@ -1050,6 +1051,19 @@ export function registerIpcHandlers() {
     }
     return { enabled: enabled === true }
   })
+
+  // Retrieval-memory facts (read-only list + single-fact delete). Both use
+  // plain fs in this process — the Python side is never involved, and no bridge
+  // restart is needed (unlike the enabled toggle above): the recall index
+  // reconciles from the files' mtime+size before the next recall.
+  ipcMain.handle(IPC.MEMORY_FACTS_LIST, (_, cwd: string): MemoryFactList =>
+    scanFacts(app.getPath('home'), cwd || ''))
+
+  ipcMain.handle(
+    IPC.MEMORY_FACT_DELETE,
+    (_, cwd: string, scope: 'global' | 'project', id: string): MemoryFactList =>
+      deleteFact(app.getPath('home'), cwd || '', scope, id),
+  )
 
   ipcMain.handle(IPC.CHAT_SET_MODE, async (_, sid: string, mode: string) => {
     // Development mode is per-session and NOT persisted, so there's nothing to
