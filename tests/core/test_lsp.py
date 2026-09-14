@@ -433,6 +433,8 @@ def _framing_client() -> LSPClient:
 
 
 def test_write_uses_content_length_framing():
+    # _write hands the frame to the writer thread and waits for it: by the time
+    # it returns, the bytes are on the pipe (the assertion reads the fake stdin).
     client = _framing_client()
     client._proc = _FakeProc()
     payload = {"jsonrpc": "2.0", "id": 1, "result": "中文"}

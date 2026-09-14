@@ -155,3 +155,27 @@ def test_silent_server_times_out_instead_of_hanging(tmp_path, monkeypatch):
         mgr.shutdown()
     assert block == ""  # best-effort contract: a dead server degrades to quiet
     assert elapsed < 3.0  # ... and it RETURNED, instead of hanging the turn
+
+
+def _stop_reading_spec() -> ServerSpec:
+    return _spec(command=sys.executable,
+                 args=[str(_FAKE_LSP_SERVER), "--stop-reading"])
+
+
+def test_server_that_stops_reading_stdin_cannot_park_the_write_path(tmp_path, monkeypatch):
+    """Regression (2026-09-14): a wedged-but-alive server must not hang a write."""
+    import time as _time
+
+    from cluxmate.core import lsp as lsp_mod
+
+    monkeypatch.setattr(lsp_mod, "_WRITE_TIMEOUT_SECONDS", 0.5)
+    (tmp_path / "big.py").write_text("y = 1\n" * 20_000, encoding="utf-8")  # ~120 KB ≫ 4 KiB pipe
+    mgr = _manager(tmp_path, _stop_reading_spec())
+    try:
+        started = _time.monotonic()
+        block = mgr.auto_diagnostics("big.py", timeout_seconds=0.1)
+        elapsed = _time.monotonic() - started
+    finally:
+        mgr.shutdown()
+    assert block == ""          # best-effort contract: a stuck server degrades to quiet
+    assert elapsed < 5.0        # ... and it RETURNED

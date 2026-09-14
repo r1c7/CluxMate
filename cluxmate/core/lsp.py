@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import queue
 import shlex
 import shutil
 import subprocess
@@ -267,6 +268,8 @@ class LSPClient:
         self._sync_marks: dict[str, int] = {}
         self._broken: str | None = None
         self._pump: threading.Thread | None = None
+        self._writer: threading.Thread | None = None
+        self._write_queue: queue.Queue = queue.Queue()
         self._stopping = threading.Event()
         self._proc: subprocess.Popen | None = None
         self._next_id = 0
@@ -285,10 +288,15 @@ class LSPClient:
                 target=self._pump_loop, name="lsp-pump", daemon=True
             )
             self._pump.start()
+        if self._writer is None:
+            self._writer = threading.Thread(
+                target=self._writer_loop, name="lsp-writer", daemon=True
+            )
+            self._writer.start()
 
     def _ensure_threads(self) -> None:
         """Start the I/O threads for a proc created outside start()."""
-        if self._proc is not None and self._pump is None:
+        if self._proc is not None and (self._pump is None or self._writer is None):
             self._start_threads()
 
     def _pump_loop(self) -> None:
@@ -403,10 +411,34 @@ class LSPClient:
         return True
 
     def _write(self, payload: dict) -> None:
+        """Queue one framed message; the writer thread owns the blocking write.
+
+        Bounded on purpose: a server that stopped reading stdin must not park
+        the caller (and, through it, a whole turn) forever. On timeout the
+        server is killed and the client marked broken — the write tools'
+        best-effort contract turns that into "no diagnostics".
+        """
+        self._ensure_threads()
+        done = threading.Event()
+        error: list[BaseException] = []
+        self._write_queue.put((payload, done, error))
+        if not done.wait(_WRITE_TIMEOUT_SECONDS):
+            self._mark_broken(
+                f"language server {self.spec.command} stopped reading its stdin"
+            )
+            self._terminate()
+            raise OSError(
+                f"language server {self.spec.command} did not drain its stdin "
+                f"within {_WRITE_TIMEOUT_SECONDS}s"
+            )
+        if error:
+            raise error[0]
+
+    def _write_frame(self, payload: dict) -> None:
         """Write one framed message (serialized: frames must not interleave).
 
         LSP stdio is NOT newline-delimited JSON: every message is prefixed
-        with a ``Content-Length: <byte-count>\\r\\n\\r\\n`` header and the body
+        with a ``Content-Length: <byte-count>\r\n\r\n`` header and the body
         is exactly that many UTF-8 bytes, with no trailing newline. We write
         to the raw binary buffer so the byte count is exact regardless of
         non-ASCII content.
@@ -414,10 +446,25 @@ class LSPClient:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         frame = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
         with self._write_lock:
-            assert self._proc is not None and self._proc.stdin is not None
+            if self._proc is None or self._proc.stdin is None:
+                raise OSError("language server is gone")
             stream = self._proc.stdin.buffer
             stream.write(frame)
             stream.flush()
+
+    def _writer_loop(self) -> None:
+        """Drain the write queue: blocking writes happen here, never on a caller."""
+        while True:
+            item = self._write_queue.get()
+            if item is None:
+                return
+            payload, done, error = item
+            try:
+                self._write_frame(payload)
+            except BaseException as e:  # reported back to the waiting caller
+                error.append(e)
+            finally:
+                done.set()
 
     def _read(self) -> dict | None:
         """Read one Content-Length framed message; None if the server exited."""
@@ -629,6 +676,9 @@ class LSPClient:
             self._proc = None
         if self._pump is not None:
             self._pump.join(_PUMP_JOIN_SECONDS)
+        self._write_queue.put(None)
+        if self._writer is not None:
+            self._writer.join(_PUMP_JOIN_SECONDS)
         self._mark_broken("language server shut down")
 
 
@@ -650,6 +700,11 @@ _AUTO_DIAGNOSTICS_DRAIN_SECONDS = 1.0
 # result forever — the post-write diagnostics path has no user-visible cancel
 # to fall back on.
 _HANDSHAKE_TIMEOUT_SECONDS = 5.0
+# A local pipe write is a memcpy into an OS buffer; a server that has not
+# drained it by now is not going to (its stdout filled and it stopped reading
+# stdin). The write is abandoned and the server killed rather than parking the
+# calling thread — and the write tool that called us — forever.
+_WRITE_TIMEOUT_SECONDS = 5.0
 # How long shutdown waits for the pump thread to notice a dead pipe. The kill
 # happens first, so this is a courtesy join, not a contract.
 _PUMP_JOIN_SECONDS = 2.0
@@ -875,7 +930,10 @@ class LSPManager:
                 self._starting.pop(lang, None)
         else:
             ev.wait()
-            client = self._clients[lang]
+            client = self._clients.get(lang)
+            if client is None:
+                # The start we waited on failed; report it instead of a KeyError.
+                raise ValueError(f"language server {spec.command} failed to start")
         return client
 
     def _spawn(self, lang: str, spec: ServerSpec) -> LSPClient:

@@ -12,6 +12,7 @@ Run as: python tests/core/fake_lsp_server.py
 """
 import json
 import sys
+import time
 
 # A document containing this marker makes the server flood stdout with ~200 KB
 # of progress notifications BEFORE it goes back to reading stdin — how a real
@@ -197,6 +198,10 @@ def handle_request(req: dict, stream) -> dict | None:
 
 
 def main() -> None:
+    # `--stop-reading`: answer the handshake, then never read stdin again —
+    # a server that is alive but wedged. The client's next write must time out
+    # instead of parking the calling thread forever.
+    stop_reading = "--stop-reading" in sys.argv
     while True:
         req = read_message(sys.stdin.buffer)
         if req is None:
@@ -204,6 +209,8 @@ def main() -> None:
         resp = handle_request(req, sys.stdout.buffer)
         if resp is not None:
             write_message(sys.stdout.buffer, resp)
+        if stop_reading and (req.get("method") or "") == "initialize":
+            time.sleep(600)
 
 
 if __name__ == "__main__":
