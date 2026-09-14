@@ -375,10 +375,53 @@ async def test_audit_bounce_capped_at_one():
         session_log=log,
     )
     result = await agent.run("Fix the bug")
-    # second identical claim is committed as-is (advisory, bounded)
+    # second identical claim is committed as-is (advisory, bounded) — and the
+    # committed reply is recorded as unbacked: a claim this turn's tool calls
+    # cannot support survived into the transcript.
     assert result.text == "I fixed utils.py."
-    assert log.events[-1].data["reason"]["completion_audit"] == {"reminders": 1}
+    assert log.events[-1].data["reason"]["completion_audit"] == {
+        "reminders": 1,
+        "unbacked": True,
+    }
     assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_audit_state_resets_at_each_turn_boundary():
+    """One AgentLoop serves a whole session, so turn 1's bounce budget and write
+    trace must not carry into turn 2 — a stale trace would let turn 1's writes
+    back a turn 2 claim, and a spent budget would silence turn 2's audit."""
+    log = make_log()
+    provider = RecordingProvider([
+        LLMResponse(text="I fixed utils.py.", stop_reason="end_turn"),
+        LLMResponse(text="I fixed utils.py.", stop_reason="end_turn"),
+        LLMResponse(text="I fixed utils.py.", stop_reason="end_turn"),
+        LLMResponse(text="Corrected: nothing was changed.", stop_reason="end_turn"),
+    ])
+    agent = AgentLoop(
+        model="test",
+        provider=provider,
+        tools=ToolBridge(),
+        system_prompt="s",
+        session_log=log,
+    )
+    await agent.run("Fix the bug in utils.py")
+    assert log.events[-1].data["reason"]["completion_audit"] == {
+        "reminders": 1,
+        "unbacked": True,
+    }
+
+    result = await agent.run("Try again")
+    assert result.text.startswith("Corrected:")
+    # turn 2 got its own reminder (the budget was re-armed) ...
+    audit_msgs = [
+        e.data for e in log.events
+        if e.type == "user/message" and e.data["source"] == "completion-audit"
+    ]
+    assert len(audit_msgs) == 2
+    # ... and its record is clean: unbacked never leaks across turns.
+    reason = log.events[-1].data["reason"]
+    assert reason["completion_audit"] == {"reminders": 1}
 
 
 @pytest.mark.asyncio

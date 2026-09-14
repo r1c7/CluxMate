@@ -27,15 +27,35 @@ class TaskTool(BaseTool):
     )
 
     @staticmethod
-    def _child_end_kind(child: Any) -> str | None:
-        """``kind`` of the child's most recent ``turn/end`` event, if any."""
+    def _child_turn_reason(child: Any) -> dict:
+        """The child's most recent ``turn/end`` reason, or ``{}``."""
         log = getattr(child, "session_log", None)
         if log is None:
-            return None
+            return {}
         for event in reversed(log.events):
             if event.type == "turn/end":
-                return (event.data.get("reason") or {}).get("kind")
-        return None
+                return event.data.get("reason") or {}
+        return {}
+
+    @classmethod
+    def _child_end_kind(cls, child: Any) -> str | None:
+        """``kind`` of the child's most recent ``turn/end`` event, if any."""
+        return cls._child_turn_reason(child).get("kind")
+
+    @classmethod
+    def _child_audit_unbacked(cls, child: Any) -> bool:
+        """Whether the child's own completion audit refuted its final reply.
+
+        The child runs the same loop as the root agent, so its ``turn/end``
+        records ``completion_audit.unbacked`` when the reply it committed still
+        claimed work that its own tool calls (or, for bash turns, the
+        filesystem) cannot support — after the bounce budget was spent. That is
+        the engine's record of what the child did contradicting the prose the
+        child wrote about it, so it outranks the ``**Status**:`` line the child
+        wrote by hand (see ``_normalize_status``).
+        """
+        audit = cls._child_turn_reason(child).get("completion_audit") or {}
+        return bool(audit.get("unbacked"))
 
     def __init__(self, builder: "AgentBuilder"):
         self._builder = builder
@@ -246,7 +266,11 @@ class TaskTool(BaseTool):
             # header below, so the parent can't miss a truncated child.
             end_kind = self._child_end_kind(child)
             abnormal = end_kind in self._ABNORMAL_END_KINDS
-            status = _normalize_status(_reported_status(text), end_kind)
+            # The child's own audit record, not its prose: a committed reply its
+            # own tool calls did not back means the parent must not read this
+            # result as a clean success.
+            unbacked = self._child_audit_unbacked(child)
+            status = _normalize_status(_reported_status(text), end_kind, unbacked)
             text, blocked = await self._run_subagent_stop_hook(
                 subagent_type, description, prompt, child_id, text, error=None,
             )
@@ -261,6 +285,7 @@ class TaskTool(BaseTool):
                 out_tokens=result.out_tokens,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 queued_ms=queued_ms,
+                note="unbacked=claim" if unbacked else None,
             )
             parts = [header]
             if dropped:
@@ -373,16 +398,20 @@ def _reported_status(text: str) -> str | None:
     return None
 
 
-def _normalize_status(reported: str | None, end_kind: str | None) -> str:
+def _normalize_status(
+    reported: str | None, end_kind: str | None, audit_unbacked: bool = False
+) -> str:
     """Reconcile the child's claim with how its turn actually ended.
 
     The child's own ``turn/end`` is authoritative: a child that claims success
-    but was cut off at max-turns is reported as partial. A child that already
-    admits a worse outcome keeps its word (more specific than ours).
+    but was cut off at max-turns is reported as partial, and so is one whose
+    committed reply failed its OWN completion audit — a claim the tool calls it
+    actually made cannot back (``audit_unbacked``). A child that already admits
+    a worse outcome keeps its word (more specific than ours).
     """
     if reported in ("partial", "failed", "blocked"):
         return reported
-    if end_kind in TaskTool._ABNORMAL_END_KINDS:
+    if end_kind in TaskTool._ABNORMAL_END_KINDS or audit_unbacked:
         return "partial"
     return reported or "unknown"
 

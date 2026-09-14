@@ -730,10 +730,16 @@ class AgentLoop:
         self._repeat_count = 0
         # Completion-audit state (core/completion_audit.py): the per-turn trace
         # of executed writes + bash calls that the end_turn audit reconciles
-        # final-reply claims against, the audit bounces spent this turn, and
-        # the wall-clock instant this turn started (the filesystem fallback
-        # compares claimed files' mtime against it).
+        # final-reply claims against, the audit bounces spent this turn, the
+        # wall-clock instant this turn started (the filesystem fallback compares
+        # claimed files' mtime against it), and whether the reply the loop
+        # actually committed still FAILED the audit (`_completion_audit_unbacked`
+        # — the evidence gap a parent agent reads at the delegation boundary,
+        # see tools/task.py). _run_loop re-initializes all of it at the turn
+        # boundary: one AgentLoop serves a whole session's turns, so a trace that
+        # is never cleared would let turn 1's writes back a turn 2 claim.
         self._completion_audit_retries = 0
+        self._completion_audit_unbacked = False
         self._turn_write_paths: set[str] = set()
         self._turn_any_bash = False
         self._turn_start_ts = time.time()
@@ -838,11 +844,15 @@ class AgentLoop:
             # Self-close any tool calls left without a result before the turn
             # closes, so an aborted turn's surface is still a valid transcript.
             self._close_orphaned_tools()
-            if self._completion_audit_retries:
+            if self._completion_audit_retries or self._completion_audit_unbacked:
                 # Audit trail: how many completion-audit reminders this turn
-                # consumed. `reason.kind` already says completed/aborted/etc.
+                # consumed, and — when the committed reply still failed the
+                # audit — `unbacked: True`. `reason.kind` already says
+                # completed/aborted/etc. Sparse on purpose: a turn that fixed
+                # its claim carries no `unbacked` key at all.
                 end_reason["completion_audit"] = {
-                    "reminders": self._completion_audit_retries
+                    "reminders": self._completion_audit_retries,
+                    **({"unbacked": True} if self._completion_audit_unbacked else {}),
                 }
             if self._compaction_stale_retries:
                 # Audit trail: compactions discarded because the surface moved
@@ -875,6 +885,14 @@ class AgentLoop:
             messages.append({"role": "user", "content": recall})
 
         tool_calls_made = 0
+        # Turn boundary for every piece of completion-audit state (see __init__):
+        # the trace, the bounce budget and the "committed reply was unbacked"
+        # record all describe THIS turn only.
+        self._completion_audit_retries = 0
+        self._completion_audit_unbacked = False
+        self._turn_write_paths = set()
+        self._turn_any_bash = False
+        self._turn_start_ts = time.time()
         # Accumulate per-LLM-call cache token counts across all turns so the UI
         # can show a single per-turn hit rate. Both may stay 0 when the provider
         # omits usage details. input_tokens_total tracks the total prompt tokens
@@ -1140,33 +1158,35 @@ class AgentLoop:
                 # committed. On a hit, bounce the reply back to the model with
                 # the reminder as a synthetic user message — same mechanism and
                 # boundedness as the Stop-hook block path below. Advisory only:
-                # after MAX_COMPLETION_AUDIT_RETRIES the reply is committed
-                # as-is (the bounce count lands in turn/end for the audit
-                # trail).
-                if (
-                    self._completion_audit_retries
-                    < self.MAX_COMPLETION_AUDIT_RETRIES
-                ):
-                    reminder = audit_completion(
-                        text,
-                        write_paths=self._turn_write_paths,
-                        any_bash=self._turn_any_bash,
-                        tool_calls_made=tool_calls_made,
-                        # Filesystem fallback for bash turns: the tool record
-                        # can't say WHAT a bash call changed, so claimed files
-                        # are checked against mtime >= turn start. Only when
-                        # this agent knows its cwd.
-                        resolve_touched=(
-                            partial(
-                                resolve_file_touched,
-                                cwd=self._cwd,
-                                turn_start_ts=self._turn_start_ts,
-                            )
-                            if self._cwd
-                            else None
-                        ),
-                    )
-                    if reminder is not None:
+                # once the bounce budget is spent the reply is committed as-is,
+                # and the failure is recorded (`_completion_audit_unbacked` →
+                # turn/end) rather than being dropped — a committed claim the
+                # turn's own evidence does not support is exactly what a
+                # delegating parent must not read as a clean success.
+                reminder = audit_completion(
+                    text,
+                    write_paths=self._turn_write_paths,
+                    any_bash=self._turn_any_bash,
+                    tool_calls_made=tool_calls_made,
+                    # Filesystem fallback for bash turns: the tool record
+                    # can't say WHAT a bash call changed, so claimed files
+                    # are checked against mtime >= turn start. Only when
+                    # this agent knows its cwd.
+                    resolve_touched=(
+                        partial(
+                            resolve_file_touched,
+                            cwd=self._cwd,
+                            turn_start_ts=self._turn_start_ts,
+                        )
+                        if self._cwd
+                        else None
+                    ),
+                )
+                if reminder is not None:
+                    if (
+                        self._completion_audit_retries
+                        < self.MAX_COMPLETION_AUDIT_RETRIES
+                    ):
                         self._completion_audit_retries += 1
                         audit_msg = {"role": "user", "content": reminder}
                         messages.append(audit_msg)
@@ -1184,6 +1204,8 @@ class AgentLoop:
                         if callbacks is not None:
                             await callbacks.on_text_restart()
                         continue
+                    # Bounce budget spent: this reply is committed unverified.
+                    self._completion_audit_unbacked = True
 
                 # Stop hook fires BEFORE the assistant message is committed, so a
                 # block can reject this reply and re-run without polluting history
