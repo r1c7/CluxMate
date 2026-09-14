@@ -659,6 +659,24 @@ export interface RetrievalConfigPayload {
   enabled: boolean
 }
 
+// One retrieval-memory fact, read from disk for Settings → Memory. Facts are
+// one markdown file per fact, written by the agent's `remember` tool; the UI
+// lists them read-only and can delete one at a time.
+export interface MemoryFact {
+  id: string            // file name minus .md — 12 hex from `remember`, free-form when hand-dropped
+  scope: 'global' | 'project'
+  body: string          // markdown body; '\n\n[truncated]' appended when capped
+  truncated: boolean
+  mtimeMs: number       // last write — the list is sorted by it, newest first
+}
+
+// `facts` is capped at FACT_LIST_MAX; `total` is every fact on disk, so the UI
+// can say "showing 200 of N" instead of implying N == facts.length.
+export interface MemoryFactList {
+  facts: MemoryFact[]
+  total: number
+}
+
 declare global {
   interface Window {
     electronAPI: ElectronAPI
