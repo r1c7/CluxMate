@@ -13,7 +13,6 @@ import json
 import os
 import shlex
 import shutil
-import select
 import subprocess
 import threading
 import time
@@ -233,33 +232,15 @@ def _uri_to_path(uri: str) -> str:
     return url2pathname(unquote(parsed.path))
 
 
-def _pipe_readable(fd: int, timeout: float) -> bool:
-    """Wait up to ``timeout`` seconds for ``fd`` to become readable.
+class _Waiter:
+    """One outstanding request's response slot, filled by the pump thread."""
 
-    POSIX uses select(). Windows' select() only supports sockets, so poll the
-    pipe handle with PeekNamedPipe (anonymous pipes, as Popen(stdout=PIPE)
-    creates) — the same bounded-wait semantics as select without ever blocking
-    on a silent server.
-    """
-    if os.name != "nt":
-        ready, _, _ = select.select([fd], [], [], timeout)
-        return bool(ready)
-    import ctypes
-    import msvcrt
+    __slots__ = ("event", "msg", "error")
 
-    handle = msvcrt.get_osfhandle(fd)
-    deadline = time.monotonic() + timeout
-    while True:
-        avail = ctypes.c_uint32(0)
-        ok = ctypes.windll.kernel32.PeekNamedPipe(
-            ctypes.c_void_p(handle), None, 0, None, ctypes.byref(avail), None
-        )
-        if ok and avail.value > 0:
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(remaining, 0.01))
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.msg: dict | None = None
+        self.error: str | None = None
 
 
 class LSPClient:
@@ -276,15 +257,94 @@ class LSPClient:
         self.root = root
         self._sandbox = sandbox
         self.pos_encoding = "utf-16"
-        self._lock = threading.Lock()
+        # Frames must not interleave on the wire; everything else about the
+        # transport is single-writer (see _start_threads).
+        self._write_lock = threading.Lock()
+        self._waiters: dict[int, _Waiter] = {}
+        self._waiters_lock = threading.Lock()
+        self._push_cond = threading.Condition()
+        self._push_count = 0
+        self._sync_marks: dict[str, int] = {}
+        self._broken: str | None = None
+        self._pump: threading.Thread | None = None
+        self._stopping = threading.Event()
         self._proc: subprocess.Popen | None = None
         self._next_id = 0
         self._docs: dict[str, tuple[int, int, float]] = {}  # uri -> (version, size, mtime)
         self._diagnostics: dict[str, list[dict]] = {}  # uri -> [Diagnostic]
 
     def _next_request_id(self) -> int:
-        self._next_id += 1
-        return self._next_id
+        with self._waiters_lock:
+            self._next_id += 1
+            return self._next_id
+
+    def _start_threads(self) -> None:
+        """Start the client's I/O threads (idempotent)."""
+        if self._pump is None:
+            self._pump = threading.Thread(
+                target=self._pump_loop, name="lsp-pump", daemon=True
+            )
+            self._pump.start()
+
+    def _ensure_threads(self) -> None:
+        """Start the I/O threads for a proc created outside start()."""
+        if self._proc is not None and self._pump is None:
+            self._start_threads()
+
+    def _pump_loop(self) -> None:
+        """Drain stdout forever — the invariant the whole client rests on.
+
+        If nothing reads stdout, the server eventually blocks inside its OWN
+        write (Windows pipe writes are synchronous, ~4 KiB) and stops reading
+        stdin; the client's next write then blocks in flush() against it and
+        both sides are wedged for good (see the design doc).
+        """
+        while not self._stopping.is_set():
+            proc = self._proc
+            if proc is None or proc.stdout is None:
+                self._mark_broken("language server is gone")
+                return
+            try:
+                msg = self._read()
+            except Exception as e:
+                self._mark_broken(f"language server read failed: {e}")
+                return
+            if msg is None:
+                # EOF or an unparseable frame: the stream is no longer usable.
+                self._mark_broken("language server exited")
+                return
+            self._dispatch(msg)
+
+    def _dispatch(self, msg: dict) -> None:
+        """Route one frame from the server (pump thread only)."""
+        if msg.get("method") is not None:
+            if msg.get("id") is not None:
+                # A server-initiated request: real servers block until answered,
+                # so dropping it deadlocks both sides.
+                self._respond_to_server_request(msg)
+            elif msg.get("method") == "textDocument/publishDiagnostics":
+                self._handle_push(msg)
+                with self._push_cond:
+                    self._push_count += 1
+                    self._push_cond.notify_all()
+            return
+        with self._waiters_lock:
+            waiter = self._waiters.pop(msg.get("id"), None)
+        if waiter is not None:
+            waiter.msg = msg
+            waiter.event.set()
+
+    def _mark_broken(self, reason: str) -> None:
+        """Wake every caller parked on this server — it is not coming back."""
+        self._broken = reason
+        with self._waiters_lock:
+            waiters = list(self._waiters.values())
+            self._waiters.clear()
+        for w in waiters:
+            w.error = reason
+            w.event.set()
+        with self._push_cond:
+            self._push_cond.notify_all()
 
     def start(self) -> bool:
         """Spawn + initialize handshake. Returns True on success."""
@@ -314,6 +374,7 @@ class LSPClient:
                 encoding="utf-8",
                 errors="replace",
             )
+        self._start_threads()
         try:
             result = self.request("initialize", {
                 "processId": os.getpid(),
@@ -342,7 +403,7 @@ class LSPClient:
         return True
 
     def _write(self, payload: dict) -> None:
-        """Write one message using LSP's Content-Length framing.
+        """Write one framed message (serialized: frames must not interleave).
 
         LSP stdio is NOT newline-delimited JSON: every message is prefixed
         with a ``Content-Length: <byte-count>\\r\\n\\r\\n`` header and the body
@@ -352,9 +413,11 @@ class LSPClient:
         """
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         frame = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
-        stream = self._proc.stdin.buffer
-        stream.write(frame)
-        stream.flush()
+        with self._write_lock:
+            assert self._proc is not None and self._proc.stdin is not None
+            stream = self._proc.stdin.buffer
+            stream.write(frame)
+            stream.flush()
 
     def _read(self) -> dict | None:
         """Read one Content-Length framed message; None if the server exited."""
@@ -385,9 +448,7 @@ class LSPClient:
     def _notify(self, method: str, params: dict) -> None:
         notif = {"jsonrpc": "2.0", "method": method, "params": params}
         try:
-            with self._lock:
-                if self._proc and self._proc.stdin:
-                    self._write(notif)
+            self._write(notif)
         except Exception:
             pass
 
@@ -418,48 +479,38 @@ class LSPClient:
     def _send(
         self, method: str, params: dict, timeout: float | None = None
     ) -> dict | None:
-        """Write a request and read until its response arrives.
+        """Write a request and wait for the pump to deliver its response.
 
         ``timeout`` bounds the wait: a server that stays silent past the
-        deadline raises TimeoutError. Without it, a silent server blocked the
-        readline forever — the post-write diagnostics path hung a whole turn on
-        a broken pyright install (it starts but never answers initialize).
+        deadline raises TimeoutError. Without it the wait ends only when the
+        server dies (``_mark_broken``) — never by itself.
         """
+        if self._broken is not None:
+            return None
         req_id = self._next_request_id()
         req = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-        assert self._proc is not None and self._proc.stdin and self._proc.stdout
-        with self._lock:
+        waiter = _Waiter()
+        with self._waiters_lock:
+            self._waiters[req_id] = waiter
+        # Register the waiter before starting the pump: the pump may read a
+        # pre-buffered response immediately and must be able to deliver it.
+        self._ensure_threads()
+        try:
             self._write(req)
-            deadline = None if timeout is None else time.monotonic() + timeout
-            while True:
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError(
-                            f"{method}: language server did not respond within {timeout}s"
-                        )
-                    if not _pipe_readable(self._proc.stdout.fileno(), min(remaining, 0.5)):
-                        continue
-                msg = self._read()
-                if msg is None:
-                    return None
-                # A message carrying BOTH id and method is a server→client
-                # request (workspace/configuration, client/registerCapability,
-                # window/workDoneProgress/create, ...). Real servers block
-                # until it is answered, so we must reply — dropping it deadlocks
-                # both sides. Its id lives in the SERVER's id space, which can
-                # collide with our req_id, so this check must come before the
-                # response match below.
-                if msg.get("method") is not None:
-                    if msg.get("id") is not None:
-                        self._respond_to_server_request(msg)
-                    elif msg.get("method") == "textDocument/publishDiagnostics":
-                        self._handle_push(msg)
-                    # else: a notification ($/progress, ...) — nothing to
-                    # answer, keep reading.
-                    continue
-                if msg.get("id") == req_id:
-                    return msg
+        except BaseException:
+            with self._waiters_lock:
+                self._waiters.pop(req_id, None)
+            raise
+        if not waiter.event.wait(timeout):
+            # Late responses have nobody left to receive them; not an error.
+            with self._waiters_lock:
+                self._waiters.pop(req_id, None)
+            raise TimeoutError(
+                f"{method}: language server did not respond within {timeout}s"
+            )
+        if waiter.error is not None:
+            return None
+        return waiter.msg
 
     def diagnostics_for(self, uri: str) -> list[dict]:
         """Return the latest cached publishDiagnostics for a document (may be
@@ -485,42 +536,24 @@ class LSPClient:
         self._diagnostics[uri] = diags
 
     def drain_pending(self, timeout_seconds: float) -> None:
-        """Drain pending server→client frames, caching publishDiagnostics and
-        answering requests.
+        """Wait until a push newer than the latest ensure_synced arrives.
 
-        Waits up to the full ``timeout_seconds`` for the FIRST frame (the server
-        pushes diagnostics shortly after didOpen/didChange); once at least one
-        frame has been read, subsequent reads use a zero-timeout probe so the
-        call returns promptly once the push has arrived rather than holding the
-        turn for the whole window.
+        The pump caches pushes as they come, so this no longer reads the pipe:
+        it waits for ``_push_count`` to move past the watermark recorded by the
+        didOpen/didChange calls it covers, and returns as soon as anything
+        newer lands — a quiet server is not an error, so the window simply
+        expires (same behaviour as the previous zero-timeout probe loop).
         """
-        if self._proc is None or self._proc.stdout is None:
-            return
-        fd = self._proc.stdout.fileno()
         deadline = time.monotonic() + timeout_seconds
-        read_any = False
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            probe = 0.0 if read_any else remaining
-            if not _pipe_readable(fd, probe):
-                return
-            with self._lock:
-                # Re-check availability under the lock: a concurrent reader
-                # (e.g. _send) may have consumed the frame between the probe
-                # and acquiring the lock; do not let _read() block on nothing.
-                if not _pipe_readable(fd, 0.0):
+        with self._push_cond:
+            marks = list(self._sync_marks.values())
+            self._sync_marks.clear()
+            floor = min(marks) if marks else self._push_count
+            while self._push_count <= floor:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     return
-                msg = self._read()
-                if msg is None:
-                    return
-                if msg.get("method") is not None:
-                    if msg.get("id") is not None:
-                        self._respond_to_server_request(msg)
-                    elif msg.get("method") == "textDocument/publishDiagnostics":
-                        self._handle_push(msg)
-                read_any = True
+                self._push_cond.wait(remaining)
 
     def _respond_to_server_request(self, msg: dict) -> None:
         """Answer a server-initiated request so the server can proceed.
@@ -529,7 +562,7 @@ class LSPClient:
         workspace/configuration wants one settings object per requested item
         (null = "use defaults"); everything else (registerCapability,
         workDoneProgress/create, ...) is acknowledged with a null result.
-        Written directly (not via _notify) because we already hold _lock.
+        Called by the pump thread; _write takes the wire lock itself.
         """
         method = msg.get("method", "")
         if method == "workspace/configuration":
@@ -561,6 +594,10 @@ class LSPClient:
                 "contentChanges": [{"text": text}],
             })
             self._docs[uri] = (version, st.st_size, st.st_mtime)
+        # Mark the push watermark this write is covered by, so a following
+        # drain_pending returns as soon as the server pushes anything newer.
+        with self._push_cond:
+            self._sync_marks[uri] = self._push_count
 
     def _terminate(self) -> None:
         """Best-effort terminate+reap of the server subprocess (handshake timeout)."""
@@ -580,15 +617,19 @@ class LSPClient:
                 pass
 
     def shutdown(self) -> None:
-        """Kill subprocess. Idempotent; unblocks readline waiters by killing first."""
+        """Kill subprocess. Idempotent; unblocks the pump by killing first."""
+        self._stopping.set()
         if self._proc is not None:
             try:
                 if self._proc.poll() is None:
                     self._proc.kill()
             except Exception:
                 pass
-        with self._lock:
+        with self._write_lock:
             self._proc = None
+        if self._pump is not None:
+            self._pump.join(_PUMP_JOIN_SECONDS)
+        self._mark_broken("language server shut down")
 
 
 _MAX_LOCATIONS = 100
@@ -609,6 +650,9 @@ _AUTO_DIAGNOSTICS_DRAIN_SECONDS = 1.0
 # result forever — the post-write diagnostics path has no user-visible cancel
 # to fall back on.
 _HANDSHAKE_TIMEOUT_SECONDS = 5.0
+# How long shutdown waits for the pump thread to notice a dead pipe. The kill
+# happens first, so this is a courtesy join, not a contract.
+_PUMP_JOIN_SECONDS = 2.0
 _AUTO_DIAGNOSTICS_MAX = 20
 # Ceiling for one auto-install attempt (npm/rustup can be slow); the install
 # runs synchronously inside the triggering tool call, which is why it is

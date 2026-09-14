@@ -13,6 +13,15 @@ Run as: python tests/core/fake_lsp_server.py
 import json
 import sys
 
+# A document containing this marker makes the server flood stdout with ~200 KB
+# of progress notifications BEFORE it goes back to reading stdin — how a real
+# language server behaves while it re-indexes a workspace. The client must be
+# draining, or the server blocks in its own write (Windows pipes hold ~4 KiB),
+# stops reading stdin, and the client's next write deadlocks against it.
+FLOOD_MARKER = "FLOOD_STDOUT"
+FLOOD_MESSAGES = 50
+FLOOD_BLOB = "x" * 4000
+
 
 def read_message(stream) -> dict | None:
     """Read one Content-Length framed message; None on EOF."""
@@ -48,6 +57,16 @@ def handle_request(req: dict, stream) -> dict | None:
 
     if method in ("textDocument/didOpen", "textDocument/didChange"):
         text = (params.get("textDocument") or {}).get("text") or ""
+        if FLOOD_MARKER in text:
+            # Written one frame at a time and blocking (no drain on the other
+            # end ⇒ this loop stalls mid-way, exactly like pyright does).
+            for i in range(FLOOD_MESSAGES):
+                write_message(stream, {
+                    "jsonrpc": "2.0",
+                    "method": "$/progress",
+                    "params": {"token": "flood", "value": {"kind": "report", "message": FLOOD_BLOB}},
+                })
+            return None
         if "NEEDS_DIAGNOSTICS" not in text:
             return None
         uri = (params.get("textDocument") or {}).get("uri", "file:///fake/a.py")

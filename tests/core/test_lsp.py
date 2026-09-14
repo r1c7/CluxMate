@@ -2,6 +2,8 @@
 
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -129,6 +131,7 @@ def test_install_cmd_accepts_string_or_list(tmp_path, monkeypatch):
 
 
 from cluxmate.core.lsp import LSPClient, _path_to_uri
+from tests.core.fake_lsp_server import FLOOD_MARKER
 
 _FAKE_LSP_SERVER = Path(__file__).parent / "fake_lsp_server.py"
 
@@ -453,6 +456,8 @@ def test_read_consumes_exact_bytes():
 
 
 def test_send_caches_publish_diagnostics_while_awaiting_response():
+    # The pump caches pushes continuously; a push that arrives while a request
+    # is in flight must still be visible via diagnostics_for afterwards.
     spec = _ServerSpec(command="fake", extension_to_language={".py": "python"})
     client = LSPClient(spec, language_id="python", root=".")
     push = {"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
@@ -570,3 +575,84 @@ def test_handle_push_ignores_malformed_params():
                          "params": {"uri": "file:///x.py",
                                     "diagnostics": [{"severity": 1, "message": "boom"}]}})
     assert client.diagnostics_for("file:///x.py") == [{"severity": 1, "message": "boom"}]
+
+
+def test_client_survives_a_server_that_floods_stdout(tmp_path):
+    """Regression (2026-09-14): a server whose stdout fills used to deadlock.
+
+    The server floods ~200 KB after didOpen without anyone reading; it blocks
+    in its own write and stops reading stdin. The client's next write (a 20 KB
+    didChange) then blocked in flush() forever, holding the client lock — the
+    write tool never returned and the turn was wedged for good.
+    """
+    import threading
+
+    client = _lsp_client(tmp_path)
+    assert client.start() is True   # _lsp_client only builds the client
+    path = tmp_path / "a.py"
+    # Both the didOpen and the didChange bodies must exceed the ~4 KiB pipe.
+    path.write_text(f"# {FLOOD_MARKER}\n" + "y = 1\n" * 4000, encoding="utf-8")
+    uri = _path_to_uri(str(path))
+    outcome: list = []
+
+    def _work():
+        try:
+            client.ensure_synced(uri, str(path))          # server floods here
+            path.write_text("y = 2\n" * 4000, encoding="utf-8")
+            client.ensure_synced(uri, str(path))          # 20 KB write: deadlocked before the fix
+            outcome.append(client.request(
+                "textDocument/documentSymbol", {"textDocument": {"uri": uri}}, timeout=10,
+            ))
+        except BaseException as e:  # noqa: BLE001 - reported below
+            outcome.append(e)
+        finally:
+            outcome.append("done")
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(timeout=20)
+    try:
+        assert outcome and outcome[-1] == "done", "client deadlocked on a flooding server"
+        assert outcome[0] == [], f"the server was not usable afterwards: {outcome[0]!r}"
+    finally:
+        client.shutdown()
+        t.join(timeout=10)
+
+
+def test_pump_delivers_a_response_without_a_caller_reading(tmp_path):
+    """The pump, not the caller, owns stdout: a response is cached before _send."""
+    client = _lsp_client(tmp_path)
+    try:
+        assert client.start() is True
+        uri = _path_to_uri(str(tmp_path / "a.py"))
+        results = []
+        t = threading.Thread(
+            target=lambda: results.append(client.request(
+                "textDocument/hover",
+                {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}},
+                timeout=10,
+            )),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=15)
+        assert not t.is_alive(), "hover request never returned"
+        assert results and "foo" in results[0]["contents"]["value"]
+    finally:
+        client.shutdown()
+
+
+def test_broken_server_wakes_a_waiting_caller(tmp_path):
+    """A server that exits must not leave a caller parked on its waiter."""
+    client = _lsp_client(tmp_path)
+    try:
+        assert client.start() is True
+        client._terminate()          # out-of-band death, no shutdown() bookkeeping
+        t0 = time.monotonic()
+        with pytest.raises(RuntimeError, match="language server exited"):
+            client.request("textDocument/definition",
+                           {"textDocument": {"uri": "file:///x.py"},
+                            "position": {"line": 0, "character": 0}})
+        assert time.monotonic() - t0 < 10
+    finally:
+        client.shutdown()
