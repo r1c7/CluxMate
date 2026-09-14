@@ -17,6 +17,7 @@ import {
   FACT_MAX_BYTES,
   deleteFact,
   factsDir,
+  isFactFile,
   memoryRoots,
   scanFacts,
 } from '../src/main/memory-facts.ts'
@@ -61,15 +62,31 @@ test('lists every .md file in the roots and nothing else', () => {
     const dir = factsDir(f.home, f.cwd, 'global')
     fs.writeFileSync(path.join(dir, 'notes.md'), 'hand dropped')
     fs.writeFileSync(path.join(dir, 'AAAABBBBCCCC.md'), 'upper case hex')
+    fs.writeFileSync(path.join(dir, 'UPPER.MD'), 'upper case suffix')
     fs.writeFileSync(path.join(dir, `${ID_A}.md.bak`), 'x')   // not .md
     fs.writeFileSync(path.join(dir, 'README.txt'), 'x')       // not .md
     fs.mkdirSync(path.join(dir, `${ID_B}.md`))                // a directory, not a file
     const out = scanFacts(f.home, f.cwd)
-    assert.deepEqual(out.facts.map((x) => x.id).sort(), ['AAAABBBBCCCC', 'notes'])
-    assert.equal(out.total, 2)
+    // On Windows glob is case-insensitive, so UPPER.MD is a fact there and its
+    // stem ('UPPER') is the id; on POSIX it is not a fact at all.
+    const expected = ['AAAABBBBCCCC', 'notes'].concat(isFactFile('UPPER.MD') ? ['UPPER'] : [])
+    assert.deepEqual(out.facts.map((x) => x.id).sort(), expected.sort())
+    assert.equal(out.total, expected.length)
   } finally {
     f.cleanup()
   }
+})
+
+test('case-variant suffixes count only where python glob is case-insensitive', () => {
+  assert.equal(isFactFile('notes.md', true), true)
+  assert.equal(isFactFile('notes.md', false), true)
+  assert.equal(isFactFile('NOTES.MD', true), true)    // Windows: fnmatch normcases
+  assert.equal(isFactFile('NOTES.MD', false), false)  // POSIX: it does not
+  assert.equal(isFactFile('MiXeD.Md', true), true)
+  assert.equal(isFactFile('MiXeD.Md', false), false)
+  assert.equal(isFactFile('.md', true), false)
+  assert.equal(isFactFile('.md', false), false)
+  assert.equal(isFactFile('notes.txt', true), false)
 })
 
 test('missing roots are empty, not an error', () => {

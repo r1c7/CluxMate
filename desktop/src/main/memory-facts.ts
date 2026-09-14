@@ -13,10 +13,20 @@ export const FACT_SUFFIX = '.md'
 export const FACT_MAX_BYTES = 8 * 1024
 export const FACT_LIST_MAX = 200
 
+// pathlib delegates its glob to fnmatch, which normcases the pattern on
+// Windows: the Python index's `*.md` is case-INSENSITIVE there and
+// case-SENSITIVE on POSIX (measured: `Path.glob("*.md")` returns NOTES.MD and
+// MiXeD.Md on Windows). Mirror that, or a hand-dropped NOTES.MD is recalled by
+// the agent yet invisible here — the exact gap this feature exists to close.
+const CASE_INSENSITIVE_FACTS = process.platform === 'win32'
+
 // Anything readdir hands us ending in .md, except the bare '.md' itself. Names
-// can never contain a path separator, so this cannot escape the directory.
-export function isFactFile(name: string): boolean {
-  return name.length > FACT_SUFFIX.length && name.endsWith(FACT_SUFFIX)
+// can never contain a path separator, so this cannot escape the directory. The
+// second parameter exists so both platform branches stay testable off-Windows.
+export function isFactFile(name: string, caseInsensitive = CASE_INSENSITIVE_FACTS): boolean {
+  if (name.length <= FACT_SUFFIX.length) return false
+  const tail = name.slice(-FACT_SUFFIX.length)
+  return caseInsensitive ? tail.toLowerCase() === FACT_SUFFIX : tail === FACT_SUFFIX
 }
 
 export function factsDir(homeDir: string, cwd: string, scope: 'global' | 'project'): string {
