@@ -7,7 +7,7 @@ import pytest
 from cluxmate.core.subagents import (
     BUILTIN_AGENT_TYPES,
     DEFAULT_SUBAGENT_MAX_TURNS,
-    WRITE_TOOL_NAMES,
+    EDIT_TOOL_NAMES,
     SubagentRegistry,
 )
 
@@ -243,7 +243,8 @@ def test_builtin_reviewer_can_verify_but_never_edit():
     the change it is judging."""
     rv = BUILTIN_AGENT_TYPES["reviewer"]
     assert set(rv.tools) == {"read_file", "grep", "list_dir", "lsp", "bash"}
-    assert not (set(rv.tools) & (WRITE_TOOL_NAMES - {"bash"}))
+    assert rv.can_edit is False
+    assert not (set(rv.tools) & EDIT_TOOL_NAMES)
     # No recursion: a reviewer reviews.
     assert "task" not in rv.tools
     assert rv.subagents_mode == "none"
@@ -252,6 +253,17 @@ def test_builtin_reviewer_can_verify_but_never_edit():
     assert rv.readonly is False
     assert rv.builtin is True
     assert rv.instructions.strip()
+
+
+def test_can_edit_separates_running_from_editing():
+    """`readonly` (the scheduling question) and `can_edit` (what the child prompt
+    may claim) are different questions — bash collapses them otherwise."""
+    gp = BUILTIN_AGENT_TYPES["general-purpose"]
+    ex = BUILTIN_AGENT_TYPES["explore"]
+    rv = BUILTIN_AGENT_TYPES["reviewer"]
+    assert (gp.can_edit, gp.readonly) == (True, False)
+    assert (ex.can_edit, ex.readonly) == (False, True)
+    assert (rv.can_edit, rv.readonly) == (False, False)
 
 
 def test_reviewer_instructions_carry_the_gate_contract():

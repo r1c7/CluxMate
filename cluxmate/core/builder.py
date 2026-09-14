@@ -809,10 +809,12 @@ class AgentBuilder:
             getattr(t, "name", "") == "remember" for t in tools
         )
         # The review gate is advertised only when THIS agent can actually
-        # dispatch a reviewer — it holds the `task` tool AND its allowlist still
-        # contains the slug (a custom registry can override the built-in away).
-        # Prose telling the model to do something its tool schema forbids is
-        # worse than silence.
+        # dispatch a reviewer: it must hold the `task` tool (absent in plan
+        # mode, and under with_subagents(False)) and the slug must survive the
+        # allowlist. The allowlist half is defensive — a built-in cannot be
+        # deleted from the registry (a same-slug file replaces it in place), so
+        # today only a CHILD builder's `_subagent_allow` could narrow it away,
+        # and children don't render this prompt.
         has_task = any(getattr(t, "name", "") == "task" for t in tools)
         has_reviewer = has_task and "reviewer" in self.allowed_subagent_slugs()
         return render_system_prompt(
@@ -1108,6 +1110,7 @@ class AgentBuilder:
             working_directory=self._cwd,
             agent_instructions=profile.instructions,
             readonly=profile.readonly,
+            can_edit=profile.can_edit,
             delegatable=", ".join(child.allowed_subagent_slugs()),
             max_turns=profile.max_turns,
         )

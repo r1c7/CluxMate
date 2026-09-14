@@ -133,6 +133,21 @@ def test_builtin_reviewer_child_prompt_carries_its_contract(tmp_path, monkeypatc
     names = {d["name"] for d in child.tools.definitions()}
     assert names == {"read_file", "grep", "list_dir", "lsp", "bash"}
     assert "task" not in names
+    # Rule 1 must not tell a reviewer it may modify what it is reviewing: bash
+    # is the evidence tool, not an editing licence.
+    assert "You can modify files and run commands." not in child.system_prompt
+    assert "You hold no file-editing tool" in child.system_prompt
+
+
+def test_readonly_and_editing_child_prompts_are_unchanged(tmp_path, monkeypatch):
+    """The three-way branch keeps the two older types saying exactly what they
+    said before: a writer may modify, a true read-only type may not."""
+    _home(monkeypatch, tmp_path)
+    b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
+    gp = b.build_child("general-purpose", "d", "c1")
+    assert "You can modify files and run commands." in gp.system_prompt
+    ex = b.build_child("explore", "d", "c2")
+    assert "You are a read-only agent" in ex.system_prompt
 
 
 def test_no_subagents_flag_means_no_task_tool(tmp_path, monkeypatch):

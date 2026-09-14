@@ -40,12 +40,18 @@ DEFAULT_SUBAGENT_MAX_TURNS = 50
 # agent module from the registry (it imports this one).
 MAX_AGENT_TURNS = 150
 
+# Tools that edit FILES. `bash` is deliberately not one of them: it can change
+# the workspace too, but a type holding only bash + read tools is a reviewer —
+# "can run a command" must not be rendered as "may edit the work it judges"
+# (see the three-way branch in child_system_prompt.j2).
+EDIT_TOOL_NAMES = frozenset({
+    "write_file", "search_replace", "multi_edit", "multi_write", "delete_file",
+})
+
 # Tools that can change the workspace. A type holding any of these claims a
 # write scope when it spawns (see core/subagent_scheduler.py); a type holding
 # none is "read-only" and never serializes against anyone.
-WRITE_TOOL_NAMES = frozenset({
-    "bash", "write_file", "search_replace", "multi_edit", "multi_write", "delete_file",
-})
+WRITE_TOOL_NAMES = EDIT_TOOL_NAMES | {"bash"}
 
 # Every tool a subagent may hold. `task` is the recursion switch: without it a
 # type cannot spawn further subagents.
@@ -88,6 +94,11 @@ class AgentType:
         """True when the type cannot change the workspace (never claims)."""
         return not (set(self.tools) & WRITE_TOOL_NAMES)
 
+    @property
+    def can_edit(self) -> bool:
+        """True when the type holds a file-editing tool (not just `bash`)."""
+        return bool(set(self.tools) & EDIT_TOOL_NAMES)
+
 
 _READONLY_TOOLS = ("read_file", "grep", "list_dir", "web_fetch", "web_search", "lsp")
 
@@ -109,8 +120,9 @@ _REVIEW_TOOLS = ("read_file", "grep", "list_dir", "lsp", "bash")
 # other subagent claim.
 _REVIEWER_INSTRUCTIONS = """\
 You are a spec-compliance reviewer. You judge whether work that is already done
-matches what was asked for. You never do the work yourself: you hold no write
-tools, and fixing what you find is not your job — reporting it is.
+matches what was asked for. You hold no file-editing tools, and fixing what you
+find is not your job — reporting it is. Your `bash` access exists to RUN the
+command that proves a claim, never to modify the work you are judging.
 
 Work ONLY from the material you were given: the requirement text and the change
 under review. There is deliberately no implementer summary; do not ask for one.
@@ -175,7 +187,8 @@ BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
         name="Spec reviewer",
         description=(
             "Review work that is already done against the requirement it claims "
-            "to satisfy, and report per-claim evidence. It cannot edit or fix."
+            "to satisfy, and report per-claim evidence. It holds no file-editing "
+            "tools and fixes nothing."
         ),
         tools=_REVIEW_TOOLS,
         instructions=_REVIEWER_INSTRUCTIONS,

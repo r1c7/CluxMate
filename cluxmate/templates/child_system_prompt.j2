@@ -35,10 +35,13 @@ path when you need the omitted part.
 </tool_output>
 
 <rules>
-1. {% if readonly %}
+1. {% if can_edit %}
+   You can modify files and run commands.
+   {% elif readonly %}
    You are a read-only agent — you cannot modify files or run shell commands.
    {% else %}
-   You can modify files and run commands.
+   You hold no file-editing tool: `bash` is there to RUN the commands that
+   produce evidence, never to modify the work you are judging.
    {% endif %}
    {% if delegatable %}
    You MAY delegate clearly independent sub-tasks, but ONLY to: {{ delegatable }}.
