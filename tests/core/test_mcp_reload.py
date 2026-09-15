@@ -84,3 +84,65 @@ def test_builder_reload_without_a_manager(tmp_path, monkeypatch):
     assert builder.mcp_config("remote") is None
     assert builder.mcp_challenge("remote") is None
     assert builder.reload_mcp_server("remote") is False
+
+
+def test_reload_after_shutdown_does_not_respawn(tmp_path, monkeypatch):
+    server, mgr = _manager_with_one_remote(monkeypatch, tmp_path)
+    try:
+        mgr.shutdown()
+        assert mgr.reload_client("remote") is False
+        assert mgr.list_tools() == []
+        assert mgr.status() == []
+    finally:
+        server.stop()
+
+
+def test_reload_racing_shutdown_does_not_leak_a_client(tmp_path, monkeypatch):
+    import cluxmate.core.mcp as mcp_mod
+
+    server, mgr = _manager_with_one_remote(monkeypatch, tmp_path)
+    try:
+        spawned: list = []
+        real_cls = mcp_mod.MCPClient
+
+        class _Spy(real_cls):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                spawned.append(self)
+
+        monkeypatch.setattr(mcp_mod, "MCPClient", _Spy)
+        original = mcp_mod.MCPManager._start_and_handshake
+
+        def _handshake_then_shutdown(self, client):
+            original(self, client)
+            self.shutdown()          # the concurrent teardown, mid-reload
+
+        monkeypatch.setattr(mcp_mod.MCPManager, "_start_and_handshake",
+                            _handshake_then_shutdown)
+
+        assert mgr.reload_client("remote") is False
+        assert mgr._clients == {}
+        assert spawned, "the spy must have seen the reload's client"
+        assert all(c._http is None and c._proc is None for c in spawned), [
+            (c._http, c._proc) for c in spawned
+        ]
+    finally:
+        server.stop()
+
+
+def test_builder_reload_refuses_after_builder_shutdown(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".cluxmate").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    builder = AgentBuilder(cwd=str(tmp_path), provider=object())
+    called: list[str] = []
+
+    class _Mgr:
+        def reload_client(self, name):
+            called.append(name)
+            return True
+
+    builder._mcp = _Mgr()
+    builder._mcp_closed = True
+    assert builder.reload_mcp_server("remote") is False
+    assert called == []

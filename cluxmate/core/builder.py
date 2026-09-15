@@ -781,7 +781,8 @@ class AgentBuilder:
         decide whether a rebuild of the agent is worth doing."""
         with self._mcp_lock:
             mcp = self._mcp
-        if mcp is None:
+            closed = self._mcp_closed
+        if mcp is None or closed:
             return False
         return mcp.reload_client(name)
 

@@ -745,6 +745,9 @@ class MCPManager:
         self._clients: dict[str, MCPClient] = {}
         self._tools: list[MCPToolWrapper] = []
         self._loaded = False
+        # Latches on shutdown(): reload_client() must never respawn a client
+        # into a manager that has already been torn down.
+        self._closed = False
         # Register shutdown at process exit. atexit fires on normal interpreter
         # exit (stdin EOF, SIGTERM on Linux/Mac). Windows TerminateProcess
         # skips atexit — the mcp/shutdown RPC is the fallback for that case
@@ -845,7 +848,7 @@ class MCPManager:
         start() recorded (needs_auth / failed) and the old wrappers are dropped —
         a stale tool set is worse than none, because every call on it would fail.
         """
-        if not self._loaded:
+        if not self._loaded or self._closed:
             return False
         cfg = self._configs.get(name)
         if cfg is None:
@@ -863,6 +866,17 @@ class MCPManager:
         )
         self._clients[name] = client
         self._start_and_handshake(client)
+        if self._closed:
+            # A concurrent shutdown() tore the manager down while we were
+            # handshaking: it cleared _clients before this client existed, so it
+            # cannot reach it — without this the transport (or, for stdio, the
+            # subprocess) would outlive the manager entirely.
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+            self._clients.pop(name, None)
+            return False
         self._rebuild_tools()
         after = {(t._client.config.name, t._tool_name) for t in self._tools}
         return before != after
@@ -879,6 +893,9 @@ class MCPManager:
         return [client.status() for client in self._clients.values()]
 
     def shutdown(self) -> None:
+        # FIRST statement: latch closed so a reload_client() racing this teardown
+        # refuses / reclaims instead of leaving an untracked live transport.
+        self._closed = True
         for client in self._clients.values():
             try:
                 client.shutdown()
