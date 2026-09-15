@@ -133,6 +133,97 @@ def parse_www_authenticate(value: str) -> Challenge:
     return out
 
 
+# ── PKCE + loopback callback ───────────────────────────────────────────
+import http.server
+import threading
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def new_code_verifier() -> str:
+    return _b64url(secrets.token_bytes(64))
+
+
+def code_challenge_s256(verifier: str) -> str:
+    return _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
+
+
+@dataclass
+class _Callback:
+    """One-shot loopback listener. ``wait()`` blocks until the browser hits
+    CALLBACK_PATH, the deadline passes, or ``cancel()`` is called."""
+
+    requested_port: int = 0
+    path: str = CALLBACK_PATH
+    timeout: float = DEFAULT_CALLBACK_TIMEOUT_S
+    code: str | None = None
+    error: str | None = None
+    state: str | None = None
+    _done: threading.Event = field(default_factory=threading.Event)
+
+    def __post_init__(self) -> None:
+        self._srv = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", self.requested_port), self._handler_cls()
+        )
+        self._thread = threading.Thread(target=self._srv.serve_forever, daemon=True)
+
+    @property
+    def port(self) -> int:
+        """The port actually bound — differs from ``requested_port`` when that
+        was 0. The caller must use THIS for both the redirect_uri it registers
+        and the one it sends on the authorization request."""
+        return self._srv.server_address[1]
+
+    def _handler_cls(self):
+        outer = self
+
+        class _H(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path != outer.path:
+                    return outer._reply(self, 404, "not found")
+                query = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+                outer.state = query.get("state")
+                outer.error = query.get("error")
+                outer.code = query.get("code")
+                outer._reply(self, 200, "Authorization complete — you can close this tab.")
+                outer._done.set()
+
+            def log_message(self, *a):
+                pass
+
+        return _H
+
+    @staticmethod
+    def _reply(handler, status: int, text: str) -> None:
+        body = text.encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("Content-Type", "text/plain; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def wait(self) -> None:
+        self._done.wait(timeout=self.timeout)
+
+    def cancel(self) -> None:
+        self._done.set()
+
+    def close(self) -> None:
+        try:
+            self._srv.shutdown()
+            self._srv.server_close()
+        except Exception:
+            pass
+
+
 class MCPOAuthFlow:
     """One authorization session against one MCP server.
 
@@ -395,3 +486,252 @@ class MCPOAuthFlow:
         (``_Callback.port``); the configured ``callback_port`` is the fallback,
         and 0 there means "any port", which a strict AS will reject."""
         return f"http://127.0.0.1:{self.cfg.callback_port if port is None else port}{CALLBACK_PATH}"
+
+    # ── interactive authorization ──────────────────────────────────────
+    def authorize(self, challenge: Challenge | None = None) -> OAuthRecord:
+        """Full flow: bind callback → discover → register → PKCE → browser →
+        wait → token exchange.
+
+        Order matters twice over. (1) The listener binds BEFORE discovery and
+        registration so the redirect_uri registered with the AS is the port that
+        is really listening: with dynamic registration and an ephemeral port
+        there is no other way to keep the two in sync, and a strict AS rejects
+        the exchange when they differ. (2) The browser opens LAST, after the
+        bind, so a fast redirect cannot race it.
+        """
+        callback = _Callback(
+            requested_port=self.cfg.callback_port or 0, timeout=self.callback_timeout
+        )
+        callback.start()
+        self._callback = callback
+        redirect_uri = self.callback_redirect(callback.port)
+        try:
+            discovery = self.discover(challenge)
+            registration = self.register_client(discovery, redirect_uri)
+            if "S256" not in self._code_challenge_methods(discovery):
+                raise OAuthError(
+                    "authorization server does not support PKCE S256 — refusing to "
+                    "downgrade to plain",
+                    "discovery",
+                )
+            verifier = new_code_verifier()
+            state = _b64url(secrets.token_bytes(32))
+            url = self._authorization_url(
+                discovery, registration, redirect_uri, verifier, state,
+                scope=self._resolve_scope(challenge, discovery),
+            )
+            if self.on_authorize_url is not None:
+                self.on_authorize_url(url)
+            if self.open_browser:
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+            callback.wait()
+            if callback.code is None and callback.error is None:
+                raise OAuthError(
+                    f"timed out after {self.callback_timeout:.0f}s waiting for the "
+                    f"authorization callback on port {callback.port}",
+                    "timeout",
+                )
+            if callback.error:
+                raise OAuthError(
+                    f"authorization was denied by the server: {callback.error}", "denied"
+                )
+            if callback.state != state:
+                raise OAuthError(
+                    "authorization callback state mismatch — possible CSRF, "
+                    "token exchange aborted",
+                    "authorize",
+                )
+            return self._exchange_code(
+                discovery, registration, redirect_uri, callback.code, verifier
+            )
+        finally:
+            self._callback = None
+            callback.close()
+
+    def _resolve_scope(self, challenge: Challenge | None, discovery: OAuthDiscovery) -> str | None:
+        """Challenge scope > configured scopes > AS scopes_supported > none."""
+        if challenge is not None and challenge.scope:
+            return challenge.scope
+        if self.cfg.scopes:
+            return self.cfg.scopes
+        if discovery.scopes_supported:
+            return " ".join(discovery.scopes_supported)
+        return None
+
+    def _authorization_url(self, discovery, registration, redirect_uri, verifier, state,
+                           scope: str | None) -> str:
+        params = {
+            "response_type": "code",
+            "client_id": registration.client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge_s256(verifier),
+            "code_challenge_method": "S256",
+            "state": state,
+            "resource": discovery.resource,          # RFC 8707
+        }
+        if scope:
+            params["scope"] = scope
+        return f"{discovery.authorization_endpoint}?{urllib.parse.urlencode(params)}"
+
+    def _exchange_code(self, discovery, registration, redirect_uri, code, verifier) -> OAuthRecord:
+        form = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": registration.client_id,
+            "code_verifier": verifier,
+            "resource": discovery.resource,
+        }
+        return self._token_request(
+            discovery.token_endpoint, form, registration,
+            discovery=discovery, error_kind="token",
+        )
+
+    def refresh(self, record: OAuthRecord) -> OAuthRecord:
+        return refresh_access_token(
+            record, client_secret=record.client_secret, http_timeout=self.http_timeout,
+            now=self.now,
+        )
+
+    def cancel(self) -> None:
+        """Interrupt an in-flight authorize() — the `mcp/auth/cancel` path.
+        Safe to call at any time; a no-op when nothing is waiting."""
+        callback = getattr(self, "_callback", None)
+        if callback is not None:
+            callback.cancel()
+
+    def _code_challenge_methods(self, discovery: OAuthDiscovery) -> list[str]:
+        return discovery.code_challenge_methods or ["S256"]
+
+    def _token_request(self, url, form, registration, *, discovery, error_kind: str) -> OAuthRecord:
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        method = self._pick_auth_method(discovery) if discovery is not None else "none"
+        if registration.client_secret and method == "client_secret_basic":
+            basic = _b64url(f"{registration.client_id}:{registration.client_secret}".encode())
+            headers["Authorization"] = f"Basic {basic}"
+        elif registration.client_secret and method == "client_secret_post":
+            form = {**form, "client_secret": registration.client_secret}
+        try:
+            resp = self._client.post(url, data=form, headers=headers)
+        except httpx.HTTPError as e:
+            raise OAuthError(
+                f"token request failed: {e}", f"{error_kind}_transient"
+                if error_kind == "refresh" else error_kind,
+                secrets=[form.get("refresh_token")],
+            )
+        if resp.status_code != 200:
+            body = resp.text[:400]
+            kind = f"{error_kind}_transient" if resp.status_code >= 500 else (
+                "refresh_rejected" if error_kind == "refresh" else error_kind
+            )
+            raise OAuthError(
+                f"token endpoint returned HTTP {resp.status_code}: {body}", kind,
+                secrets=[form.get("refresh_token"), form.get("client_secret")],
+            )
+        try:
+            data = resp.json()
+        except ValueError:
+            raise OAuthError("token endpoint returned invalid JSON", error_kind,
+                             secrets=[form.get("refresh_token")])
+        access = data.get("access_token") if isinstance(data, dict) else None
+        if not isinstance(access, str) or not access:
+            raise OAuthError(
+                "token response has no access_token", error_kind,
+                secrets=[form.get("refresh_token")],
+            )
+        expires_in = data.get("expires_in")
+        expires_at = (
+            self.now() + float(expires_in)
+            if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool)
+            else None
+        )
+        refresh_token = data.get("refresh_token")
+        return OAuthRecord(
+            server_url=self.cfg.server_url,
+            access_token=access,
+            token_endpoint=url,
+            issuer=discovery.issuer if discovery is not None else "",
+            resource=discovery.resource if discovery is not None else "",
+            client_id=registration.client_id,
+            client_secret=registration.client_secret,
+            refresh_token=refresh_token if isinstance(refresh_token, str)
+            else form.get("refresh_token"),
+            expires_at=expires_at,
+            scope=data.get("scope") if isinstance(data.get("scope"), str)
+            else (self.cfg.scopes or ""),
+        )
+
+
+def refresh_access_token(
+    record: OAuthRecord,
+    *,
+    token_endpoint: str | None = None,
+    client_secret: str | None = None,
+    http_timeout: float = DEFAULT_HTTP_TIMEOUT_S,
+    now: Callable[[], float] = time.time,
+) -> OAuthRecord:
+    """Exchange a refresh token for a new access token.
+
+    Raises OAuthError with kind ``refresh_rejected`` (the AS definitively
+    refused: invalid_grant / invalid_client / 4xx) or ``refresh_transient``
+    (timeout / 5xx / connection error). Callers delete stored credentials on the
+    former and keep them on the latter.
+    """
+    url = token_endpoint or record.token_endpoint
+    if not record.refresh_token:
+        raise OAuthError("no refresh token stored", "refresh_rejected")
+    if not url:
+        raise OAuthError("no token endpoint recorded", "refresh_rejected")
+    form = {
+        "grant_type": "refresh_token",
+        "refresh_token": record.refresh_token,
+        "client_id": record.client_id,
+    }
+    secret = client_secret if client_secret is not None else record.client_secret
+    if secret:
+        form["client_secret"] = secret
+    if record.resource:
+        form["resource"] = record.resource        # RFC 8707, same as the code exchange
+    with httpx.Client(timeout=http_timeout, follow_redirects=False) as client:
+        try:
+            resp = client.post(
+                url, data=form,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        except httpx.HTTPError as e:
+            raise OAuthError(f"token refresh failed: {e}", "refresh_transient",
+                             secrets=[record.refresh_token, secret])
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+        except ValueError:
+            raise OAuthError("token refresh returned invalid JSON", "refresh_transient",
+                             secrets=[record.refresh_token])
+        access = data.get("access_token") if isinstance(data, dict) else None
+        if not isinstance(access, str) or not access:
+            raise OAuthError("token refresh returned no access_token", "refresh_transient",
+                             secrets=[record.refresh_token])
+        expires_in = data.get("expires_in")
+        new_refresh = data.get("refresh_token")
+        return OAuthRecord(
+            server_url=record.server_url,
+            access_token=access,
+            token_endpoint=url,
+            issuer=record.issuer,
+            resource=record.resource,
+            client_id=record.client_id,
+            client_secret=secret,
+            refresh_token=new_refresh if isinstance(new_refresh, str) else record.refresh_token,
+            expires_at=(now() + float(expires_in))
+            if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool)
+            else record.expires_at,
+            scope=data.get("scope") if isinstance(data.get("scope"), str) else record.scope,
+        )
+    kind = "refresh_transient" if resp.status_code >= 500 else "refresh_rejected"
+    raise OAuthError(
+        f"token refresh returned HTTP {resp.status_code}: {resp.text[:400]}", kind,
+        secrets=[record.refresh_token, secret],
+    )
