@@ -1370,9 +1370,22 @@ class JsonRpcServer:
                 return {"status": "already_running"}
             self._auth_inflight.add(server)
         gen = self._init_gen
-        threading.Thread(
-            target=self._run_mcp_auth, args=(server, cfg, gen), daemon=True
-        ).start()
+        try:
+            threading.Thread(
+                target=self._run_mcp_auth, args=(server, cfg, gen), daemon=True
+            ).start()
+        except Exception as e:  # thread exhaustion: the flow never started
+            # Roll the marker back and emit the completion here: _run_mcp_auth's
+            # finally never runs, and a sticky marker would answer
+            # already_running to every later start for the life of the process.
+            with self._auth_lock:
+                self._auth_inflight.discard(server)
+                self._auth_flows.pop(server, None)
+            _write_dict({"jsonrpc": "2.0", "method": "mcp/auth/completed",
+                         "params": {"server": server, "status": "failed",
+                                    "error": f"could not start the authorization "
+                                             f"thread: {e}"}})
+            return {"status": "failed", "error": str(e)}
         return {"status": "started"}
 
     def _run_mcp_auth(self, server: str, cfg: Any, gen: int) -> None:
@@ -1395,7 +1408,7 @@ class JsonRpcServer:
                 self._agent = self._builder.build(session_log=self._session_log)
             status = "ok"
         except OAuthError as e:
-            status = e.kind if e.kind in ("denied", "cancelled") else "failed"
+            status = e.kind if e.kind in ("denied", "cancelled", "timeout") else "failed"
             error = str(e)
         except Exception as e:  # never leave a user staring at a spinner
             error = f"{type(e).__name__}: {e}"

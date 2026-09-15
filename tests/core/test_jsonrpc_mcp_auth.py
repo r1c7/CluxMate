@@ -10,7 +10,19 @@ from pathlib import Path
 import pytest
 
 from cluxmate.core.jsonrpc_server import JsonRpcServer
+from cluxmate.core.mcp_oauth import MCPOAuthFlow
 from tests.core.fake_mcp_http_server import FakeOAuthServer
+
+_REAL_FLOW_INIT = MCPOAuthFlow.__init__
+
+
+def _tiny_timeout_flow_init(self, cfg, **kwargs):
+    """MCPOAuthFlow.__init__ with a sub-second callback wait, so a
+    callback-timeout case costs well under a second instead of the 300 s
+    default (that default must stay out of the test suite)."""
+    kwargs.setdefault("callback_timeout", 0.3)
+    kwargs.setdefault("http_timeout", 2.0)
+    _REAL_FLOW_INIT(self, cfg, **kwargs)
 
 
 class _Provider:
@@ -235,5 +247,64 @@ def test_logout_clears_credentials(tmp_path, monkeypatch, fake):
         assert MCPAuthStore().get("remote", server.mcp_url) is not None
         s._dispatch(3, "mcp/auth/logout", {"server": "remote"})
         assert MCPAuthStore().get("remote", server.mcp_url) is None
+    finally:
+        s._shutdown_mcp()
+
+
+def test_a_failed_thread_start_does_not_wedge_the_server(tmp_path, monkeypatch, fake):
+    """Thread.start() raising (exhaustion) must roll the inflight marker back and
+    still emit a completion — otherwise every later start answers
+    `already_running` for the life of the process."""
+    sent.clear()
+    server = fake()
+    s = _server(tmp_path, monkeypatch, server.mcp_url)
+    try:
+        import cluxmate.core.jsonrpc_server as mod
+
+        class _Boom:
+            def __init__(self, *a, **kw):
+                pass
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        real_thread = threading.Thread  # captured before the global patch
+        monkeypatch.setattr(mod.threading, "Thread", _Boom)
+        result = s._start_mcp_auth("remote")
+        assert result["status"] == "failed"
+        assert s._auth_inflight == set()
+        assert s._auth_flows == {}
+        done = [p for p in sent if p.get("method") == "mcp/auth/completed"]
+        assert len(done) == 1 and done[0]["params"]["status"] == "failed"
+        # Restore the real Thread (monkeypatch only undoes at teardown): the
+        # point is that the server is usable again.
+        monkeypatch.setattr(mod.threading, "Thread", real_thread)
+        monkeypatch.setattr(webbrowser, "open", _browser(server))
+        assert s._start_mcp_auth("remote")["status"] == "started"
+        assert _wait_for(lambda: any(
+            p.get("method") == "mcp/auth/completed" and p["params"]["status"] == "ok"
+            for p in sent), timeout=15)
+    finally:
+        s._shutdown_mcp()
+
+
+def test_a_callback_timeout_is_reported_as_its_own_status(tmp_path, monkeypatch, fake):
+    """The user never finishing in the browser after the callback window is
+    `timeout`, not `failed` (a token-endpoint error): two different user
+    actions. The design doc's status set is {ok, denied, failed, cancelled,
+    timeout}."""
+    sent.clear()
+    server = fake()
+    s = _server(tmp_path, monkeypatch, server.mcp_url)
+    try:
+        monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)  # nobody comes back
+        monkeypatch.setattr(MCPOAuthFlow, "__init__", _tiny_timeout_flow_init)
+        assert s._start_mcp_auth("remote")["status"] == "started"
+        assert _wait_for(lambda: any(
+            p.get("method") == "mcp/auth/completed" for p in sent), timeout=15)
+        done = [p for p in sent if p.get("method") == "mcp/auth/completed"][0]
+        assert done["params"]["status"] == "timeout"
+        assert "timed out" in done["params"]["error"]
+        assert s._auth_inflight == set()
     finally:
         s._shutdown_mcp()
