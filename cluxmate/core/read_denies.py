@@ -30,6 +30,13 @@ Built-in template (active only while ``protect_sensitive`` is true):
   deny roots, so they join ``paths`` in ``effective_paths()`` and are also
   enforced shell-side by bwrap/Seatbelt.
 
+Always denied (independent of the toggle):
+
+- ``~/.cluxmate/mcp-auth.json`` — the remote-MCP OAuth credential file the
+  product itself created, so the only thing a read could do is leak a token;
+  it joins ``paths`` in ``effective_paths()`` (and the shell-side deny list on
+  Linux/macOS) unconditionally.
+
 Rules (mirroring GrantStore for consistency):
 - cwd is NOT stored — the working directory is implicitly READABLE; only
   EXTRA folders the user explicitly hid live here.
@@ -52,6 +59,8 @@ import sys
 import threading
 import traceback
 from pathlib import Path
+
+from cluxmate.core.mcp_auth_store import default_path as mcp_auth_path
 
 # Built-in sensitive-file template. Basenames are compared lowercased
 # (case-insensitive on every platform).
@@ -168,11 +177,23 @@ class ReadDenyStore:
             return self._protect_sensitive
 
     def effective_paths(self) -> list[str]:
-        """The full deny-root set: user paths + the built-in template dirs
-        (when the toggle is on). This is what ReadFence and the shell sandbox
-        receive; the pattern rules are matched separately in ReadFence."""
+        """The full deny-root set: user paths + the MCP credential file + the
+        built-in template dirs (when the toggle is on). This is what ReadFence
+        and the shell sandbox receive; the pattern rules are matched separately
+        in ReadFence.
+
+        ``~/.cluxmate/mcp-auth.json`` is ALWAYS included (no toggle): it is a
+        purely secret file the product itself created, so the only thing a read
+        could do is leak an OAuth token. That is a different case from ``.env``
+        (a file in the user's workspace that may legitimately need reading),
+        which is why the pattern rules stay opt-in. ``snapshot()`` still returns
+        only the user's own entries, so the Settings page is unchanged."""
         with self._lock:
             paths = list(self._paths)
+            try:
+                paths.append(str(mcp_auth_path()))
+            except OSError:
+                pass  # a missing/unresolvable home is not worth failing on
             if self._protect_sensitive:
                 paths += sensitive_dir_defaults()
             return paths
