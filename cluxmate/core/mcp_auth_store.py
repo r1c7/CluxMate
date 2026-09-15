@@ -163,22 +163,53 @@ class OAuthRecord:
 
 
 class MCPAuthStore:
-    """Read/write access to the credential file. One instance per user."""
+    """Read/write access to the credential file. One instance per user.
+
+    FRESHNESS: the file is written by OTHER instances — the JSON-RPC auth thread,
+    a `cluxmate mcp auth` run in a terminal next to a live desktop session — while
+    this one stays alive, so a construction-time snapshot is not enough. Every
+    operation re-reads unless the file is byte-identical to the snapshot.
+
+    Content, not mtime: the (mtime_ns, size) signature cached by
+    ``core/ssrf_config.py`` is not enough for this file. Windows advances the
+    file clock in ~15.6 ms ticks, so two consecutive rewrites carry the same
+    mtime, and a re-issued token whose JSON happens to be the same length keeps
+    the size too — a long-lived reader would then keep serving a token the writer
+    already replaced. An auth/logout round trip is one file read of a <1 KB
+    document, next to an OAuth exchange or a browser launch, so re-reading is the
+    cheap side of that trade.
+    """
 
     def __init__(self, path: Path | None = None):
         self._path = Path(path) if path is not None else default_path()
         self._lock = threading.Lock()
         self._servers: dict[str, Any] = {}
-        self._load()
+        self._raw: str | None = None
+        with self._lock:
+            self._reload_locked()
 
     @property
     def path(self) -> Path:
         return self._path
 
-    def _load(self) -> None:
+    def _read_raw(self) -> str | None:
+        """The file's text, or None when it is missing / unreadable / not UTF-8.
+        This is the change signal: see the freshness note on the class."""
         try:
-            data = json.loads(self._path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
+            return self._path.read_text("utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+
+    def _reload_locked(self) -> None:
+        """(Re)read the file. Keeps only entries that parse into an OAuthRecord:
+        a hand-corrupted entry must not survive a later rewrite of the file."""
+        self._raw = self._read_raw()
+        self._servers = {}
+        if self._raw is None:
+            return
+        try:
+            data = json.loads(self._raw)
+        except (json.JSONDecodeError, ValueError):
             return
         if not isinstance(data, dict):
             return
@@ -186,8 +217,13 @@ class MCPAuthStore:
         if not isinstance(servers, dict):
             return
         for name, entry in servers.items():
-            if isinstance(name, str) and entry:
+            if isinstance(name, str) and OAuthRecord.from_json(entry) is not None:
                 self._servers[name] = entry
+
+    def _refresh_locked(self) -> None:
+        """Re-read if the file changed underneath us. Caller holds the lock."""
+        if self._read_raw() != self._raw:
+            self._reload_locked()
 
     def _save_locked(self) -> None:
         tmp = self._path.with_name(
@@ -212,6 +248,7 @@ class MCPAuthStore:
                 os.chmod(self._path, 0o600)
             except OSError:
                 pass
+            self._raw = self._read_raw()
         except OSError:
             traceback.print_exc(file=sys.stderr)
             try:
@@ -223,6 +260,7 @@ class MCPAuthStore:
         """Credentials for ``name``, or None when absent / corrupt / issued for
         a different URL than ``url``."""
         with self._lock:
+            self._refresh_locked()
             entry = self._servers.get(name)
         record = OAuthRecord.from_json(entry)
         if record is None:
@@ -233,11 +271,13 @@ class MCPAuthStore:
 
     def put(self, name: str, record: OAuthRecord) -> None:
         with self._lock:
+            self._refresh_locked()
             self._servers[name] = record.to_json()
             self._save_locked()
 
     def delete(self, name: str) -> bool:
         with self._lock:
+            self._refresh_locked()
             if name not in self._servers:
                 return False
             del self._servers[name]

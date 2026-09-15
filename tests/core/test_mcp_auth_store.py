@@ -133,6 +133,39 @@ def test_write_leaves_no_temp_file_behind(tmp_path):
     assert [f.name for f in d.iterdir()] == ["mcp-auth.json"]
 
 
+def test_a_long_lived_instance_sees_another_instances_write(tmp_path):
+    """The JSON-RPC auth thread / a CLI run writes through its OWN instance while
+    the one held by a live MCP client keeps running — the reader must observe it."""
+    p = tmp_path / "mcp-auth.json"
+    reader = MCPAuthStore(p)
+    assert reader.get("linear", _URL) is None
+    MCPAuthStore(p).put("linear", _record())
+    assert reader.get("linear", _URL) is not None
+
+
+def test_a_long_lived_instance_sees_another_instances_delete(tmp_path):
+    p = tmp_path / "mcp-auth.json"
+    MCPAuthStore(p).put("linear", _record())
+    reader = MCPAuthStore(p)
+    assert reader.get("linear", _URL) is not None
+    MCPAuthStore(p).delete("linear")
+    assert reader.get("linear", _URL) is None
+
+
+def test_a_corrupt_entry_is_dropped_on_the_next_rewrite(tmp_path):
+    p = tmp_path / "mcp-auth.json"
+    p.write_text(json.dumps({"version": 1, "servers": {
+        "bad": "not-an-object",
+        "partial": {"server_url": _URL, "client": {}, "tokens": {}},
+        "good": _record().to_json(),
+    }}), encoding="utf-8")
+    store = MCPAuthStore(p)
+    assert store.get("good", _URL) is not None
+    store.put("other", _record())
+    saved = json.loads(p.read_text("utf-8"))
+    assert set(saved["servers"]) == {"good", "other"}
+
+
 def test_is_fresh_uses_skew():
     rec = _record(expires_at=1000.0)
     assert rec.is_fresh(now=900.0, skew=30.0) is True
