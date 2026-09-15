@@ -1,3 +1,5 @@
+import type { SkillIdentity } from './skill-rules'
+
 // A configurable model entry in ~/.cluxmate/config.json. `provider` is a
 // free-text vendor label; `api_type` selects the API family (currently
 // OpenAI-style; `context_1m` is metadata only (displayed, not yet acted on).
@@ -533,15 +535,20 @@ export interface RestoreResult {
   conflicts?: string[]
 }
 
-// An installed skill discovered from a skills directory. `source` marks where
-// it came from: global (~/.cluxmate/skills) or project (cwd/.cluxmate/skills).
-// `path` is the absolute path to its SKILL.md, used as the read key + list id.
-export interface SkillMeta {
+// An installed skill discovered from a skills directory. `slug` is the identity
+// (the directory name containing SKILL.md) — the key `use_skill` takes and the
+// key the agent's [Available skills] list shows — and `id` is the
+// source-qualified "<source>:<slug>", the disable key, so the two copies of a
+// colliding slug toggle independently. The rules themselves live in
+// shared/skill-rules.ts; `shadowed` is what markShadowed() computed for this
+// row: a nearer enabled copy serves the slug instead. The row stays listed —
+// overridden, not hidden — so it can be inspected and toggled on its own.
+export interface SkillMeta extends SkillIdentity {
   name: string
   description: string
-  source: 'global' | 'project'
+  id: string
   path: string
-  disabled: boolean
+  shadowed: boolean
 }
 
 // MCP server transport: stdio (local subprocess) or http (remote).
@@ -817,7 +824,7 @@ export interface ElectronAPI {
   // Toggle `disabled` on a skill in <cwd>/.cluxmate/skills.json. Takes effect
   // on the next `initialize` (next session or explicit reload) — the running
   // session's skill list is NOT hot-swapped.
-  setSkillDisabled: (cwd: string, slug: string, disabled: boolean) => Promise<void>
+  setSkillDisabled: (cwd: string, id: string, disabled: boolean) => Promise<void>
 
   // Read a workspace file (for the inline edit-diff preview). Resolves inside
   // the session cwd; returns null if the file is missing.

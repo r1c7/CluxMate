@@ -10,6 +10,7 @@ import { setAttention } from './attention'
 import * as sessionStore from './session-store'
 import * as gitService from './git-service'
 import { deleteFact, scanFacts } from './memory-facts'
+import { SKILL_MAX_BYTES, isAllowedSkillPath, listSkills, setSkillDisabled } from './skills'
 import { version as appVersion } from '../../package.json'
 
 const bridges = new Map<string, AgentBridge>()
@@ -407,92 +408,9 @@ function firstUserMessage(sessionId: string): string {
 }
 
 // --- skills discovery ------------------------------------------------------
-// A skill is a directory containing a SKILL.md. We scan two roots: the global
-// ~/.cluxmate/skills and the project's <cwd>/.cluxmate/skills. Each SKILL.md may
-// begin with YAML frontmatter carrying name/description; we parse just those
-// two keys (no YAML dep) and fall back to the directory name.
-
-const SKILL_MAX_BYTES = 256 * 1024
-
-function parseFrontmatter(md: string): { name?: string; description?: string } {
-  // Frontmatter is a leading `---\n ... \n---` block. Only name/description
-  // are read; values may be quoted. Anything else is ignored.
-  if (!md.startsWith('---')) return {}
-  const end = md.indexOf('\n---', 3)
-  if (end === -1) return {}
-  const block = md.slice(3, end)
-  const out: { name?: string; description?: string } = {}
-  for (const line of block.split('\n')) {
-    const m = /^\s*(name|description)\s*:\s*(.*)$/.exec(line)
-    if (m) {
-      let v = m[2].trim()
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-        v = v.slice(1, -1)
-      }
-      out[m[1] as 'name' | 'description'] = v
-    }
-  }
-  return out
-}
-
-function scanSkillsRoot(root: string, source: 'global' | 'project', disabledSlugs?: Set<string>): SkillMeta[] {
-  const out: SkillMeta[] = []
-  let entries: fs.Dirent[]
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true })
-  } catch {
-    return out // root doesn't exist — fine, just no skills there
-  }
-  for (const e of entries) {
-    if (!e.isDirectory()) continue
-    const skillMd = path.join(root, e.name, 'SKILL.md')
-    if (!fs.existsSync(skillMd)) continue
-    let fm: { name?: string; description?: string } = {}
-    try {
-      fm = parseFrontmatter(fs.readFileSync(skillMd, 'utf-8').slice(0, 4096))
-    } catch { /* unreadable — still list it by dir name */ }
-    out.push({
-      name: fm.name || e.name,
-      description: fm.description || '',
-      source,
-      path: skillMd,
-      disabled: disabledSlugs?.has(e.name) ?? false,
-    })
-  }
-  return out
-}
-
-function skillRoots(cwd: string): { root: string; source: 'global' | 'project' }[] {
-  return [
-    { root: path.join(app.getPath('home'), '.cluxmate', 'skills'), source: 'global' },
-    { root: path.join(cwd, '.cluxmate', 'skills'), source: 'project' },
-  ]
-}
-
-// Read <cwd>/.cluxmate/skills.json and return the set of disabled skill slugs.
-// Project-only (global disabled state isn't persisted — it only makes sense
-// within the context of a project's tools).
-function readSkillsDisabled(cwd: string): Set<string> {
-  const cfgPath = path.join(cwd, '.cluxmate', 'skills.json')
-  try {
-    const raw = fs.readFileSync(cfgPath, 'utf-8')
-    const cfg = JSON.parse(raw)
-    if (cfg && cfg.disabledSkills && Array.isArray(cfg.disabledSkills)) {
-      return new Set(cfg.disabledSkills.filter((s: unknown) => typeof s === 'string'))
-    }
-  } catch {}
-  return new Set()
-}
-
-// A path is a legitimate skill file only if it's a SKILL.md directly inside a
-// subdirectory of one of the known roots. Guards the read handler against
-// path-traversal (e.g. a crafted "../../secret").
-function isAllowedSkillPath(p: string, cwd: string): boolean {
-  const resolved = path.resolve(p)
-  if (path.basename(resolved) !== 'SKILL.md') return false
-  const parent = path.dirname(path.dirname(resolved)) // <root>/<skill>/SKILL.md -> <root>
-  return skillRoots(cwd).some((r) => path.resolve(r.root) === parent)
-}
+// Root scanning, frontmatter parsing, the shadowing rule and the disable state
+// live in ./skills.ts — the pure, unit-tested half (desktop/tests/skills.test.ts).
+// The handlers below are thin IPC wrappers over it.
 
 // Resolve which config entry id to spawn a session's bridge with. Prefer the
 // session's own pinned model (a per-session selection now survives restart);
@@ -1109,34 +1027,21 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.SKILL_LIST, (_, cwd: string): SkillMeta[] => {
+    // Project-only disable state (a global one makes no sense outside a
+    // project's toolset): <cwd>/.cluxmate/skills.json.
     const base = cwd || process.cwd()
-    const disabled = readSkillsDisabled(base)
-    const all = skillRoots(base).flatMap((r) => scanSkillsRoot(r.root, r.source, disabled))
+    const all = listSkills(app.getPath('home'), base)
     // Stable order: global first, then project, alphabetical within each.
     return all.sort((a, b) =>
       a.source === b.source ? a.name.localeCompare(b.name) : a.source === 'global' ? -1 : 1
     )
   })
 
-  ipcMain.handle(IPC.SKILL_SET_DISABLED, (_, cwd: string, slug: string, disabled: boolean): void => {
-    if (!/^[A-Za-z0-9_-]+$/.test(slug)) {
-      throw new Error('Invalid skill slug')
-    }
-    const cfgPath = path.join(cwd, '.cluxmate', 'skills.json')
-    let cfg: any = {}
-    try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) } catch {}
-    let list: string[] = Array.isArray(cfg.disabledSkills) ? [...cfg.disabledSkills] : []
-    if (disabled) {
-      if (!list.includes(slug)) list.push(slug)
-    } else {
-      list = list.filter((s: string) => s !== slug)
-    }
-    cfg.disabledSkills = list
-    if (list.length === 0) {
-      delete cfg.disabledSkills
-    }
-    fs.mkdirSync(path.dirname(cfgPath), { recursive: true })
-    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf-8')
+  ipcMain.handle(IPC.SKILL_SET_DISABLED, (_, cwd: string, id: string, disabled: boolean): void => {
+    // `id` is "<source>:<slug>" — one copy of a colliding slug, so toggling a
+    // row no longer flips the other. A legacy bare entry in the file is
+    // rewritten into per-copy ids first (see main/skills.ts).
+    setSkillDisabled(app.getPath('home'), cwd, id, disabled)
   })
 
   ipcMain.handle(IPC.SKILL_READ, (_, filePath: string): string => {
@@ -1144,7 +1049,7 @@ export function registerIpcHandlers() {
     // active session's project root count as known).
     const cwds = Array.from(bridges.values()).map((b) => b._spawnCwd).filter(Boolean)
     const candidates = cwds.length > 0 ? cwds : [process.cwd()]
-    const ok = candidates.some((c) => isAllowedSkillPath(filePath, c))
+    const ok = candidates.some((c) => isAllowedSkillPath(filePath, app.getPath('home'), c))
     if (!ok) return 'Error: not an allowed skill path.'
     try {
       const buf = fs.readFileSync(filePath, 'utf-8')

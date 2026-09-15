@@ -44,16 +44,13 @@ export default function InputBox() {
   const prevSessionRef = useRef<string | null>(activeSessionId)
   const [selIdx, setSelIdx] = useState(0)  // selected dropdown index
 
-  // Build the combined slash-item list: builtins first, then skills.
+  // Build the combined slash-item list: builtins first, then skills. The
+  // agent's own list has one row per slug, so an overridden copy (shadowed) is
+  // not offered here either — the nearer copy is what `use_skill` loads.
   const slashItems: SlashItem[] = useMemo(() => {
     const skillItems: SlashItem[] = skills
-      .filter((s) => !s.disabled)
-      .map((s) => {
-        // Slug is the directory name containing SKILL.md, not the frontmatter name.
-        const parts = s.path.replace(/\\/g, '/').split('/')
-        const slug = parts[parts.length - 2] || s.name
-        return { slug, description: s.description || s.name, kind: 'skill' as const }
-      })
+      .filter((s) => !s.disabled && !s.shadowed)
+      .map((s) => ({ slug: s.slug, description: s.description || s.name, kind: 'skill' as const }))
     return [...BUILTIN_COMMANDS, ...skillItems]
   }, [skills])
 

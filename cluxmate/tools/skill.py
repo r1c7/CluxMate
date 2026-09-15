@@ -5,6 +5,13 @@ The model calls this with a skill's slug (its directory name, from the
 SKILL.md so the model follows it, and signals usage through the builder's
 per-turn tracker (same pattern as tools/task.py) so the UI can annotate the
 turn with "used skill: X".
+
+The injection lists one row per slug, so a slug installed in both the global
+and the project root is loaded from the nearer (project) copy. The result says
+which copy served it whenever a copy was shadowed by that rule — the model
+sees one row, not two, and must not be silently given a different body than the
+one it picked. A skill whose every copy is disabled is refused rather than
+loaded (the injection already hides it).
 """
 
 from typing import Any, TYPE_CHECKING
@@ -57,6 +64,10 @@ class SkillTool(BaseTool):
         skill = mgr.get(name)
         if skill is None:
             available = ", ".join(s.slug for s in mgr.discover_enabled()) or "(none installed)"
+            if any(sk.slug == name for sk in mgr.discover()):
+                return (
+                    f"Error: skill '{name}' is disabled. Available skills: {available}"
+                )
             return (
                 f"Error: no skill named '{name}'. Available skills: {available}"
             )
@@ -73,5 +84,15 @@ class SkillTool(BaseTool):
             )
 
         return (
-            f"Skill '{skill.name}' loaded. Follow these instructions:\n\n{content}"
+            f"Skill '{skill.name}' loaded{self._shadow_note(mgr, skill)}. "
+            f"Follow these instructions:\n\n{content}"
         )
+
+    @staticmethod
+    def _shadow_note(mgr: SkillManager, skill) -> str:
+        """Name the copies this one outranks, or "" when nothing was shadowed."""
+        losers = mgr.overridden_copies(skill.slug)
+        if not losers:
+            return ""
+        detail = ", ".join(f"{sk.id} ({sk.path})" for sk in losers)
+        return f" — the {skill.source} copy takes precedence over {detail}"

@@ -60,7 +60,7 @@ export default function SkillsView() {
   const setSkillDisabled = useStore((s) => s.setSkillDisabled)
   const activeSessionId = useStore((s) => s.activeSessionId)
 
-  // Slugs toggled this view — persist is written to skills.json but the
+  // Skill ids toggled this view — persist is written to skills.json but the
   // running agent won't hot-swap its system prompt, so flag pending restart.
   const [pendingRestart, setPendingRestart] = useState<Set<string>>(new Set())
 
@@ -70,15 +70,11 @@ export default function SkillsView() {
     setPendingRestart(new Set())
   }, [activeSessionId])
 
-  const onToggle = (slug: string, disabled: boolean) => {
-    setSkillDisabled(slug, disabled)
-    setPendingRestart((prev) => new Set(prev).add(slug))
-  }
-
-  // Extract slug from a skill's path: <root>/<slug>/SKILL.md → slug.
-  function getSlug(p: string): string {
-    const parts = p.replace(/\\/g, '/').split('/')
-    return parts[parts.length - 2] || ''
+  // The id is the source-qualified "<source>:<slug>", so the two copies of a
+  // slug installed in both roots toggle independently.
+  const onToggle = (id: string, disabled: boolean) => {
+    setSkillDisabled(id, disabled)
+    setPendingRestart((prev) => new Set(prev).add(id))
   }
 
   const selected = skills.find((s) => s.path === selectedPath)
@@ -100,7 +96,7 @@ export default function SkillsView() {
             skills.map((sk) => {
               const badge = SOURCE_BADGE[sk.source]
               const isSel = sk.path === selectedPath
-              const slug = getSlug(sk.path)
+              const isOff = sk.disabled || sk.shadowed
               return (
                 <div
                   key={sk.path}
@@ -113,16 +109,27 @@ export default function SkillsView() {
                   title={sk.path}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className={`text-sm truncate flex-1 min-w-0 ${sk.disabled ? 'text-ink-faint' : 'text-ink'}`}>{sk.name}</span>
+                    <span className={`text-sm truncate flex-1 min-w-0 ${isOff ? 'text-ink-faint' : 'text-ink'}`}>{sk.name}</span>
                     <span className={`text-[9px] px-1 py-0.5 rounded border flex-shrink-0 ${badge.cls}`}>
                       {t(badge.labelKey)}
                     </span>
-                    {/* Disable toggle — writes to project skills.json, takes
-                        effect next session (no hot-swap). Optimistic. */}
+                    {/* Overridden by a nearer copy (project over global): the
+                        row stays listed so it can be viewed + toggled on its
+                        own, but it is not what the agent loads. */}
+                    {sk.shadowed && (
+                      <span
+                        className="text-[9px] px-1 py-0.5 rounded border flex-shrink-0 bg-amber-500/10 text-amber-700 border-amber-500/30"
+                        title={t('skills.shadowedTitle')}
+                      >
+                        {t('skills.shadowed')}
+                      </span>
+                    )}
+                    {/* Disable toggle — writes one source-qualified id to the
+                        project skills.json, takes effect next session. */}
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
-                        onToggle(slug, !sk.disabled)
+                        onToggle(sk.id, !sk.disabled)
                       }}
                       title={sk.disabled ? t('skills.toggleDisabledTitle') : t('skills.toggleEnabledTitle')}
                       className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 hover:opacity-80 ${
@@ -137,9 +144,9 @@ export default function SkillsView() {
                     </button>
                   </div>
                   {sk.description && (
-                    <div className={`text-xs truncate mt-0.5 ${sk.disabled ? 'text-ink-faint/60' : 'text-ink-faint'}`}>{sk.description}</div>
+                    <div className={`text-xs truncate mt-0.5 ${isOff ? 'text-ink-faint/60' : 'text-ink-faint'}`}>{sk.description}</div>
                   )}
-                  {pendingRestart.has(slug) && (
+                  {pendingRestart.has(sk.id) && (
                     <div className="text-xs text-amber-600 mt-0.5">{t('skills.restartNote')}</div>
                   )}
                 </div>

@@ -11,7 +11,14 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": false,
-    "sourceMap": true
+    "sourceMap": true,
+    // tsc here only typechecks --electron-vite/esbuild does the emitting, so
+    // noEmit is free; it is what unlocks allowImportingTsExtensions, which a
+    // module loaded by the Node test runner needs (desktop/tests/*.test.ts
+    // imports .ts paths explicitly, and any project-relative import INSIDE a
+    // module it loads must carry the extension too — see src/main/skills.ts).
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*"]
 }

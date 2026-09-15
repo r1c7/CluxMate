@@ -62,8 +62,8 @@ const api: ElectronAPI = {
 
   listSkills: (cwd: string) => ipcRenderer.invoke(IPC.SKILL_LIST, cwd),
   readSkill: (path: string) => ipcRenderer.invoke(IPC.SKILL_READ, path),
-  setSkillDisabled: (cwd: string, slug: string, disabled: boolean) =>
-    ipcRenderer.invoke(IPC.SKILL_SET_DISABLED, cwd, slug, disabled),
+  setSkillDisabled: (cwd: string, id: string, disabled: boolean) =>
+    ipcRenderer.invoke(IPC.SKILL_SET_DISABLED, cwd, id, disabled),
 
   readFile: (sessionId: string, path: string) => ipcRenderer.invoke(IPC.FILE_READ, sessionId, path),
 

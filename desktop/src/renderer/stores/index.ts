@@ -8,6 +8,7 @@ import type {
   TodoItem,
 } from '../../shared/types'
 import { deriveSessionTitle } from '../../shared/session-title'
+import { markShadowed } from '../../shared/skill-rules'
 import { defaultReasoningValue } from '../../shared/reasoning'
 import { editsFromToolInput } from '../components/MultiEditDiff'
 import { saveTheme, DEFAULT_THEME } from '../themes'
@@ -399,7 +400,7 @@ retryMessage: (messageId: string) => Promise<void>
   showChat: () => void
   showSettings: () => void
   selectSkill: (path: string) => Promise<void>
-  setSkillDisabled: (slug: string, disabled: boolean) => Promise<void>
+  setSkillDisabled: (id: string, disabled: boolean) => Promise<void>
   showMcp: () => Promise<void>
   selectMcpServer: (name: string) => void
   setMcpDisabled: (name: string, disabled: boolean) => Promise<void>
@@ -2158,35 +2159,29 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  // Toggle `disabled` on a skill in <cwd>/.cluxmate/skills.json. Optimistic
-  // local update; takes effect next session (no hot-swap of system prompt).
-  setSkillDisabled: async (slug, disabled) => {
+  // Toggle `disabled` on ONE copy of a skill in <cwd>/.cluxmate/skills.json,
+  // keyed by its source-qualified id (`<source>:<slug>`) so a slug installed in
+  // both roots stays independently toggleable. Optimistic local update; takes
+  // effect next session (no hot-swap of system prompt).
+  setSkillDisabled: async (id, disabled) => {
     const sid = get().activeSessionId
     const cwd = get().sessions.find((s) => s.id === sid)?.cwd || get().workingDir
     if (!cwd) return
 
-    // Normalize path separators so the suffix match works on Windows too
-    // (path.join produces backslashes, but we use forward slashes in the pattern).
-    const suffix = `/${slug}/SKILL.md`
-    const matchPath = (sk: SkillMeta) =>
-      (sk.path || '').replace(/\\/g, '/').endsWith(suffix)
-
-    // Optimistic local update.
-    set({
-      skills: get().skills.map((sk) =>
-        matchPath(sk) ? { ...sk, disabled } : sk
-      ),
+    // Optimistic local update — exactly the row that was clicked. The shadowing
+    // flags are re-derived from the new disable states (same function the main
+    // process lists with), so disabling the project copy immediately drops the
+    // "overridden" marker from the global row that now serves the slug.
+    const apply = (next: boolean) => set({
+      skills: markShadowed(get().skills.map((sk) => (sk.id === id ? { ...sk, disabled: next } : sk))),
     })
+    apply(disabled)
     try {
-      await window.electronAPI.setSkillDisabled(cwd, slug, disabled)
+      await window.electronAPI.setSkillDisabled(cwd, id, disabled)
     } catch (e: any) {
       // Revert on failure.
-      set({
-        skills: get().skills.map((sk) =>
-          matchPath(sk) ? { ...sk, disabled: !disabled } : sk
-        ),
-        error: tGlobal('error.toggleSkillFailed', { msg: e?.message }),
-      })
+      apply(!disabled)
+      set({ error: tGlobal('error.toggleSkillFailed', { msg: e?.message }) })
     }
   },
 
