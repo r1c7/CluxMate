@@ -385,8 +385,19 @@ class MCPClient:
                         self._proc.stdin.write(json.dumps(notif, ensure_ascii=False) + "\n")
                         self._proc.stdin.flush()
                 elif self._http:
+                    # Same two fixes as _send_http: httpx ≥ 0.28 forces a
+                    # trailing slash onto base_url, so a relative post("")
+                    # lands on "<url>/" (404) instead of the MCP endpoint; and
+                    # the bearer goes on THIS request only — never merged into
+                    # the client's static headers (which `conflict` reads).
+                    # A 401-gated server rejects a credential-less
+                    # notifications/initialized, so it must carry the bearer.
+                    headers: dict[str, str] = {}
+                    bearer, may_send = self._ensure_bearer()
+                    if may_send and bearer:
+                        headers["Authorization"] = f"Bearer {bearer}"
                     try:
-                        self._http.post("", json=notif)
+                        self._http.post(self.config.url, json=notif, headers=headers)
                     except Exception:
                         pass  # notifications have no response; ignore
         except Exception:
@@ -629,7 +640,11 @@ class MCPClient:
                 "authenticated": record is not None,
                 "expires_at": record.expires_at if record else None,
                 "has_refresh": bool(record and record.refresh_token),
-                "conflict": "static_header" if self.config.headers.get("Authorization") else None,
+                # Same rule the loader uses to decide whether a static header
+                # suppresses OAuth: case-insensitive and non-string safe, so a
+                # lowercase `authorization` is reported as the shadowing
+                # credential it truly is (see _has_static_auth).
+                "conflict": "static_header" if _has_static_auth(self.config.headers) else None,
             }
         return {
             "name": self.config.name,

@@ -85,6 +85,23 @@ def test_stored_token_is_attached_before_start(tmp_path, fake, monkeypatch):
     assert client.call_tool("echo", {}) == "pong"
 
 
+def test_the_initialized_notification_reaches_the_endpoint_with_the_bearer(
+    tmp_path, fake, monkeypatch
+):
+    server = fake()
+    store = MCPAuthStore(tmp_path / "auth.json")
+    monkeypatch.setattr(webbrowser, "open", _browser(server))
+    _authorize(server, store)
+    client = _client(server, store)
+    assert client.start() is True
+    notifs = [
+        r for r in server.requests
+        if r["path"] == "/mcp" and "notifications/initialized" in r["body"]
+    ]
+    assert notifs, [r["path"] for r in server.requests]
+    assert notifs[-1]["headers"].get("Authorization") == "Bearer at-1"
+
+
 def test_status_reports_the_oauth_block_without_secrets(tmp_path, fake, monkeypatch):
     server = fake()
     store = MCPAuthStore(tmp_path / "auth.json")
@@ -196,6 +213,18 @@ def test_conflict_is_reported_when_both_are_present(tmp_path, fake):
     cfg = MCPConfig(
         name="fake", transport="http", url=server.mcp_url,
         headers={"Authorization": "Bearer static"},
+        oauth=OAuthFlowConfig(server_name="fake", server_url=server.mcp_url),
+        call_timeout_s=2.0,
+    )
+    client = MCPClient(cfg, auth_store=MCPAuthStore(tmp_path / "auth.json"))
+    assert client.status()["oauth"]["conflict"] == "static_header"
+
+
+def test_conflict_is_detected_for_a_lowercase_authorization_header(tmp_path, fake):
+    server = fake(require_bearer=False)
+    cfg = MCPConfig(
+        name="fake", transport="http", url=server.mcp_url,
+        headers={"authorization": "Bearer static"},
         oauth=OAuthFlowConfig(server_name="fake", server_url=server.mcp_url),
         call_timeout_s=2.0,
     )
