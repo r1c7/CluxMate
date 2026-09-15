@@ -104,28 +104,107 @@ def test_reload_racing_shutdown_does_not_leak_a_client(tmp_path, monkeypatch):
     try:
         spawned: list = []
         real_cls = mcp_mod.MCPClient
+        # The manager's own load() client was built before the patch, so spawned
+        # starts empty here; snapshot it anyway so the guard below can only ever
+        # fire for a client built AFTER this point (i.e. the reload's).
+        base = len(spawned)
 
         class _Spy(real_cls):
             def __init__(self, *a, **kw):
                 super().__init__(*a, **kw)
                 spawned.append(self)
+                # The escape window the previous review proved: the manager is
+                # torn down BEFORE this client is registered in _clients, so
+                # shutdown() cannot reach it.
+                if len(spawned) > base:
+                    mgr.shutdown()
 
         monkeypatch.setattr(mcp_mod, "MCPClient", _Spy)
-        original = mcp_mod.MCPManager._start_and_handshake
-
-        def _handshake_then_shutdown(self, client):
-            original(self, client)
-            self.shutdown()          # the concurrent teardown, mid-reload
-
-        monkeypatch.setattr(mcp_mod.MCPManager, "_start_and_handshake",
-                            _handshake_then_shutdown)
 
         assert mgr.reload_client("remote") is False
         assert mgr._clients == {}
-        assert spawned, "the spy must have seen the reload's client"
+        assert mgr.list_tools() == []
+        assert len(spawned) == 1, "the spy must have seen the reload's client"
         assert all(c._http is None and c._proc is None for c in spawned), [
             (c._http, c._proc) for c in spawned
         ]
+    finally:
+        server.stop()
+
+
+def test_shutdown_survives_a_concurrent_reload_reclaim(tmp_path, monkeypatch):
+    """A reload_client() reclaiming its entry from _clients (mcp.py:878) while
+    shutdown() iterates the same dict (mcp.py:899) must not kill the teardown
+    with "dictionary changed size during iteration" — that aborts the rest of
+    the kills and leaves _clients/_tools stale.
+
+    The interleaving is forced, not hoped for: the teardown loop is parked
+    *inside* its body at the exact point where a real client.shutdown() would
+    block on that client's lock, the reload's reclaim then lands, and only then
+    does the loop ask for its next element.
+    """
+    import threading
+
+    import cluxmate.core.mcp as mcp_mod
+
+    server, mgr = _manager_with_one_remote(monkeypatch, tmp_path)
+    try:
+        target: dict = {}
+        registered = threading.Event()
+        in_teardown_loop = threading.Event()
+        reclaim_done = threading.Event()
+        real_shutdown = mcp_mod.MCPClient.shutdown
+        real_handshake = mcp_mod.MCPManager._start_and_handshake
+
+        def _shutdown(self):
+            if self is target.get("client") and not in_teardown_loop.is_set():
+                # We are the teardown loop, stopped inside its body (where the
+                # real client.shutdown() waits on that client's lock for up to
+                # its call timeout). Let the reload's reclaim land first.
+                in_teardown_loop.set()
+                assert reclaim_done.wait(10), "the reclaim never happened"
+            real_shutdown(self)
+
+        def _handshake(self, client):
+            target["client"] = client        # reload_client registered it already
+            registered.set()
+            real_handshake(self, client)
+            # Don't return into the reclaim until the teardown loop is iterating.
+            assert in_teardown_loop.wait(10), "teardown never entered the loop"
+
+        shutdown_errors: list = []
+        reload_errors: list = []
+
+        def _teardown():
+            try:
+                mgr.shutdown()
+            except BaseException as e:       # noqa: BLE001 — the defect under test
+                shutdown_errors.append(e)
+
+        def _reload():
+            try:
+                mgr.reload_client("remote")
+            except BaseException as e:       # noqa: BLE001
+                reload_errors.append(e)
+            finally:
+                # reload_client() pops its entry before it returns.
+                reclaim_done.set()
+
+        monkeypatch.setattr(mcp_mod.MCPClient, "shutdown", _shutdown)
+        monkeypatch.setattr(mcp_mod.MCPManager, "_start_and_handshake", _handshake)
+
+        reloader = threading.Thread(target=_reload)
+        reloader.start()
+        assert registered.wait(10), "the reload never registered its client"
+        teardown = threading.Thread(target=_teardown)
+        teardown.start()
+        teardown.join(15)
+        reloader.join(15)
+        assert not teardown.is_alive() and not reloader.is_alive()
+        assert shutdown_errors == []
+        assert reload_errors == []
+        assert mgr._clients == {}
+        assert mgr.list_tools() == []
     finally:
         server.stop()
 

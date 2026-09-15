@@ -896,7 +896,10 @@ class MCPManager:
         # FIRST statement: latch closed so a reload_client() racing this teardown
         # refuses / reclaims instead of leaving an untracked live transport.
         self._closed = True
-        for client in self._clients.values():
+        # Snapshot: a concurrent reload_client() may pop an entry (and another
+        # thread may add one) while this loop runs, and iterating the live dict
+        # would raise RuntimeError mid-teardown, aborting the rest of the kills.
+        for client in list(self._clients.values()):
             try:
                 client.shutdown()
             except Exception:
