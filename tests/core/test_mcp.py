@@ -184,3 +184,94 @@ def test_mcp_load_is_idempotent(tmp_path, monkeypatch):
         assert tools1[0].name == tools2[0].name
     finally:
         mgr.shutdown()
+
+
+# ── OAuth config surface (no network) ──────────────────────────────
+
+from cluxmate.core.mcp_oauth import OAuthFlowConfig
+
+
+def test_remote_without_auth_gets_latent_oauth(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {"url": "https://example.invalid/mcp"}})
+    cfg = MCPConfigManager(str(project)).load()["remote"]
+    assert isinstance(cfg.oauth, OAuthFlowConfig)
+    assert cfg.oauth.client_id is None
+    assert cfg.oauth.server_url == "https://example.invalid/mcp"
+    assert cfg.oauth_error is None
+
+
+def test_explicit_oauth_object_is_parsed(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp",
+        "oauth": {"client_id": "cid", "client_secret_env": "MCP_SECRET",
+                  "scopes": "read write", "callback_port": 19876},
+    }})
+    monkeypatch.setenv("MCP_SECRET", "s3cret")
+    cfg = MCPConfigManager(str(project)).load()["remote"]
+    assert cfg.oauth.client_id == "cid"
+    assert cfg.oauth.client_secret == "s3cret"
+    assert cfg.oauth.scopes == "read write"
+    assert cfg.oauth.callback_port == 19876
+
+
+def test_missing_client_secret_env_yields_none(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp",
+        "oauth": {"client_id": "cid", "client_secret_env": "MCP_ABSENT"},
+    }})
+    monkeypatch.delenv("MCP_ABSENT", raising=False)
+    assert MCPConfigManager(str(project)).load()["remote"].oauth.client_secret is None
+
+
+def test_oauth_false_disables_it(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp", "oauth": False}})
+    assert MCPConfigManager(str(project)).load()["remote"].oauth is None
+
+
+def test_static_authorization_suppresses_oauth(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp",
+        "headers": {"Authorization": "Bearer static-token"}}})
+    assert MCPConfigManager(str(project)).load()["remote"].oauth is None
+
+
+def test_static_authorization_env_suppresses_oauth(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp", "authorization_env": "MCP_TOKEN"}})
+    monkeypatch.setenv("MCP_TOKEN", "static-token")
+    assert MCPConfigManager(str(project)).load()["remote"].oauth is None
+
+
+def test_explicit_oauth_beats_static_authorization(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp",
+        "headers": {"Authorization": "Bearer static-token"},
+        "oauth": {"client_id": "cid"}}})
+    cfg = MCPConfigManager(str(project)).load()["remote"]
+    assert isinstance(cfg.oauth, OAuthFlowConfig)
+    assert cfg.oauth.client_id == "cid"
+    # The static header is still there — the client reports the conflict.
+    assert cfg.headers["Authorization"] == "Bearer static-token"
+
+
+def test_stdio_with_oauth_is_a_config_error(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"fake": _fake_server_config({"oauth": {"client_id": "x"}})})
+    cfg = MCPConfigManager(str(project)).load()["fake"]
+    assert cfg.oauth is None
+    assert cfg.oauth_error == "oauth is only supported for remote (url) MCP servers"
+
+
+def test_stdio_without_oauth_has_no_error(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"fake": _fake_server_config()})
+    cfg = MCPConfigManager(str(project)).load()["fake"]
+    assert cfg.oauth is None and cfg.oauth_error is None

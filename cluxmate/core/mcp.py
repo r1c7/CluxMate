@@ -39,6 +39,7 @@ from typing import Any
 
 import httpx
 
+from cluxmate.core.mcp_oauth import OAuthFlowConfig
 from cluxmate.tools.base import BaseTool
 
 # Server and tool names must be identifier-safe so the mcp__<server>__<tool>
@@ -78,6 +79,11 @@ class MCPConfig:
     disabled: bool = False
     risk_level: str = "write"  # 'safe' | 'write' | 'dangerous'
     call_timeout_s: float = _DEFAULT_CALL_TIMEOUT_S
+    # OAuth: None = off for this server. An OAuthFlowConfig with no client_id
+    # means "latent" — a stored token is attached if one exists, and a 401 turns
+    # into needs_auth instead of a hard failure.
+    oauth: OAuthFlowConfig | None = None
+    oauth_error: str | None = None
 
 
 def _validate_name(name: str) -> bool:
@@ -164,18 +170,52 @@ class MCPConfigManager:
             risk = entry.get("risk_level", "write")
             if risk not in ("safe", "write", "dangerous"):
                 risk = "write"
+            url = _expand_env(entry.get("url"))
+            # OAuth precedence (see the design doc §4.2): an explicit oauth
+            # object wins over a static Authorization header, which in turn wins
+            # over latent OAuth. A server with no credentials at all still gets
+            # latent OAuth so a 401 reads as "log in" rather than "broken".
+            raw_oauth = entry.get("oauth")
+            explicit_oauth = raw_oauth if isinstance(raw_oauth, dict) else None
+            oauth_cfg: OAuthFlowConfig | None = None
+            oauth_error: str | None = None
+            if raw_oauth is False:
+                oauth_cfg = None
+            elif explicit_oauth is not None:
+                secret_env = explicit_oauth.get("client_secret_env") \
+                    or explicit_oauth.get("clientSecretEnv")
+                secret = os.environ.get(secret_env, "") if secret_env else ""
+                try:
+                    callback_port = int(explicit_oauth.get("callback_port", 0) or 0)
+                except (TypeError, ValueError):
+                    callback_port = 0
+                oauth_cfg = OAuthFlowConfig(
+                    server_name=name,
+                    server_url=url or "",
+                    client_id=_expand_env(explicit_oauth.get("client_id")) or None,
+                    client_secret=secret or None,
+                    scopes=_expand_env(explicit_oauth.get("scopes")) or None,
+                    callback_port=callback_port,
+                )
+            elif transport == "http" and not headers.get("Authorization"):
+                oauth_cfg = OAuthFlowConfig(server_name=name, server_url=url or "")
+            if oauth_cfg is not None and transport != "http":
+                oauth_error = "oauth is only supported for remote (url) MCP servers"
+                oauth_cfg = None
             configs[name] = MCPConfig(
                 name=name,
                 transport=transport,
                 command=_expand_env(entry.get("command")),
                 args=_expand_env(list(entry.get("args", []))),
                 env=_expand_env(dict(entry.get("env", {}))),
-                url=_expand_env(entry.get("url")),
+                url=url,
                 headers=headers,
                 authorization_env=auth_env,
                 disabled=bool(entry.get("disabled", False)),
                 risk_level=risk,
                 call_timeout_s=float(entry.get("call_timeout_s", _DEFAULT_CALL_TIMEOUT_S)),
+                oauth=oauth_cfg,
+                oauth_error=oauth_error,
             )
         return configs
 
@@ -211,6 +251,12 @@ class MCPClient:
 
         Returns True on success. On failure, sets _status='failed' and _error.
         """
+        if self.config.oauth_error:
+            # Misconfigured (e.g. oauth on a stdio server): fail fast and
+            # visibly before spawning anything.
+            self._status = "failed"
+            self._error = self.config.oauth_error
+            return False
         try:
             if self.config.transport == "stdio":
                 # Resolve the executable through PATH (+ PATHEXT on Windows).
