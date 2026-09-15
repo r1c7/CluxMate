@@ -340,6 +340,7 @@ const en = {
   'mcp.restartNote': '· Restart session to take effect',
   'mcp.statusLine': '{count} tools · status: {status}',
   'mcp.noTools': '(no tools exposed — server may have failed to load)',
+  'mcp.needsAuthHint': 'Log in to load this server’s tools.',
   'mcp.selectHint': 'Select an MCP server on the left to view its exposed tools',
   'mcp.inputSchema': 'input schema',
   // ── MCP OAuth (interactive login lives in the Python process; this panel only
@@ -889,6 +890,7 @@ const zh: Record<keyof typeof en, string> = {
   'mcp.restartNote': '· 重启 Session 后生效',
   'mcp.statusLine': '{count} 个工具 · 状态：{status}',
   'mcp.noTools': '（未暴露任何工具——服务器可能加载失败）',
+  'mcp.needsAuthHint': '登录后即可加载该服务器的工具。',
   'mcp.selectHint': '在左侧选择 MCP 服务器以查看其暴露的工具',
   'mcp.inputSchema': '输入模式',
   'mcp.login': '登录',

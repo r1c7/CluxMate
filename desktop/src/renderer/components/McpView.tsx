@@ -203,7 +203,10 @@ export default function McpView() {
             <div className="flex-1 overflow-y-auto px-6 py-4">
               {selected.tools.length === 0 ? (
                 <p className="text-xs text-ink-faint italic">
-                  {t('mcp.noTools')}
+                  {/* A 401 needs_auth server legitimately returns no tools; the
+                      generic "server may have failed to load" wording would frame
+                      a normal login prompt as breakage. */}
+                  {selected.status === 'needs_auth' ? t('mcp.needsAuthHint') : t('mcp.noTools')}
                 </p>
               ) : (
                 <div className="space-y-4">

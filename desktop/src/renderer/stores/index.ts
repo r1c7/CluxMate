@@ -42,6 +42,27 @@ const SEARCH_DEBOUNCE_MS = 200
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchSeq = 0
 
+// ── MCP OAuth waiting state ──
+// The interactive login runs in Python (~300s window) and its outcome arrives as
+// a mcp/auth/completed push — but that push can be LOST: the bridge may die or
+// be reaped by the main process's 2-minute idle reaper, and kill() nulls the
+// completion callback without emitting anything. Without a bound, authPending
+// would stay set and the server's login button would read "Waiting for
+// browser…" forever. This timer is the safety net: it clears the spinner and
+// reports the missing completion. Kept longer than the flow's own window so a
+// slow-but-real completion still wins the race.
+const MCP_AUTH_PENDING_TIMEOUT_MS = 5 * 60 * 1000
+let authPendingTimer: ReturnType<typeof setTimeout> | null = null
+
+// Cancel the pending-login watchdog (if armed). Called whenever the flow ends
+// for any reason or the store's session context changes.
+function clearAuthPendingTimer(): void {
+  if (authPendingTimer !== null) {
+    clearTimeout(authPendingTimer)
+    authPendingTimer = null
+  }
+}
+
 let _msgId = 0
 function nextId(): string { return `msg-${++_msgId}` }
 
@@ -406,6 +427,10 @@ retryMessage: (messageId: string) => Promise<void>
   selectSkill: (path: string) => Promise<void>
   setSkillDisabled: (id: string, disabled: boolean) => Promise<void>
   showMcp: () => Promise<void>
+  // Re-fetch mcp/list WITHOUT switching the main view. The completion push and
+  // logout use this: a login the user started and then navigated away from must
+  // not yank them back into the MCP panel.
+  fetchMcpServers: () => Promise<void>
   selectMcpServer: (name: string) => void
   setMcpDisabled: (name: string, disabled: boolean) => Promise<void>
   // Kick off the interactive OAuth flow for one server (no-op without an active
@@ -866,8 +891,13 @@ export const useStore = create<AppState>((set, get) => ({
       ss.modelId = entry?.id || modelId
       ss.reasoningEffort = meta?.reasoning_effort != null ? meta.reasoning_effort : defaultReasoningValue(entry)
     }
+    // A pending OAuth flow belongs to the bridge of the session it was started
+    // in — switching sessions must drop it (the push would never be applied to
+    // this session anyway) and disarm its watchdog.
+    clearAuthPendingTimer()
     set({
       activeSessionId: id,
+      authPending: null,
       activeModelId: ss.modelId,
       activeReasoningEffort: ss.reasoningEffort,
       workingDir: meta?.cwd || get().workingDir,
@@ -2201,6 +2231,14 @@ export const useStore = create<AppState>((set, get) => ({
 
   showMcp: async () => {
     set({ mainView: 'mcp', mcpLoading: true })
+    await get().fetchMcpServers()
+  },
+
+  // The fetch half of showMcp, without the view switch. Kept separate so the
+  // OAuth completion / logout paths can refresh the list in place: the user may
+  // have navigated to another view while the browser flow ran, and a forced
+  // `mainView: 'mcp'` would yank them back (and re-trigger the loading race).
+  fetchMcpServers: async () => {
     const sid = get().activeSessionId
     if (!sid) {
       set({ mcpServers: [], mcpLoading: false })
@@ -2280,15 +2318,34 @@ export const useStore = create<AppState>((set, get) => ({
   startMcpAuth: async (name) => {
     const sid = get().activeSessionId
     if (!sid) return
+    // A new flow supersedes any previous waiting state — drop its watchdog.
+    clearAuthPendingTimer()
     set({ authPending: name })
     try {
       const res = await window.electronAPI.startMcpAuth(sid, name)
       if (res.status !== 'started') {
         set({ error: res.error || `Cannot start authorization (${res.status})`, authPending: null })
+      } else {
+        // On 'started' the spinner stays until MCP_AUTH_COMPLETED arrives — the
+        // user may spend a minute in the browser. Arm the watchdog: the push is
+        // not guaranteed (a dead/reaped bridge drops it without a trace), so
+        // without this the button would wait forever.
+        clearAuthPendingTimer()
+        authPendingTimer = setTimeout(() => {
+          authPendingTimer = null
+          // Only report if this flow is still the pending one — a newer login
+          // (or a logout / session switch) must not be clobbered by a stale timer.
+          if (get().authPending !== name) return
+          set({
+            authPending: null,
+            error: tGlobal('error.mcpAuthFailed', {
+              msg: `no completion received within ${MCP_AUTH_PENDING_TIMEOUT_MS / 60000} min`,
+            }),
+          })
+        }, MCP_AUTH_PENDING_TIMEOUT_MS)
       }
-      // On 'started' the spinner stays until MCP_AUTH_COMPLETED arrives —
-      // the user may spend a minute in the browser.
     } catch (e: any) {
+      clearAuthPendingTimer()
       set({ authPending: null, error: tGlobal('error.mcpAuthFailed', { msg: e?.message }) })
     }
   },
@@ -2297,9 +2354,13 @@ export const useStore = create<AppState>((set, get) => ({
   logoutMcp: async (name) => {
     const sid = get().activeSessionId
     if (!sid) return
+    // Logging out ends (or invalidates) any in-flight login for this server.
+    clearAuthPendingTimer()
+    set({ authPending: null })
     try {
       await window.electronAPI.logoutMcp(sid, name)
-      await get().showMcp()
+      // Refresh in place — do NOT force the MCP view open (see fetchMcpServers).
+      await get().fetchMcpServers()
     } catch (e: any) {
       set({ error: tGlobal('error.mcpLogoutFailed', { msg: e?.message }) })
     }
@@ -2308,12 +2369,16 @@ export const useStore = create<AppState>((set, get) => ({
   // The browser flow finished (or was cancelled / timed out). Clear the pending
   // spinner first — the notification is the only thing that ends it.
   refreshMcpAuthStatus: async (server, status, error) => {
+    clearAuthPendingTimer()
     set({ authPending: null })
     // A re-fetch IS correct here (unlike setMcpDisabled): the Python client was
     // hot-swapped, so mcp/list now reports the new status.
-    await get().showMcp()
-    if (status !== 'ok') {
-      set({ error: tGlobal('error.mcpAuthFailed', { msg: error || status }) })
+    await get().fetchMcpServers()
+    // `cancelled` is a deliberate user action (Python's cancel handler), not a
+    // failure — refresh only, no toast. Everything else (denied / timeout /
+    // failed) is reported, naming the server so the message is actionable.
+    if (status !== 'ok' && status !== 'cancelled') {
+      set({ error: tGlobal('error.mcpAuthFailed', { msg: `${server}: ${error || status}` }) })
     }
   },
 
