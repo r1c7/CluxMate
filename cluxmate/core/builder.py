@@ -33,7 +33,8 @@ from cluxmate.tools.todo import TodoTool
 from cluxmate.core.skills import SkillManager
 from cluxmate.core.memory import MemoryManager
 from cluxmate.core.subagents import AgentType, BUILTIN_AGENT_TYPES, SubagentRegistry
-from cluxmate.core.mcp import MCPManager
+from cluxmate.core.mcp import MCPConfig, MCPManager
+from cluxmate.core.mcp_oauth import Challenge
 from cluxmate.core.lsp import LSPManager
 from cluxmate.tools.lsp_tool import LspTool
 from cluxmate.core.grants import GrantStore
@@ -751,6 +752,38 @@ class AgentBuilder:
         if self._mcp is None:
             return []
         return self._mcp.status()
+
+    def mcp_config(self, name: str) -> MCPConfig | None:
+        """Config for one configured MCP server (None when MCP was never loaded
+        or the name is unknown). Used by the OAuth RPC methods."""
+        with self._mcp_lock:
+            mcp = self._mcp
+        return mcp.config(name) if mcp is not None else None
+
+    def mcp_challenge(self, name: str) -> "Challenge | None":
+        """The last 401 challenge from one server's client, if any. The OAuth
+        flow reuses it so it does not have to probe the endpoint again — and,
+        more importantly, discovers the resource_metadata URL the SERVER
+        actually advertised rather than a well-known guess."""
+        with self._mcp_lock:
+            mcp = self._mcp
+        if mcp is None:
+            return None
+        client = mcp.client(name)
+        return client.challenge() if client is not None else None
+
+    def reload_mcp_server(self, name: str) -> bool:
+        """Re-spawn one MCP server and report whether its tool set changed.
+
+        Deliberately NOT routed through load_mcp/mcp_shutdown: those tear down
+        every server. A missing manager (deferred load not finished, or the
+        builder was shut down) reports False — the caller only uses this to
+        decide whether a rebuild of the agent is worth doing."""
+        with self._mcp_lock:
+            mcp = self._mcp
+        if mcp is None:
+            return False
+        return mcp.reload_client(name)
 
     def mcp_shutdown(self) -> None:
         """Kill MCP subprocesses / close HTTP clients. Idempotent.

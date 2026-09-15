@@ -807,7 +807,13 @@ class MCPManager:
             # times out the TCP connection or the MCP process is killed.
             ex.shutdown(wait=False)
 
-        self._tools = []
+        self._rebuild_tools()
+
+    def _rebuild_tools(self) -> None:
+        """Rebuild the exposed tool list from every CONNECTED client. Called by
+        load() and by reload_client() — one place, so a reload can never leave
+        stale wrappers pointing at a shut-down client."""
+        tools: list[MCPToolWrapper] = []
         for client in self._clients.values():
             if client.config.disabled or client._status != "connected":
                 continue
@@ -815,7 +821,7 @@ class MCPManager:
                 tool_name = tool.get("name", "")
                 if not tool_name or not _validate_name(tool_name):
                     continue
-                self._tools.append(MCPToolWrapper(
+                tools.append(MCPToolWrapper(
                     client=client,
                     tool_name=tool_name,
                     description=tool.get("description", ""),
@@ -823,6 +829,43 @@ class MCPManager:
                     risk_level=client.config.risk_level,
                     cwd=self._cwd,
                 ))
+        self._tools = tools
+
+    def config(self, name: str) -> MCPConfig | None:
+        return self._configs.get(name)
+
+    def client(self, name: str) -> MCPClient | None:
+        return self._clients.get(name)
+
+    def reload_client(self, name: str) -> bool:
+        """Re-spawn ONE server (its credentials or config changed) and refresh
+        the tool list. Returns True when the exposed tool set changed.
+
+        A failed start is NOT an error here: the new client keeps whatever status
+        start() recorded (needs_auth / failed) and the old wrappers are dropped —
+        a stale tool set is worse than none, because every call on it would fail.
+        """
+        if not self._loaded:
+            return False
+        cfg = self._configs.get(name)
+        if cfg is None:
+            return False
+        old = self._clients.get(name)
+        if old is not None:
+            try:
+                old.shutdown()
+            except Exception:
+                pass
+        before = {(t._client.config.name, t._tool_name) for t in self._tools}
+        client = MCPClient(
+            cfg, sandbox=self._sandbox, cwd=self._cwd,
+            egress_mode=self._egress_mode, auth_store=self._auth_store,
+        )
+        self._clients[name] = client
+        self._start_and_handshake(client)
+        self._rebuild_tools()
+        after = {(t._client.config.name, t._tool_name) for t in self._tools}
+        return before != after
 
     def _start_and_handshake(self, client: MCPClient) -> None:
         if not client.start():
