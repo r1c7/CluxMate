@@ -514,6 +514,10 @@ class MCPOAuthFlow:
         bind, so a fast redirect cannot race it.
         """
         try:
+            # A cancel issued before this run started belongs to nobody: reset it
+            # here so a stale cancel() cannot make a LATER run's genuine timeout
+            # come back as kind "cancelled".
+            self._cancelled = False
             callback = _Callback(
                 requested_port=self.cfg.callback_port or 0, timeout=self.callback_timeout
             )
@@ -621,7 +625,11 @@ class MCPOAuthFlow:
 
     def cancel(self) -> None:
         """Interrupt an in-flight authorize() — the `mcp/auth/cancel` path.
-        Safe to call at any time; a no-op when nothing is waiting."""
+
+        Safe to call at any time, but a cancel issued while no flow is waiting
+        has no effect on that flow and does not carry over: a later
+        ``authorize()`` on the same instance starts with a fresh flag.
+        """
         self._cancelled = True
         callback = getattr(self, "_callback", None)
         if callback is not None:

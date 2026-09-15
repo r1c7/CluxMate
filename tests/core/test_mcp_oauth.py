@@ -321,6 +321,19 @@ def test_cancel_interrupts_the_wait_with_its_own_kind(fake, monkeypatch):
     assert box and box[0].kind == "cancelled"
 
 
+def test_cancel_before_authorize_does_not_poison_the_next_run(fake, monkeypatch):
+    """A cancel() with nothing waiting must not be carried into a later run:
+    the next authorize() on the same instance sees a fresh flag, so its own
+    timeout is reported as "timeout", not as the stale "cancelled"."""
+    server = fake()
+    monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)  # nobody approves
+    flow = _flow(server)
+    flow.cancel()                      # nothing is waiting yet
+    with pytest.raises(OAuthError) as e:
+        flow.authorize()               # nobody approves, so this is a real timeout
+    assert e.value.kind == "timeout"
+
+
 def test_a_busy_callback_port_raises_an_oauth_error(fake, monkeypatch):
     import socket
 
@@ -372,6 +385,17 @@ def test_authorization_code_is_redacted(fake, monkeypatch):
     with pytest.raises(OAuthError) as e:
         _authorize(server, monkeypatch)
     assert "code-1" not in str(e.value)
+
+
+def test_form_secrets_covers_every_credential_in_a_token_request():
+    """The verifier is a credential too. A flow that rejects the exchange with
+    error_description echoing code_verifier would leak it unless _form_secrets
+    lists it — this pins that list directly (the fake AS cannot echo a verifier
+    the test does not know in advance)."""
+    from cluxmate.core.mcp_oauth import _form_secrets
+
+    form = {"code": "c", "code_verifier": "v", "refresh_token": "r", "client_secret": "s"}
+    assert set(_form_secrets(form)) == {"c", "v", "r", "s"}
 
 
 def test_authorize_records_the_auth_method_it_used(fake, monkeypatch):
