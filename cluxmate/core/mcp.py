@@ -106,6 +106,15 @@ def _expand_env(value: Any) -> Any:
     return value
 
 
+def _has_static_auth(headers: dict[str, str]) -> bool:
+    """True when a non-empty Authorization header is configured. Header names are
+    case-insensitive (RFC 9110), so a lowercase `authorization` must suppress
+    OAuth just like `Authorization` does."""
+    return any(
+        k.lower() == "authorization" and (v or "").strip() for k, v in headers.items()
+    )
+
+
 def _derive_transport(entry: dict[str, Any]) -> str:
     if "command" in entry and entry["command"]:
         return "stdio"
@@ -177,27 +186,32 @@ class MCPConfigManager:
             # latent OAuth so a 401 reads as "log in" rather than "broken".
             raw_oauth = entry.get("oauth")
             explicit_oauth = raw_oauth if isinstance(raw_oauth, dict) else None
+            # A truthy non-object (`"oauth": true`) means "enable with defaults":
+            # silently ignoring it would turn a user's intent into a confusing 401,
+            # and on a stdio server it must reach the config error below.
+            enable_with_defaults = bool(raw_oauth) and explicit_oauth is None
+            opts = explicit_oauth if explicit_oauth is not None else {}
             oauth_cfg: OAuthFlowConfig | None = None
             oauth_error: str | None = None
             if raw_oauth is False:
                 oauth_cfg = None
-            elif explicit_oauth is not None:
-                secret_env = explicit_oauth.get("client_secret_env") \
-                    or explicit_oauth.get("clientSecretEnv")
+            elif explicit_oauth is not None or enable_with_defaults:
+                secret_env = opts.get("client_secret_env") \
+                    or opts.get("clientSecretEnv")
                 secret = os.environ.get(secret_env, "") if secret_env else ""
                 try:
-                    callback_port = int(explicit_oauth.get("callback_port", 0) or 0)
+                    callback_port = int(opts.get("callback_port", 0) or 0)
                 except (TypeError, ValueError):
                     callback_port = 0
                 oauth_cfg = OAuthFlowConfig(
                     server_name=name,
                     server_url=url or "",
-                    client_id=_expand_env(explicit_oauth.get("client_id")) or None,
+                    client_id=_expand_env(opts.get("client_id")) or None,
                     client_secret=secret or None,
-                    scopes=_expand_env(explicit_oauth.get("scopes")) or None,
+                    scopes=_expand_env(opts.get("scopes")) or None,
                     callback_port=callback_port,
                 )
-            elif transport == "http" and not headers.get("Authorization"):
+            elif transport == "http" and not _has_static_auth(headers):
                 oauth_cfg = OAuthFlowConfig(server_name=name, server_url=url or "")
             if oauth_cfg is not None and transport != "http":
                 oauth_error = "oauth is only supported for remote (url) MCP servers"

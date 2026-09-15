@@ -275,3 +275,47 @@ def test_stdio_without_oauth_has_no_error(tmp_path, monkeypatch):
     _write_mcp_json(home, {"fake": _fake_server_config()})
     cfg = MCPConfigManager(str(project)).load()["fake"]
     assert cfg.oauth is None and cfg.oauth_error is None
+
+
+def test_truthy_non_object_oauth_enables_it(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {"url": "https://example.invalid/mcp", "oauth": True}})
+    cfg = MCPConfigManager(str(project)).load()["remote"]
+    assert isinstance(cfg.oauth, OAuthFlowConfig)
+    assert cfg.oauth.client_id is None
+
+
+def test_truthy_oauth_on_stdio_is_a_config_error(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"fake": _fake_server_config({"oauth": True})})
+    cfg = MCPConfigManager(str(project)).load()["fake"]
+    assert cfg.oauth is None
+    assert cfg.oauth_error == "oauth is only supported for remote (url) MCP servers"
+
+
+def test_truthy_oauth_beats_a_static_header(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp",
+        "headers": {"Authorization": "Bearer static-token"},
+        "oauth": True}})
+    cfg = MCPConfigManager(str(project)).load()["remote"]
+    assert isinstance(cfg.oauth, OAuthFlowConfig)
+
+
+def test_lowercase_authorization_header_also_suppresses_oauth(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp",
+        "headers": {"authorization": "Bearer static-token"}}})
+    assert MCPConfigManager(str(project)).load()["remote"].oauth is None
+
+
+def test_falsy_non_object_oauth_stays_latent(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    for value in (0, "", None):
+        _write_mcp_json(home, {"remote": {
+            "url": "https://example.invalid/mcp", "oauth": value}})
+        cfg = MCPConfigManager(str(project)).load()["remote"]
+        assert isinstance(cfg.oauth, OAuthFlowConfig), value
+        assert cfg.oauth_error is None, value
