@@ -19,6 +19,12 @@ Knobs (constructor kwargs):
     authorize_redirect_state=False → 302 with a wrong state (CSRF test)
     authorize_error=None       → "access_denied" to simulate a user refusal
     pkce_methods=["S256"]      → code_challenge_methods_supported (["plain"] to refuse S256)
+    endpoint_origins={name: origin} → point one AS metadata endpoint
+                               (authorization_endpoint / token_endpoint /
+                               registration_endpoint) at another origin
+    redirect_prm_to="http://…" → 302 the protected-resource metadata elsewhere
+    serve_oas=True             → False 404s the oauth-authorization-server path
+                                 and serves the metadata at openid-configuration
 """
 
 from __future__ import annotations
@@ -95,8 +101,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._authorize(query)
         if path == "/.well-known/oauth-protected-resource/mcp" or \
            path == "/.well-known/oauth-protected-resource":
+            if self.k["redirect_prm_to"]:
+                return self._empty(302, {"Location": self.k["redirect_prm_to"]})
             return self._prm()
+        if path == "/.well-known/openid-configuration":
+            return self._as_metadata()
         if path == "/.well-known/oauth-authorization-server":
+            if not self.k["serve_oas"]:
+                return self._empty(404)
             return self._as_metadata()
         self._empty(404)
 
@@ -146,16 +158,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         issuer = self.k["issuer_mismatch"] and f"{self._origin()}/other" or self._origin()
         payload = {
             "issuer": issuer,
-            "authorization_endpoint": f"{self._origin()}/authorize",
-            "token_endpoint": f"{self._origin()}/token",
+            "authorization_endpoint": self._endpoint("authorization_endpoint", "/authorize"),
+            "token_endpoint": self._endpoint("token_endpoint", "/token"),
             "response_types_supported": ["code"],
             "code_challenge_methods_supported": list(self.k["pkce_methods"]),
             "scopes_supported": ["read", "write"],
             "token_endpoint_auth_methods_supported": list(self.k["auth_methods"]),
         }
         if self.k["registration"]:
-            payload["registration_endpoint"] = f"{self._origin()}/register"
+            payload["registration_endpoint"] = self._endpoint(
+                "registration_endpoint", "/register"
+            )
         self._json(200, payload)
+
+    def _endpoint(self, name: str, suffix: str) -> str:
+        """This origin's endpoint, or another origin's when the knob says so."""
+        override = (self.k["endpoint_origins"] or {}).get(name)
+        return f"{override}{suffix}" if override else f"{self._origin()}{suffix}"
 
     def _register(self, raw: bytes) -> None:
         body = json.loads(raw.decode("utf-8"))
@@ -217,10 +236,14 @@ class FakeOAuthServer:
         token_scope="read write", access_token="at-1", refresh_token="rt-1",
         expires_in=3600, token_status=200, token_error_body={"error": "invalid_grant"},
         authorize_redirect_state=False, authorize_error=None, pkce_methods=["S256"],
+        endpoint_origins=None, redirect_prm_to=None, serve_oas=True,
     )
 
     def __init__(self, **over):
-        knobs = dict(self.DEFAULTS)
+        # Copy list-valued defaults per instance so one test can never mutate
+        # (and so contaminate) another test's server.
+        knobs = {k: (list(v) if isinstance(v, list) else v)
+                 for k, v in self.DEFAULTS.items()}
         knobs.update(over)
         self._srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self._srv.knobs = knobs

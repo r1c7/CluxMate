@@ -45,15 +45,17 @@ def test_parse_www_authenticate():
 
 
 def test_redact_removes_secret_values():
-    # NOTE (deviation from the brief's fixture, see task-2-report.md): the brief
-    # used "...and secret sec" / ["at-1", "sec", None, ""], but that secret is
-    # 3 chars — below redact()'s "len(s) >= 4" guard, so it is never replaced and
-    # `"sec" not in out` fails — and it also occurs twice, so lowering the guard
-    # would produce three "***" while the test asserts two. One replacement
-    # inserts exactly one "***", so each secret must occur once in the message.
+    # redact() skips only None/"" entries, so the fixture uses secrets the guard
+    # cannot confuse with prose: each is at least 4 chars and occurs exactly once,
+    # and one replacement inserts exactly one "***".
     out = redact("failed with token at-1 and secret rt-2", ["at-1", "rt-2", None, ""])
     assert "at-1" not in out and "rt-2" not in out
     assert out.count("***") == 2
+
+
+def test_redact_replaces_even_short_secrets():
+    assert redact("bad token xy", ["xy"]) == "bad token ***"
+    assert redact("nothing to hide", [None, ""]) == "nothing to hide"
 
 
 def test_probe_reads_the_challenge(fake):
@@ -75,9 +77,14 @@ def test_discover_follows_challenge_then_as_metadata(fake):
     assert d.resource == f"{server.base_url}/mcp"
 
 
-def test_discover_without_challenge_uses_well_known_candidates(fake):
+def test_probe_returns_none_without_a_challenge_header(fake):
     server = fake(challenge=False)
-    d = _flow(server).discover()
+    assert _flow(server).probe() is None
+
+
+def test_discover_without_challenge_uses_well_known_candidates(fake):
+    server = fake()
+    d = _flow(server).discover(_flow(server).probe())
     assert d.token_endpoint == f"{server.base_url}/token"
 
 
@@ -89,8 +96,9 @@ def test_cross_origin_resource_metadata_is_rejected(fake):
             f"{other.base_url}/.well-known/oauth-protected-resource/mcp")))
     assert e.value.kind == "discovery"
     assert "same-origin" in str(e.value)
-    # and it never even fetched the AS metadata
-    assert "/.well-known/oauth-authorization-server" not in server.paths()
+    # and the foreign origin was never contacted (the challenge URL points
+    # there, so a broken implementation would fetch it)
+    assert other.paths() == []
 
 
 def test_issuer_mismatch_is_rejected(fake):
@@ -133,3 +141,45 @@ def test_register_without_registration_endpoint_asks_for_client_id(fake):
         _flow(server).register_client(_flow(server).discover())
     assert e.value.kind == "registration"
     assert "client_id" in str(e.value)
+
+
+def test_off_origin_authorization_endpoint_is_rejected(fake):
+    other = fake()
+    server = fake(endpoint_origins={"authorization_endpoint": other.base_url}, registration=False)
+    with pytest.raises(OAuthError) as e:
+        _flow(server).discover()
+    assert e.value.kind == "discovery"
+    assert "authorization_endpoint" in str(e.value)
+
+
+def test_off_origin_token_endpoint_is_rejected(fake):
+    other = fake()
+    server = fake(endpoint_origins={"token_endpoint": other.base_url}, registration=False)
+    with pytest.raises(OAuthError) as e:
+        _flow(server).discover()
+    assert "token_endpoint" in str(e.value)
+
+
+def test_off_origin_registration_endpoint_is_rejected(fake):
+    other = fake()
+    server = fake(endpoint_origins={"registration_endpoint": other.base_url})
+    with pytest.raises(OAuthError) as e:
+        _flow(server).discover()
+    assert "registration_endpoint" in str(e.value)
+
+
+def test_off_origin_discovery_redirect_is_rejected(fake):
+    other = fake()
+    server = fake(redirect_prm_to=f"{other.base_url}/.well-known/oauth-protected-resource/mcp")
+    with pytest.raises(OAuthError) as e:
+        _flow(server).discover()
+    assert e.value.kind == "discovery"
+    assert "off-origin" in str(e.value)
+    assert other.paths() == []          # the foreign origin was never contacted
+
+
+def test_openid_configuration_is_used_when_the_oas_path_is_absent(fake):
+    server = fake(serve_oas=False)
+    d = _flow(server).discover()
+    assert d.token_endpoint == f"{server.base_url}/token"
+    assert "/.well-known/openid-configuration" in server.paths()

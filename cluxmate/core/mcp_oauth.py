@@ -93,11 +93,17 @@ class OAuthError(Exception):
 
 
 def redact(text: str, secrets: list[Any]) -> str:
-    """Replace every occurrence of a secret value with ``***``. Empty/None
-    entries are ignored so a missing secret can't turn into a global replace."""
+    """Replace every occurrence of a secret value with ``***``.
+
+    Only ``None`` and ``""`` entries are skipped: every non-empty string is
+    redacted however short it is, because a short AS-issued token/secret is
+    still a secret that must not reach user-visible text. ``None``/empty are
+    skipped because a missing secret would otherwise turn ``replace`` into a
+    no-op (or, for ``""``, insert ``***`` between every character).
+    """
     out = str(text)
     for s in secrets:
-        if isinstance(s, str) and len(s) >= 4:
+        if isinstance(s, str) and s:
             out = out.replace(s, "***")
     return out
 
