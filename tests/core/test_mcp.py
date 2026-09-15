@@ -319,3 +319,14 @@ def test_falsy_non_object_oauth_stays_latent(tmp_path, monkeypatch):
         cfg = MCPConfigManager(str(project)).load()["remote"]
         assert isinstance(cfg.oauth, OAuthFlowConfig), value
         assert cfg.oauth_error is None, value
+
+
+def test_a_non_string_authorization_header_does_not_break_the_loader(tmp_path, monkeypatch):
+    home, project = _mgr_with_home(tmp_path, monkeypatch)
+    _write_mcp_json(home, {"remote": {
+        "url": "https://example.invalid/mcp",
+        "headers": {"Authorization": 123}}})
+    cfg = MCPConfigManager(str(project)).load()["remote"]
+    # A number is not a usable credential: OAuth stays available (latent) rather
+    # than the loader raising and removing MCP from the session entirely.
+    assert isinstance(cfg.oauth, OAuthFlowConfig)

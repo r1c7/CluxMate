@@ -109,9 +109,12 @@ def _expand_env(value: Any) -> Any:
 def _has_static_auth(headers: dict[str, str]) -> bool:
     """True when a non-empty Authorization header is configured. Header names are
     case-insensitive (RFC 9110), so a lowercase `authorization` must suppress
-    OAuth just like `Authorization` does."""
+    OAuth just like `Authorization` does. A non-string value (a hand-edited
+    `mcp.json` can hold a number) is not a usable credential — it neither
+    suppresses OAuth nor raises."""
     return any(
-        k.lower() == "authorization" and (v or "").strip() for k, v in headers.items()
+        k.lower() == "authorization" and isinstance(v, str) and bool(v.strip())
+        for k, v in headers.items()
     )
 
 
