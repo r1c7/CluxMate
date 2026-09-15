@@ -30,6 +30,7 @@ Knobs (constructor kwargs):
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import http.server
 import json
@@ -101,13 +102,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._authorize(query)
         if path == "/.well-known/oauth-protected-resource/mcp" or \
            path == "/.well-known/oauth-protected-resource":
-            if self.k["redirect_prm_to"]:
+            if self.k.get("redirect_prm_to"):
                 return self._empty(302, {"Location": self.k["redirect_prm_to"]})
             return self._prm()
         if path == "/.well-known/openid-configuration":
             return self._as_metadata()
         if path == "/.well-known/oauth-authorization-server":
-            if not self.k["serve_oas"]:
+            if not self.k.get("serve_oas", True):
                 return self._empty(404)
             return self._as_metadata()
         self._empty(404)
@@ -240,11 +241,12 @@ class FakeOAuthServer:
     )
 
     def __init__(self, **over):
-        # Copy list-valued defaults per instance so one test can never mutate
-        # (and so contaminate) another test's server.
-        knobs = {k: (list(v) if isinstance(v, list) else v)
-                 for k, v in self.DEFAULTS.items()}
-        knobs.update(over)
+        # Deep-copy the defaults per instance so one test can never mutate
+        # (and so contaminate) another test's server, or ``DEFAULTS`` itself.
+        # A deep copy covers list and dict values (and anything mutable added
+        # later), and also detaches a mutable override the caller passed in.
+        knobs = copy.deepcopy(self.DEFAULTS)
+        knobs.update(copy.deepcopy(over))
         self._srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self._srv.knobs = knobs
         self._srv.requests = []

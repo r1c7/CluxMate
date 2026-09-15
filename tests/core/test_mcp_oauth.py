@@ -82,7 +82,7 @@ def test_probe_returns_none_without_a_challenge_header(fake):
     assert _flow(server).probe() is None
 
 
-def test_discover_without_challenge_uses_well_known_candidates(fake):
+def test_discover_uses_the_challenge_when_probe_finds_one(fake):
     server = fake()
     d = _flow(server).discover(_flow(server).probe())
     assert d.token_endpoint == f"{server.base_url}/token"
