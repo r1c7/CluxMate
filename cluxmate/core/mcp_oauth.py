@@ -108,6 +108,17 @@ def redact(text: str, secrets: list[Any]) -> str:
     return out
 
 
+def _form_secrets(form: dict[str, Any]) -> list[Any]:
+    """Everything in a token request that must never survive into an error
+    string: the AS can echo any of it back in its error body."""
+    return [
+        form.get("refresh_token"),
+        form.get("client_secret"),
+        form.get("code"),
+        form.get("code_verifier"),
+    ]
+
+
 _AUTH_PARAM_RE = re.compile(
     r'(\w+)\s*=\s*"([^"]*)"'          # key="value"
     r'|(\w+)\s*=\s*([^,\s]+)'         # key=value
@@ -255,6 +266,9 @@ class MCPOAuthFlow:
         # interrupts it. The annotation is a string because _Callback is defined
         # further down this module (Task 3's half).
         self._callback: "_Callback | None" = None
+        # Set by cancel() so the waiter can tell a user cancel from a real
+        # timeout instead of reporting both as kind "timeout".
+        self._cancelled = False
 
     # ── HTTP helpers ───────────────────────────────────────────────────
     def _get_json(self, url: str, *, base_origin: str, what: str) -> dict[str, Any]:
@@ -499,10 +513,17 @@ class MCPOAuthFlow:
         the exchange when they differ. (2) The browser opens LAST, after the
         bind, so a fast redirect cannot race it.
         """
-        callback = _Callback(
-            requested_port=self.cfg.callback_port or 0, timeout=self.callback_timeout
-        )
-        callback.start()
+        try:
+            callback = _Callback(
+                requested_port=self.cfg.callback_port or 0, timeout=self.callback_timeout
+            )
+            callback.start()
+        except OSError as e:
+            raise OAuthError(
+                f"cannot listen on the loopback callback port "
+                f"{self.cfg.callback_port or '(auto)'}: {e}",
+                "authorize",
+            )
         self._callback = callback
         redirect_uri = self.callback_redirect(callback.port)
         try:
@@ -529,6 +550,8 @@ class MCPOAuthFlow:
                     pass
             callback.wait()
             if callback.code is None and callback.error is None:
+                if self._cancelled:
+                    raise OAuthError("authorization was cancelled", "cancelled")
                 raise OAuthError(
                     f"timed out after {self.callback_timeout:.0f}s waiting for the "
                     f"authorization callback on port {callback.port}",
@@ -599,6 +622,7 @@ class MCPOAuthFlow:
     def cancel(self) -> None:
         """Interrupt an in-flight authorize() — the `mcp/auth/cancel` path.
         Safe to call at any time; a no-op when nothing is waiting."""
+        self._cancelled = True
         callback = getattr(self, "_callback", None)
         if callback is not None:
             callback.cancel()
@@ -620,7 +644,7 @@ class MCPOAuthFlow:
             raise OAuthError(
                 f"token request failed: {e}", f"{error_kind}_transient"
                 if error_kind == "refresh" else error_kind,
-                secrets=[form.get("refresh_token")],
+                secrets=_form_secrets(form),
             )
         if resp.status_code != 200:
             body = resp.text[:400]
@@ -629,18 +653,18 @@ class MCPOAuthFlow:
             )
             raise OAuthError(
                 f"token endpoint returned HTTP {resp.status_code}: {body}", kind,
-                secrets=[form.get("refresh_token"), form.get("client_secret")],
+                secrets=_form_secrets(form),
             )
         try:
             data = resp.json()
         except ValueError:
             raise OAuthError("token endpoint returned invalid JSON", error_kind,
-                             secrets=[form.get("refresh_token")])
+                             secrets=_form_secrets(form))
         access = data.get("access_token") if isinstance(data, dict) else None
         if not isinstance(access, str) or not access:
             raise OAuthError(
                 "token response has no access_token", error_kind,
-                secrets=[form.get("refresh_token")],
+                secrets=_form_secrets(form),
             )
         expires_in = data.get("expires_in")
         expires_at = (
@@ -662,6 +686,7 @@ class MCPOAuthFlow:
             expires_at=expires_at,
             scope=data.get("scope") if isinstance(data.get("scope"), str)
             else (self.cfg.scopes or ""),
+            token_auth_method=method,
         )
 
 
@@ -670,10 +695,17 @@ def refresh_access_token(
     *,
     token_endpoint: str | None = None,
     client_secret: str | None = None,
+    auth_method: str | None = None,
     http_timeout: float = DEFAULT_HTTP_TIMEOUT_S,
     now: Callable[[], float] = time.time,
 ) -> OAuthRecord:
     """Exchange a refresh token for a new access token.
+
+    ``auth_method`` is how the token endpoint authenticates the client. It
+    defaults to the method recorded at authorization time
+    (``record.token_auth_method``), which itself defaults to ``none``: a
+    ``client_secret_basic`` AS would reject a refresh that posted the secret in
+    the body instead of the ``Authorization: Basic`` header.
 
     Raises OAuthError with kind ``refresh_rejected`` (the AS definitively
     refused: invalid_grant / invalid_client / 4xx) or ``refresh_transient``
@@ -685,35 +717,43 @@ def refresh_access_token(
         raise OAuthError("no refresh token stored", "refresh_rejected")
     if not url:
         raise OAuthError("no token endpoint recorded", "refresh_rejected")
+    method = auth_method or record.token_auth_method or "none"
     form = {
         "grant_type": "refresh_token",
         "refresh_token": record.refresh_token,
         "client_id": record.client_id,
     }
     secret = client_secret if client_secret is not None else record.client_secret
-    if secret:
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    basic = ""
+    if secret and method == "client_secret_basic":
+        basic = _b64url(f"{record.client_id}:{secret}".encode())
+        headers["Authorization"] = f"Basic {basic}"
+    elif secret and method == "client_secret_post":
         form["client_secret"] = secret
+    # ``method == "none"`` (or no secret): a public client sends no secret at all.
     if record.resource:
         form["resource"] = record.resource        # RFC 8707, same as the code exchange
+    # The form carries the refresh token/secret for post auth; the Basic header
+    # carries the secret for basic auth — the AS can echo either back, so both
+    # the raw secret and the encoded header value are redacted.
+    secrets = _form_secrets(form) + [secret, basic, headers.get("Authorization")]
     with httpx.Client(timeout=http_timeout, follow_redirects=False) as client:
         try:
-            resp = client.post(
-                url, data=form,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
+            resp = client.post(url, data=form, headers=headers)
         except httpx.HTTPError as e:
             raise OAuthError(f"token refresh failed: {e}", "refresh_transient",
-                             secrets=[record.refresh_token, secret])
+                             secrets=secrets)
     if resp.status_code == 200:
         try:
             data = resp.json()
         except ValueError:
             raise OAuthError("token refresh returned invalid JSON", "refresh_transient",
-                             secrets=[record.refresh_token])
+                             secrets=secrets)
         access = data.get("access_token") if isinstance(data, dict) else None
         if not isinstance(access, str) or not access:
             raise OAuthError("token refresh returned no access_token", "refresh_transient",
-                             secrets=[record.refresh_token])
+                             secrets=secrets)
         expires_in = data.get("expires_in")
         new_refresh = data.get("refresh_token")
         return OAuthRecord(
@@ -729,9 +769,10 @@ def refresh_access_token(
             if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool)
             else record.expires_at,
             scope=data.get("scope") if isinstance(data.get("scope"), str) else record.scope,
+            token_auth_method=method,
         )
     kind = "refresh_transient" if resp.status_code >= 500 else "refresh_rejected"
     raise OAuthError(
         f"token refresh returned HTTP {resp.status_code}: {resp.text[:400]}", kind,
-        secrets=[record.refresh_token, secret],
+        secrets=secrets,
     )

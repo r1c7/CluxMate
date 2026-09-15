@@ -94,6 +94,11 @@ class OAuthRecord:
     refresh_token: str | None = None
     expires_at: float | None = None
     scope: str = ""
+    # How the token endpoint authenticates this client. Stored because the
+    # refresh path has no discovery document to consult: without it a
+    # client_secret_basic client would refresh with client_secret_post and the
+    # AS would reject the grant (which Task 6 turns into a credential delete).
+    token_auth_method: str = "none"
 
     def is_fresh(self, now: float, skew: float) -> bool:
         """True when the access token is usable for at least ``skew`` more
@@ -117,6 +122,7 @@ class OAuthRecord:
             "resource": self.resource,
             "issuer": self.issuer,
             "token_endpoint": self.token_endpoint,
+            "token_auth_method": self.token_auth_method,
             "client": {
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
@@ -159,6 +165,7 @@ class OAuthRecord:
             refresh_token=_opt_str(tokens.get("refresh_token")),
             expires_at=_opt_float(tokens.get("expires_at")),
             scope=_str(tokens.get("scope")),
+            token_auth_method=_str(entry.get("token_auth_method")) or "none",
         )
 
 

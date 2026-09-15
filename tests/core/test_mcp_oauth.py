@@ -1,5 +1,7 @@
 """Tests for the MCP OAuth protocol engine (no real network, no browser)."""
 
+import json
+
 import pytest
 
 from cluxmate.core.mcp_auth_store import MCPAuthStore, OAuthRecord
@@ -192,6 +194,7 @@ def test_openid_configuration_is_used_when_the_oas_path_is_absent(fake):
 # ── PKCE + loopback callback + token exchange ──────────────────────
 
 import threading
+import time
 import urllib.request
 import webbrowser
 
@@ -227,6 +230,7 @@ def test_authorize_happy_path(fake, monkeypatch, tmp_path):
     assert rec.token_endpoint == f"{server.base_url}/token"
     assert rec.issuer == server.base_url
     assert rec.expires_at is not None
+    assert rec.token_auth_method == "none"    # the method this AS advertised
     # the authorization request carried PKCE S256 + state + resource
     q = server.authorize_query
     assert q["code_challenge_method"] == ["S256"]
@@ -254,6 +258,17 @@ def test_authorize_falls_back_to_configured_scope(fake, monkeypatch):
     assert server.authorize_query["scope"] == ["write"]
 
 
+def test_scope_comes_from_as_metadata_when_nothing_else_is_given(fake, monkeypatch):
+    server = fake()
+    flow = MCPOAuthFlow(
+        OAuthFlowConfig(server_name="fake", server_url=server.mcp_url),
+        http_timeout=2.0, callback_timeout=2.0,
+    )
+    monkeypatch.setattr(webbrowser, "open", _drive_browser(server))
+    flow.authorize()
+    assert server.authorize_query["scope"] == ["read write"]
+
+
 def test_authorize_state_mismatch_aborts_without_token_request(fake, monkeypatch):
     server = fake(authorize_redirect_state=True)
     with pytest.raises(OAuthError) as e:
@@ -272,11 +287,56 @@ def test_authorize_user_denies(fake, monkeypatch):
 
 def test_authorize_callback_timeout(fake, monkeypatch):
     server = fake()
-    flow = _flow(server)
+    # Its own flow: the shared helper waits 2 s, which made this the slowest
+    # test in the file for no extra coverage.
+    flow = MCPOAuthFlow(
+        OAuthFlowConfig(server_name="fake", server_url=server.mcp_url),
+        http_timeout=2.0, callback_timeout=0.3,
+    )
     monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)  # nobody comes back
     with pytest.raises(OAuthError) as e:
         flow.authorize()
     assert e.value.kind == "timeout"
+
+
+def test_cancel_interrupts_the_wait_with_its_own_kind(fake, monkeypatch):
+    server = fake()
+    monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)  # nobody approves
+    flow = _flow(server)
+    box: list[OAuthError] = []
+
+    def _run():
+        try:
+            flow.authorize()
+        except OAuthError as e:
+            box.append(e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    deadline = time.time() + 5
+    while getattr(flow, "_callback", None) is None and time.time() < deadline:
+        time.sleep(0.02)
+    flow.cancel()
+    t.join(timeout=5)
+    assert box and box[0].kind == "cancelled"
+
+
+def test_a_busy_callback_port_raises_an_oauth_error(fake, monkeypatch):
+    import socket
+
+    server = fake()
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)
+    try:
+        flow = _flow(server, callback_port=port)
+        with pytest.raises(OAuthError) as e:
+            flow.authorize()
+        assert e.value.kind == "authorize"
+        assert str(port) in str(e.value)
+    finally:
+        sock.close()
 
 
 def test_authorize_without_browser_prints_url(fake):
@@ -302,6 +362,29 @@ def test_authorize_rejects_plain_pkce_only_server(fake, monkeypatch):
     assert server.token_forms == []          # nothing was exchanged
 
 
+def test_authorization_code_is_redacted(fake, monkeypatch):
+    """The AS may echo the authorization code it just rejected; the code is a
+    credential and must not survive into the user-visible error."""
+    server = fake(token_status=400, token_error_body={
+        "error": "invalid_grant",
+        "error_description": "authorization code code-1 is invalid",
+    })
+    with pytest.raises(OAuthError) as e:
+        _authorize(server, monkeypatch)
+    assert "code-1" not in str(e.value)
+
+
+def test_authorize_records_the_auth_method_it_used(fake, monkeypatch):
+    """The exchange must authenticate the way the AS advertises, and the stored
+    record must remember that choice so refresh can repeat it."""
+    server = fake(auth_methods=["client_secret_basic"])
+    rec = _authorize(server, monkeypatch)
+    assert rec.token_auth_method == "client_secret_basic"
+    sent = [r for r in server.requests if r["path"] == "/token"][-1]
+    assert sent["headers"].get("Authorization", "").startswith("Basic ")
+    assert "dcr-secret" not in sent["body"]
+
+
 def test_refresh_rotates_and_reports_expiry(fake):
     server = fake()
     rec = OAuthRecord(
@@ -325,6 +408,98 @@ def test_refresh_invalid_grant_is_rejected(fake):
     assert e.value.kind == "refresh_rejected"
 
 
+def test_refresh_uses_basic_auth_when_the_record_says_so(fake):
+    server = fake()
+    rec = OAuthRecord(
+        server_url=server.mcp_url, access_token="old",
+        token_endpoint=f"{server.base_url}/token", client_id="cid",
+        client_secret="SUPER-SECRET-CLIENT", token_auth_method="client_secret_basic",
+        refresh_token="rt-1", expires_at=1.0,
+    )
+    out = refresh_access_token(rec, http_timeout=2.0)
+    assert out.access_token == "at-1"
+    sent = server.requests[-1]
+    assert sent["headers"].get("Authorization", "").startswith("Basic ")
+    assert "SUPER-SECRET-CLIENT" not in sent["body"]
+    assert out.token_auth_method == "client_secret_basic"
+
+
+def test_refresh_redacts_the_basic_secret(fake):
+    """With basic auth the secret is not in the form, so form-only redaction
+    would let an AS that echoes the client secret leak it."""
+    server = fake(token_status=400, token_error_body={
+        "error": "invalid_client",
+        "error_description": "client SUPER-SECRET-CLIENT is unknown",
+    })
+    rec = OAuthRecord(
+        server_url=server.mcp_url, access_token="old",
+        token_endpoint=f"{server.base_url}/token", client_id="cid",
+        client_secret="SUPER-SECRET-CLIENT", token_auth_method="client_secret_basic",
+        refresh_token="rt-1", expires_at=1.0,
+    )
+    with pytest.raises(OAuthError) as e:
+        refresh_access_token(rec, http_timeout=2.0)
+    assert e.value.kind == "refresh_rejected"
+    assert "SUPER-SECRET-CLIENT" not in str(e.value)
+
+
+def test_refresh_keeps_posting_the_secret_when_the_record_says_post(fake):
+    server = fake()
+    rec = OAuthRecord(
+        server_url=server.mcp_url, access_token="old",
+        token_endpoint=f"{server.base_url}/token", client_id="cid",
+        client_secret="SUPER-SECRET-CLIENT", token_auth_method="client_secret_post",
+        refresh_token="rt-1", expires_at=1.0,
+    )
+    refresh_access_token(rec, http_timeout=2.0)
+    sent = server.requests[-1]
+    assert "SUPER-SECRET-CLIENT" in sent["body"]
+    assert "Authorization" not in sent["headers"]
+
+
+def test_refresh_sends_the_resource(fake):
+    server = fake()
+    rec = OAuthRecord(
+        server_url=server.mcp_url, access_token="old", resource=server.mcp_url,
+        token_endpoint=f"{server.base_url}/token", client_id="cid",
+        refresh_token="rt-1", expires_at=1.0,
+    )
+    refresh_access_token(rec, http_timeout=2.0)
+    assert server.token_forms[-1]["resource"] == server.mcp_url
+
+
+def test_token_auth_method_survives_the_store(tmp_path):
+    """The refresh path has no discovery document, so the method chosen at
+    authorization time must come back out of ~/.cluxmate/mcp-auth.json."""
+    url = "http://127.0.0.1:9/mcp"
+    store = MCPAuthStore(tmp_path / "mcp-auth.json")
+    store.put("fake", OAuthRecord(
+        server_url=url, access_token="at", token_endpoint="http://127.0.0.1:9/token",
+        client_id="cid", client_secret="sec", refresh_token="rt",
+        token_auth_method="client_secret_basic",
+    ))
+    got = store.get("fake", url)
+    assert got is not None
+    assert got.token_auth_method == "client_secret_basic"
+
+
+def test_token_auth_method_defaults_to_none_for_older_records(tmp_path):
+    """A file written before this field existed must read back as "none", not
+    crash or silently claim a secret-auth method."""
+    url = "http://127.0.0.1:9/mcp"
+    p = tmp_path / "mcp-auth.json"
+    p.write_text(json.dumps({"version": 1, "servers": {"fake": {
+        "server_url": url,
+        "issuer": "http://127.0.0.1:9",
+        "token_endpoint": "http://127.0.0.1:9/token",
+        "client": {"client_id": "cid", "client_secret": "sec"},
+        "tokens": {"access_token": "at", "refresh_token": "rt", "expires_at": 1.0},
+    }}}), encoding="utf-8")
+    got = MCPAuthStore(p).get("fake", url)
+    assert got is not None
+    assert got.token_auth_method == "none"
+
+
 def test_refresh_5xx_is_transient(fake):
     server = fake(token_status=500, token_error_body={"error": "server_error"})
     rec = OAuthRecord(
@@ -337,7 +512,14 @@ def test_refresh_5xx_is_transient(fake):
 
 
 def test_errors_never_contain_the_token(fake):
-    server = fake(token_status=400, token_error_body={"error": "invalid_grant"})
+    # The AS echoes the refresh token it refused in error_description: with the
+    # redaction in refresh_access_token removed, "SUPER-SECRET-REFRESH" reaches
+    # the user verbatim and this test fails. (An echo of a value the request
+    # never carried — e.g. "at-1" — would leave it vacuous again.)
+    server = fake(token_status=400, token_error_body={
+        "error": "invalid_grant",
+        "error_description": "token SUPER-SECRET-REFRESH was revoked",
+    })
     rec = OAuthRecord(
         server_url=server.mcp_url, access_token="SUPER-SECRET-ACCESS",
         token_endpoint=f"{server.base_url}/token", client_id="cid",
@@ -346,6 +528,7 @@ def test_errors_never_contain_the_token(fake):
     with pytest.raises(OAuthError) as e:
         refresh_access_token(rec, http_timeout=2.0)
     assert "SUPER-SECRET" not in str(e.value)
+    assert "revoked" in str(e.value)        # the rest of the AS body survives
 
 
 def test_refresh_error_body_echoing_the_token_is_redacted(fake):
