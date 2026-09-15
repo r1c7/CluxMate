@@ -235,6 +235,123 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
         history = result.history
 
 
+def run_mcp(args) -> int:
+    """`cluxmate mcp auth|logout|status` — the OAuth entry point.
+
+    Reads mcp.json directly (MCPConfigManager), so it needs neither a running
+    session nor a live bridge: authorization is a user-level credential
+    operation. Credentials land in ~/.cluxmate/mcp-auth.json and take effect in
+    the next session for the CLI; the desktop hot-swaps them instead.
+    """
+    import json as _json
+    import urllib.parse
+
+    from cluxmate.core.mcp import MCPConfigManager
+    from cluxmate.core.mcp_auth_store import MCPAuthStore
+    from cluxmate.core.mcp_oauth import MCPOAuthFlow, OAuthError
+
+    if getattr(args, "mcp_command", None) is None:
+        # `cluxmate mcp` with no subcommand: say so instead of crashing in the
+        # auth branch on the missing `name`.
+        print("error: specify a subcommand: auth, logout or status", file=sys.stderr)
+        return 1
+
+    cwd = getattr(args, "cwd", None) or os.getcwd()
+    configs = MCPConfigManager(cwd).load()
+    store = MCPAuthStore()
+
+    if args.mcp_command == "logout":
+        removed = store.delete(args.name)
+        print(f"{'removed' if removed else 'no credentials for'} {args.name}")
+        return 0
+
+    if args.mcp_command == "status":
+        rows = []
+        for name, cfg in configs.items():
+            described = store.describe(name, cfg.url or "") if cfg.url else None
+            rows.append({
+                "name": name,
+                "transport": "local" if cfg.transport == "stdio" else "remote",
+                "oauth": cfg.oauth is not None,
+                "authenticated": bool(described),
+                "expires_at": (described or {}).get("expires_at"),
+                "error": cfg.oauth_error,
+            })
+        if getattr(args, "json", False):
+            print(_json.dumps(rows, indent=2))
+        else:
+            for r in rows:
+                state = "authorized" if r["authenticated"] else (
+                    "oauth (not authorized)" if r["oauth"] else "-")
+                print(f"{r['name']:<24} {r['transport']:<7} {state}")
+        return 0
+
+    cfg = configs.get(args.name)
+    if cfg is None:
+        print(f"error: unknown MCP server {args.name!r}", file=sys.stderr)
+        return 1
+    if cfg.transport != "http":
+        print(f"error: server {args.name!r} is local (stdio) — OAuth does not apply",
+              file=sys.stderr)
+        return 1
+    if cfg.oauth is None:
+        print(f"error: server {args.name!r} has OAuth disabled in mcp.json",
+              file=sys.stderr)
+        return 1
+    if args.callback_port is not None:
+        cfg.oauth.callback_port = int(args.callback_port)
+
+    open_browser = not getattr(args, "no_browser", False)
+    timeout = float(getattr(args, "timeout", 300.0) or 300.0)
+
+    def _print_authorize_url(url: str) -> None:
+        """`--no-browser`: hand over the URL and how to reach the callback.
+
+        The listener sits on THIS machine's loopback interface, so a browser
+        running anywhere else (SSH / headless) cannot reach it without a port
+        forward. There is deliberately no "paste the callback URL back" path:
+        the callback must be reachable over HTTP by the browser itself.
+        """
+        print(f"open this URL in a browser:\n  {url}\n")
+        # The port that is really listening is the one the flow put in the
+        # authorization request's redirect_uri: with the default ephemeral port
+        # cfg.callback_port is 0, so reading it from the flow would print a
+        # useless ":0" (flow.callback_redirect() does not know the bound port
+        # unless the caller passes it).
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        redirect = (query.get("redirect_uri") or [""])[0] or (
+            f"http://127.0.0.1:{cfg.oauth.callback_port}/oauth/callback")
+        port = urllib.parse.urlsplit(redirect).port
+        print(f"the browser must reach this machine's loopback callback {redirect}")
+        print("— on an SSH / headless session, forward that port first:")
+        print(f"  ssh -L {port}:127.0.0.1:{port} <user>@<host>\n")
+
+    flow = MCPOAuthFlow(
+        cfg.oauth, open_browser=open_browser, callback_timeout=timeout,
+        on_authorize_url=None if open_browser else _print_authorize_url,
+    )
+    try:
+        record = flow.authorize(flow.probe())
+    except OAuthError as e:
+        print(f"error: {e}", file=sys.stderr)
+        if e.kind == "timeout" and not open_browser:
+            print("hint: that callback is on this machine's loopback interface — "
+                  "an SSH user must forward it first, e.g. "
+                  "`ssh -L <port>:127.0.0.1:<port> <user>@<host>`",
+                  file=sys.stderr)
+        return 1
+    except OSError as e:
+        # authorize() already wraps a loopback bind failure in an OAuthError,
+        # but any other OSError escaping the flow must still exit 1 with a
+        # message instead of a traceback.
+        print(f"error: MCP OAuth flow failed: {e}", file=sys.stderr)
+        return 1
+    store.put(args.name, record)
+    scope = f" (scope: {record.scope})" if record.scope else ""
+    print(f"authorized {args.name}{scope} — takes effect in a new session")
+    return 0
+
+
 async def run_tui() -> None:
     """Launch the Textual TUI."""
     from cluxmate.tui.app import CluxMateApp
@@ -271,6 +388,25 @@ def main():
         help="Reasoning level id to use (e.g. high/max/off; defaults to the provider default).",
     )
 
+    # cluxmate mcp auth|logout|status
+    mcp_parser = sub.add_parser("mcp", help="Remote MCP server OAuth")
+    mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
+    mcp_auth = mcp_sub.add_parser("auth", help="Authorize a remote MCP server")
+    mcp_auth.add_argument("name")
+    mcp_auth.add_argument("--cwd", default=None, help="Project directory (defaults to cwd)")
+    mcp_auth.add_argument("--callback-port", dest="callback_port", type=int, default=None,
+                          help="Fixed loopback port (default: an ephemeral one, registered with the AS)")
+    mcp_auth.add_argument("--no-browser", dest="no_browser", action="store_true",
+                          help="Print the authorization URL instead of opening a browser")
+    mcp_auth.add_argument("--timeout", type=float, default=300.0,
+                          help="Seconds to wait for the callback (default 300)")
+    mcp_logout = mcp_sub.add_parser("logout", help="Delete stored credentials")
+    mcp_logout.add_argument("name")
+    mcp_logout.add_argument("--cwd", default=None)
+    mcp_status = mcp_sub.add_parser("status", help="Show configured servers and auth state")
+    mcp_status.add_argument("--cwd", default=None)
+    mcp_status.add_argument("--json", action="store_true")
+
     # cluxmate -p "..."
     parser.add_argument("-p", "--prompt", help="Run in headless mode with the given prompt.")
     parser.add_argument("--model-id", dest="model_id", help="Config model entry id to use (defaults to the active model).")
@@ -287,6 +423,9 @@ def main():
     if args.command == "repl":
         asyncio.run(run_repl(args.model_id, args.reasoning_effort))
         return
+
+    if args.command == "mcp":
+        sys.exit(run_mcp(args))
 
     if args.prompt:
         asyncio.run(run_headless(args.prompt, args.model_id, args.reasoning_effort))
