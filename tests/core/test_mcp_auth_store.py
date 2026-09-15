@@ -188,3 +188,16 @@ def test_same_origin():
 def test_default_path_follows_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     assert default_path() == tmp_path / ".cluxmate" / "mcp-auth.json"
+
+
+def test_a_same_size_rewrite_is_observed(tmp_path):
+    """The case that rules out (mtime, size) as the change signal: a re-issued
+    token of the same length replaces the old one, so neither the clock nor the
+    size moves. Windows' ~15.6 ms file-clock tick makes this reachable in
+    practice, not just in theory."""
+    p = tmp_path / "mcp-auth.json"
+    MCPAuthStore(p).put("linear", _record(access_token="at-1"))
+    reader = MCPAuthStore(p)
+    assert reader.get("linear", _URL).access_token == "at-1"
+    MCPAuthStore(p).put("linear", _record(access_token="at-2"))
+    assert reader.get("linear", _URL).access_token == "at-2"
