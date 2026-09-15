@@ -67,6 +67,9 @@ export const IPC = {
 
   MCP_LIST:        'mcp:list',
   MCP_SET_DISABLED: 'mcp:set-disabled',
+  MCP_AUTH_START:  'mcp:auth-start',
+  MCP_AUTH_LOGOUT: 'mcp:auth-logout',
+  MCP_AUTH_COMPLETED: 'mcp:auth-completed',
 
   APP_VERSION:    'app:version',
   GET_DEFAULT_CWD: 'app:default-cwd',

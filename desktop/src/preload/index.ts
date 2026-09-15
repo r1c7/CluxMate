@@ -76,6 +76,15 @@ const api: ElectronAPI = {
   listMcp: (sessionId: string) => ipcRenderer.invoke(IPC.MCP_LIST, sessionId),
   setMcpDisabled: (sessionId: string, name: string, disabled: boolean) =>
     ipcRenderer.invoke(IPC.MCP_SET_DISABLED, sessionId, name, disabled),
+  startMcpAuth: (sessionId: string, name: string) =>
+    ipcRenderer.invoke(IPC.MCP_AUTH_START, sessionId, name),
+  logoutMcp: (sessionId: string, name: string) =>
+    ipcRenderer.invoke(IPC.MCP_AUTH_LOGOUT, sessionId, name),
+  onMcpAuthCompleted: (callback: (payload: { server: string; status: string; error?: string | null }) => void) => {
+    const handler = (_: unknown, data: { server: string; status: string; error?: string | null }) => callback(data)
+    ipcRenderer.on(IPC.MCP_AUTH_COMPLETED, handler)
+    return () => { ipcRenderer.removeListener(IPC.MCP_AUTH_COMPLETED, handler) }
+  },
 
   getVersion: () => ipcRenderer.invoke(IPC.APP_VERSION),
   getDefaultCwd: () => ipcRenderer.invoke(IPC.GET_DEFAULT_CWD),

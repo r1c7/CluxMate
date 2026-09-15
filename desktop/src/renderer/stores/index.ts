@@ -319,6 +319,10 @@ interface AppState {
   // True while MCP_LIST is in-flight so the UI can show a loading state
   // during bridge warm-up (cold session just switched to).
   mcpLoading: boolean
+  // Name of the server whose OAuth login is currently in flight — the flow runs
+  // in Python and may keep the user in a browser for a minute, so the button
+  // shows a waiting state until mcp/auth/completed arrives. Null when idle.
+  authPending: string | null
   // Lifecycle hooks (settings.json) active in the current session's project,
   // normalized by the Python side (global + project merged).
   hooks: HookEntry[]
@@ -404,6 +408,15 @@ retryMessage: (messageId: string) => Promise<void>
   showMcp: () => Promise<void>
   selectMcpServer: (name: string) => void
   setMcpDisabled: (name: string, disabled: boolean) => Promise<void>
+  // Kick off the interactive OAuth flow for one server (no-op without an active
+  // session). Resolves once Python has STARTED the flow; the outcome is
+  // delivered later through refreshMcpAuthStatus.
+  startMcpAuth: (name: string) => Promise<void>
+  // Forget the stored OAuth tokens for one server and re-render from mcp/list.
+  logoutMcp: (name: string) => Promise<void>
+  // Called from the mcp/auth/completed push: clear the waiting state, re-fetch
+  // (the Python client was hot-swapped), and surface a non-ok outcome.
+  refreshMcpAuthStatus: (server: string, status: string, error?: string | null) => Promise<void>
   showHooks: () => Promise<void>
   reloadHooks: () => Promise<void>
   notifyHooks: (message: string) => Promise<void>
@@ -477,6 +490,7 @@ export const useStore = create<AppState>((set, get) => ({
   mcpServers: [],
   selectedMcpServer: null,
   mcpLoading: false,
+  authPending: null,
   hooks: [],
   hooksLoading: false,
   _activeUnsub: null,
@@ -2258,6 +2272,51 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  // Kick off the interactive OAuth flow. `mcp/auth/start` returns as soon as the
+  // Python background thread is up, so on 'started' we KEEP the spinner: the
+  // user may spend a minute in the browser and the real outcome only arrives as
+  // a mcp/auth/completed push. Anything else is an immediate refusal (unknown
+  // server, local transport, OAuth disabled, already running).
+  startMcpAuth: async (name) => {
+    const sid = get().activeSessionId
+    if (!sid) return
+    set({ authPending: name })
+    try {
+      const res = await window.electronAPI.startMcpAuth(sid, name)
+      if (res.status !== 'started') {
+        set({ error: res.error || `Cannot start authorization (${res.status})`, authPending: null })
+      }
+      // On 'started' the spinner stays until MCP_AUTH_COMPLETED arrives —
+      // the user may spend a minute in the browser.
+    } catch (e: any) {
+      set({ authPending: null, error: tGlobal('error.mcpAuthFailed', { msg: e?.message }) })
+    }
+  },
+
+  // Drop the stored tokens + hot-swap the client back to unauthenticated.
+  logoutMcp: async (name) => {
+    const sid = get().activeSessionId
+    if (!sid) return
+    try {
+      await window.electronAPI.logoutMcp(sid, name)
+      await get().showMcp()
+    } catch (e: any) {
+      set({ error: tGlobal('error.mcpLogoutFailed', { msg: e?.message }) })
+    }
+  },
+
+  // The browser flow finished (or was cancelled / timed out). Clear the pending
+  // spinner first — the notification is the only thing that ends it.
+  refreshMcpAuthStatus: async (server, status, error) => {
+    set({ authPending: null })
+    // A re-fetch IS correct here (unlike setMcpDisabled): the Python client was
+    // hot-swapped, so mcp/list now reports the new status.
+    await get().showMcp()
+    if (status !== 'ok') {
+      set({ error: tGlobal('error.mcpAuthFailed', { msg: error || status }) })
+    }
+  },
+
   showHooks: async () => {
     set({ mainView: 'hooks', hooksLoading: true })
     const sid = get().activeSessionId
@@ -2342,4 +2401,12 @@ window.electronAPI.onBridgeStatusChanged(({ sessionIds, running }) => {
 // working dir's git state.
 window.electronAPI.onGitChanged(({ cwd }) => {
   if (cwd === useStore.getState().workingDir) useStore.getState().refreshGitInfo()
+})
+
+// MCP OAuth finished (background thread in Python, so it can land at any time,
+// possibly long after the user clicked login and moved on). Clear the waiting
+// spinner and re-fetch: the Python side already hot-swapped the client, so the
+// list comes back with the NEW status — no session restart needed.
+window.electronAPI.onMcpAuthCompleted(({ server, status, error }) => {
+  useStore.getState().refreshMcpAuthStatus(server, status, error)
 })

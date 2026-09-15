@@ -61,6 +61,11 @@ export class AgentBridge {
   // ipc-handlers layer wires this to notify the renderer so the sidebar dot
   // greys out in real time, matching the idle-reaper notification path.
   onExit: (() => void) | null = null
+  // Invoked when a background MCP authorization finishes (mcp/auth/completed).
+  // The renderer refreshes its server list; the Python side has already
+  // hot-swapped the client, so a re-fetch returns the NEW status (unlike
+  // setMcpDisabled, whose effect is not visible until a new session).
+  onMcpAuthCompleted: ((payload: { server: string; status: string; error?: string | null }) => void) | null = null
 
   get isRunning(): boolean {
     return this._initialized && this.proc !== null && !this.proc.killed
@@ -105,6 +110,8 @@ export class AgentBridge {
             this.responseHandlers.delete(data.id)
           } else if (data.method === 'chat/stream') {
             this.streamHandlers.forEach(h => h(data.params as StreamEvent))
+          } else if (data.method === 'mcp/auth/completed') {
+            this.onMcpAuthCompleted?.(data.params as { server: string; status: string; error?: string | null })
           }
         } catch { /* skip parse errors */ }
       }
@@ -318,6 +325,17 @@ export class AgentBridge {
     return r?.servers ?? []
   }
 
+  // Start the interactive OAuth flow for one server. Resolves as soon as the
+  // Python side has kicked off its background thread (status 'started'); the
+  // real outcome arrives later as a mcp/auth/completed notification.
+  async startMcpAuth(name: string): Promise<{ status: string; error?: string }> {
+    return (await this.request('mcp/auth/start', { server: name })) as { status: string; error?: string }
+  }
+
+  async logoutMcp(name: string): Promise<{ status: string; removed?: boolean }> {
+    return (await this.request('mcp/auth/logout', { server: name })) as { status: string; removed?: boolean }
+  }
+
   async kill(): Promise<void> {
     if (this.rl && this.lineHandler) {
       this.rl.off('line', this.lineHandler)
@@ -336,6 +354,9 @@ export class AgentBridge {
     this.rl = null
     this.responseHandlers.clear()
     this.streamHandlers.clear()
+    // A closure left over a dead window would leak; the next ensureBridge
+    // re-assigns it for the new process.
+    this.onMcpAuthCompleted = null
     if (oldProc && !oldProc.killed) {
       oldProc.kill('SIGTERM')
       setTimeout(() => {
