@@ -43,15 +43,19 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchSeq = 0
 
 // ── MCP OAuth waiting state ──
-// The interactive login runs in Python (~300s window) and its outcome arrives as
-// a mcp/auth/completed push — but that push can be LOST: the bridge may die or
+// The interactive login runs in Python and its outcome arrives as a
+// mcp/auth/completed push — but that push can be LOST: the bridge may die or
 // be reaped by the main process's 2-minute idle reaper, and kill() nulls the
-// completion callback without emitting anything. Without a bound, authPending
-// would stay set and the server's login button would read "Waiting for
-// browser…" forever. This timer is the safety net: it clears the spinner and
-// reports the missing completion. Kept longer than the flow's own window so a
-// slow-but-real completion still wins the race.
-const MCP_AUTH_PENDING_TIMEOUT_MS = 5 * 60 * 1000
+// completion callback without emitting anything. The same kill() also leaves
+// an in-flight start RPC's promise permanently unsettled, so without a bound
+// authPending would stay set and the server's login button would read "Waiting
+// for browser…" forever. This timer is the safety net: it clears the spinner
+// and reports the missing completion. Kept above the flow's own window PLUS
+// slack: Python's DEFAULT_CALLBACK_TIMEOUT_S is 300 s and that wait starts
+// only AFTER discovery + registration, so the whole flow can outlast 300 s —
+// a genuine timeout must be free to deliver its own `timeout` completion
+// instead of racing this watchdog to the toast.
+const MCP_AUTH_PENDING_TIMEOUT_MS = 6 * 60 * 1000
 let authPendingTimer: ReturnType<typeof setTimeout> | null = null
 
 // Cancel the pending-login watchdog (if armed). Called whenever the flow ends
@@ -2318,31 +2322,42 @@ export const useStore = create<AppState>((set, get) => ({
   startMcpAuth: async (name) => {
     const sid = get().activeSessionId
     if (!sid) return
+    // Arm (or re-arm) the watchdog for THIS flow. Must be called in the same
+    // tick as `set({ authPending: name })`: the pending state may never exist
+    // without a live timer, because the start RPC below can hang forever if the
+    // bridge dies inside this window (kill() nulls responseHandlers, so the
+    // promise never settles and neither `catch` nor any completion push runs).
+    const armWatchdog = () => {
+      clearAuthPendingTimer()
+      authPendingTimer = setTimeout(() => {
+        authPendingTimer = null
+        // Only report if this flow is still the pending one — a newer login
+        // (or a logout / session switch) must not be clobbered by a stale timer.
+        if (get().authPending !== name) return
+        set({
+          authPending: null,
+          error: tGlobal('error.mcpAuthFailed', {
+            msg: `no completion received within ${MCP_AUTH_PENDING_TIMEOUT_MS / 60000} min`,
+          }),
+        })
+      }, MCP_AUTH_PENDING_TIMEOUT_MS)
+    }
     // A new flow supersedes any previous waiting state — drop its watchdog.
     clearAuthPendingTimer()
     set({ authPending: name })
+    armWatchdog()
     try {
       const res = await window.electronAPI.startMcpAuth(sid, name)
       if (res.status !== 'started') {
+        clearAuthPendingTimer()
         set({ error: res.error || `Cannot start authorization (${res.status})`, authPending: null })
       } else {
         // On 'started' the spinner stays until MCP_AUTH_COMPLETED arrives — the
-        // user may spend a minute in the browser. Arm the watchdog: the push is
-        // not guaranteed (a dead/reaped bridge drops it without a trace), so
-        // without this the button would wait forever.
-        clearAuthPendingTimer()
-        authPendingTimer = setTimeout(() => {
-          authPendingTimer = null
-          // Only report if this flow is still the pending one — a newer login
-          // (or a logout / session switch) must not be clobbered by a stale timer.
-          if (get().authPending !== name) return
-          set({
-            authPending: null,
-            error: tGlobal('error.mcpAuthFailed', {
-              msg: `no completion received within ${MCP_AUTH_PENDING_TIMEOUT_MS / 60000} min`,
-            }),
-          })
-        }, MCP_AUTH_PENDING_TIMEOUT_MS)
+        // user may spend a minute in the browser. Re-arm so the bound measures
+        // from the moment Python's own wait begins (discovery + registration
+        // happen first): the push is not guaranteed (a dead/reaped bridge drops
+        // it without a trace) and a timer must stay live throughout.
+        armWatchdog()
       }
     } catch (e: any) {
       clearAuthPendingTimer()
