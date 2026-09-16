@@ -343,6 +343,12 @@ const en = {
   'mcp.needsAuthHint': 'Log in to load this server’s tools.',
   'mcp.selectHint': 'Select an MCP server on the left to view its exposed tools',
   'mcp.inputSchema': 'input schema',
+  // ── MCP help page (config reference) ──
+  'mcp.help': 'Help',
+  'mcp.helpBack': 'Back',
+  'mcp.helpIntro': 'MCP servers are configured in a JSON file. This page is the full reference: both config locations, local (stdio) and remote (HTTP/OAuth) examples, and when changes take effect.',
+  'mcp.helpLocations': 'Config files',
+  'mcp.helpLocationsBody': '~/.cluxmate/mcp.json          global  — every project\n<project>/.cluxmate/mcp.json  project — merged over the global file',
   // ── MCP OAuth (interactive login lives in the Python process; this panel only
   //    starts it, reports the waiting state and shows the resulting token state) ──
   'mcp.login': 'Log in',
@@ -893,6 +899,12 @@ const zh: Record<keyof typeof en, string> = {
   'mcp.needsAuthHint': '登录后即可加载该服务器的工具。',
   'mcp.selectHint': '在左侧选择 MCP 服务器以查看其暴露的工具',
   'mcp.inputSchema': '输入模式',
+  // ── MCP 帮助页（配置参考） ──
+  'mcp.help': '帮助',
+  'mcp.helpBack': '返回',
+  'mcp.helpIntro': 'MCP 服务器通过 JSON 文件配置。本页是完整参考：两个配置文件位置、本地（stdio）与远程（HTTP/OAuth）示例，以及改动何时生效。',
+  'mcp.helpLocations': '配置文件',
+  'mcp.helpLocationsBody': '~/.cluxmate/mcp.json          全局——所有项目\n<项目>/.cluxmate/mcp.json    项目——深合并覆盖全局',
   'mcp.login': '登录',
   'mcp.logout': '登出',
   'mcp.authPending': '等待浏览器…',

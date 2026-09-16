@@ -51,6 +51,10 @@ export default function McpView() {
   // but the running bridge won't hot-swap, so we flag them "pending restart".
   const [pendingRestart, setPendingRestart] = useState<Set<string>>(new Set())
 
+  // 'list' | 'help' — the help reference takes the whole area (same shape as
+  // HooksView's help page) instead of overlaying the list.
+  const [view, setView] = useState<'list' | 'help'>('list')
+
   // Re-fetch when the active session changes — each session has its own
   // Python process owning MCP subprocesses. Clear pending flags too: a new
   // session's bridge re-reads mcp.json, so the toggle is no longer pending.
@@ -66,13 +70,26 @@ export default function McpView() {
 
   const selected = servers.find((s) => s.name === selectedName)
 
+  if (view === 'help') {
+    return <HelpPage onBack={() => setView('list')} />
+  }
+
   return (
     <div className="flex-1 flex min-h-0">
       {/* Server list */}
       <div className="w-64 flex-shrink-0 border-r border-surface-border flex flex-col">
-        <div className="px-3 h-9 flex items-center border-b border-surface-border flex-shrink-0">
+        <div className="px-3 h-9 flex items-center gap-2 border-b border-surface-border flex-shrink-0">
           <span className="text-xs font-semibold text-ink-soft">{t('mcp.servers')}</span>
-          <span className="text-[10px] text-ink-faint ml-auto">{servers.length}</span>
+          <span className="text-[10px] text-ink-faint">{servers.length}</span>
+          {/* Help lives in the left header, not the right pane: the right pane
+              is empty until a server is selected, so an entry point there would
+              be invisible in the state that needs it most. */}
+          <button
+            onClick={() => setView('help')}
+            className="ml-auto text-xs px-2.5 py-1 rounded-md border border-surface-border text-ink-soft hover:text-ink hover:bg-sidebar-hover transition-colors flex-shrink-0"
+          >
+            {t('mcp.help')}
+          </button>
         </div>
         <div className="flex-1 overflow-y-auto py-1">
           {loading && servers.length === 0 ? (
@@ -222,6 +239,39 @@ export default function McpView() {
             {t('mcp.selectHint')}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// Full-page config reference, rendered in place of the server list. Static
+// content only — it never reads or writes mcp.json.
+function HelpPage({ onBack }: { onBack: () => void }) {
+  const t = useT()
+  return (
+    <div className="flex-1 flex flex-col min-w-0">
+      <div className="h-9 border-b border-surface-border flex items-center gap-2 px-4 flex-shrink-0">
+        <button
+          onClick={onBack}
+          className="text-xs text-accent hover:text-accent-hover transition-colors flex items-center gap-1"
+        >
+          <span aria-hidden>←</span>
+          {t('mcp.helpBack')}
+        </button>
+        <span className="text-xs font-semibold text-ink-soft">{t('mcp.help')}</span>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 max-w-2xl select-text">
+        <p className="text-xs text-ink-soft leading-relaxed">{t('mcp.helpIntro')}</p>
+
+        <div className="mt-4">
+          <h4 className="text-[10px] uppercase tracking-wide text-ink-faint/70 mb-1">
+            {t('mcp.helpLocations')}
+          </h4>
+          <p className="text-[11px] font-mono text-ink-soft/90 whitespace-pre-line">
+            {t('mcp.helpLocationsBody')}
+          </p>
+        </div>
       </div>
     </div>
   )
