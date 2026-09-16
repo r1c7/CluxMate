@@ -60,7 +60,10 @@ class SkillTool(BaseTool):
         return "safe"
 
     async def execute(self, name: str = "") -> str:
-        mgr = SkillManager(self._cwd)
+        # The builder's decision, not the reader's default: `use_skill` is
+        # reachable whenever ANY skill is enabled, so an untrusted directory
+        # could otherwise enumerate and load its own project skills.
+        mgr = SkillManager(self._cwd, trusted=self._builder.trusted)
         skill = mgr.get(name)
         if skill is None:
             available = ", ".join(s.slug for s in mgr.discover_enabled()) or "(none installed)"

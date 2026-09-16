@@ -248,6 +248,23 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
         history = result.history
 
 
+def _mcp_withheld_notice(cwd: str, decision) -> None:
+    """Name the project mcp.json `mcp` is withholding, on stderr.
+
+    Only when the directory is untrusted AND it actually ships one — otherwise
+    the notice is noise. The exit code is untouched: a missing server is still
+    "unknown server" to a caller, and stdout stays machine-readable.
+    """
+    if decision.trusted or not any(f.kind == "mcp" for f in decision.findings):
+        return
+    withheld = os.path.join(cwd, ".cluxmate", "mcp.json")
+    print(
+        f"note: not loading {withheld} — {cwd} is not trusted; "
+        f"run `cluxmate trust add` in it to enable its MCP servers",
+        file=sys.stderr,
+    )
+
+
 def run_mcp(args) -> int:
     """`cluxmate mcp auth|logout|status` — the OAuth entry point.
 
@@ -255,6 +272,10 @@ def run_mcp(args) -> int:
     session nor a live bridge: authorization is a user-level credential
     operation. Credentials land in ~/.cluxmate/mcp-auth.json and take effect in
     the next session for the CLI; the desktop hot-swaps them instead.
+
+    The read is trust-gated like every other project-config reader: an untrusted
+    repository must not be able to list or authenticate its own MCP servers —
+    `auth` would otherwise probe a URL that repository supplied.
     """
     import json as _json
     import urllib.parse
@@ -270,7 +291,9 @@ def run_mcp(args) -> int:
         return 1
 
     cwd = getattr(args, "cwd", None) or os.getcwd()
-    configs = MCPConfigManager(cwd).load()
+    decision = _trust_decision(cwd)
+    _mcp_withheld_notice(cwd, decision)
+    configs = MCPConfigManager(cwd, trusted=decision.trusted).load()
     store = MCPAuthStore()
 
     if args.mcp_command == "logout":

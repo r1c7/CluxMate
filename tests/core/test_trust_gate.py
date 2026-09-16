@@ -8,6 +8,8 @@ tests are here to catch.
 import json
 from pathlib import Path
 
+import pytest
+
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.lsp import LSPConfigManager
 from cluxmate.core.mcp import MCPConfigManager, MCPManager
@@ -209,6 +211,45 @@ def test_project_skill_disable_list_is_ignored_when_untrusted(tmp_path, monkeypa
 
     assert SkillManager(str(cwd)).discover_enabled() == []
     assert [s.slug for s in SkillManager(str(cwd), trusted=False).discover_enabled()] == ["demo"]
+
+
+@pytest.mark.asyncio
+async def test_use_skill_cannot_read_a_project_skill_when_untrusted(tmp_path, monkeypatch):
+    """`use_skill` is registered off the *global* skills, so the tool is
+    reachable in a directory whose own skill is withheld: the manager it builds
+    must carry the builder's decision, not the reader's `trusted=True` default."""
+    home = _home(tmp_path, monkeypatch)
+    (home / ".cluxmate" / "skills" / "global-skill").mkdir(parents=True)
+    (home / ".cluxmate" / "skills" / "global-skill" / "SKILL.md").write_text(
+        "---\nname: global-skill\ndescription: g\n---\nGLOBAL BODY\n", encoding="utf-8"
+    )
+    cwd = _project(tmp_path, monkeypatch)
+    (cwd / ".cluxmate" / "skills" / "proj-skill").mkdir(parents=True)
+    (cwd / ".cluxmate" / "skills" / "proj-skill" / "SKILL.md").write_text(
+        "---\nname: proj-skill\ndescription: p\n---\nPROJECT BODY\n", encoding="utf-8"
+    )
+
+    from cluxmate.tools.skill import SkillTool
+
+    class _Builder:
+        """Only the attribute SkillTool reads off AgentBuilder."""
+
+        def __init__(self, trusted: bool):
+            self.trusted = trusted
+            self._tracker = None
+
+    assert "PROJECT BODY" in await SkillTool(str(cwd), _Builder(True)).execute("proj-skill")
+
+    withheld = await SkillTool(str(cwd), _Builder(False)).execute("proj-skill")
+    assert "PROJECT BODY" not in withheld
+    assert "no skill named 'proj-skill'" in withheld
+    # The refusal must not name the withheld slug in its "available" list either:
+    # that list is what the model guesses from.
+    _, _, available = withheld.partition("Available skills:")
+    assert "proj-skill" not in available
+    assert "global-skill" in available
+    # The gate drops the project root, not the tool: a global skill still loads.
+    assert "GLOBAL BODY" in await SkillTool(str(cwd), _Builder(False)).execute("global-skill")
 
 
 # ── permissions ──────────────────────────────────────────────────────────

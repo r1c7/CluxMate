@@ -8,8 +8,11 @@ from cluxmate.tools.skill import SkillTool
 
 
 class _FakeBuilder:
-    def __init__(self, tracker=None):
+    """Stand-in for AgentBuilder: the tool reads `trusted` off it."""
+
+    def __init__(self, tracker=None, trusted: bool = True):
         self._tracker = tracker
+        self.trusted = trusted
 
 
 class _FakeTracker:

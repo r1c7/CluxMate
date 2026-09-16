@@ -89,6 +89,63 @@ def test_headless_is_silent_for_an_empty_directory(tmp_path, monkeypatch, capsys
     assert capsys.readouterr().err == ""
 
 
+# ── the `mcp` subcommand ──────────────────────────────────────────────────
+# `cluxmate mcp` reads mcp.json outside any session (no bridge, no agent), so
+# the gate has to be applied at this call site too — otherwise an untrusted
+# repository gets its servers listed and its URL probed.
+
+
+def _mcp_args(**kw) -> argparse.Namespace:
+    base = {"mcp_command": "status", "name": None, "cwd": None, "json": False}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _ship_a_server(cwd: Path) -> None:
+    (cwd / ".cluxmate" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"proj-server": {"url": "https://repo.example/mcp"}}}),
+        encoding="utf-8",
+    )
+
+
+def test_mcp_status_hides_a_project_server_until_trusted(tmp_path, monkeypatch, capsys):
+    _home(tmp_path, monkeypatch)
+    cwd = _project(tmp_path)
+    _ship_a_server(cwd)
+
+    assert cli.run_mcp(_mcp_args(cwd=str(cwd))) == 0
+    captured = capsys.readouterr()
+    assert "proj-server" not in captured.out
+    assert "mcp.json" in captured.err and "cluxmate trust add" in captured.err
+
+    cli.run_trust(argparse.Namespace(action="add", path=str(cwd)))
+    capsys.readouterr()
+    assert cli.run_mcp(_mcp_args(cwd=str(cwd))) == 0
+    captured = capsys.readouterr()
+    assert "proj-server" in captured.out
+    assert captured.err == ""
+
+
+def test_mcp_auth_refuses_a_server_from_an_untrusted_project(tmp_path, monkeypatch, capsys):
+    """`auth` probes the URL it reads — an untrusted file's URL must not be probed."""
+    _home(tmp_path, monkeypatch)
+    cwd = _project(tmp_path)
+    _ship_a_server(cwd)
+
+    assert cli.run_mcp(_mcp_args(mcp_command="auth", name="proj-server", cwd=str(cwd))) == 1
+    err = capsys.readouterr().err
+    assert "unknown MCP server" in err
+    assert "mcp.json" in err
+
+
+def test_the_mcp_notice_stays_quiet_without_a_project_mcp_json(tmp_path, monkeypatch, capsys):
+    _home(tmp_path, monkeypatch)
+    cwd = tmp_path / "plain"
+    cwd.mkdir()
+    assert cli.run_mcp(_mcp_args(cwd=str(cwd))) == 0
+    assert capsys.readouterr().err == ""
+
+
 # ── argparse wiring ───────────────────────────────────────────────────────
 # Hand-built Namespaces skip the subparser, its `choices` and the dispatch, so
 # these drive the real front door with sys.argv.
