@@ -276,10 +276,16 @@ export default function McpView() {
 
 // Full-page config reference, rendered in place of the server list. Static
 // content only — it never reads or writes mcp.json.
+//
+// `min-h-0` is load-bearing: this root is a flex item of the app's column, and
+// a flex item's automatic minimum size is its CONTENT height, so without it the
+// page grows past the viewport (clipped by the ancestor `overflow-hidden`) and
+// the scrolling body below never gets a bounded height to scroll within. Same
+// reason SubagentFocusView's root carries it.
 function HelpPage({ onBack }: { onBack: () => void }) {
   const t = useT()
   return (
-    <div className="flex-1 flex flex-col min-w-0">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0">
       <div className="h-9 border-b border-surface-border flex items-center gap-2 px-4 flex-shrink-0">
         <button
           onClick={onBack}
