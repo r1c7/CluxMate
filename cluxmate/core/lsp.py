@@ -176,14 +176,17 @@ class LSPConfigManager:
     {"auto_install": false, "servers": {lang: ServerSpec-ish dict}}
     """
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, *, trusted: bool = True):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        # Project trust gate (core/trust.py): an untrusted directory contributes
+        # no servers and no auto_install, so no installer can ever run for it.
+        self._trusted = trusted
 
     def _roots(self) -> list[Path]:
-        return [
-            Path.home() / ".cluxmate" / "lsp.json",
-            Path(self._cwd) / ".cluxmate" / "lsp.json",
-        ]
+        roots = [Path.home() / ".cluxmate" / "lsp.json"]
+        if self._trusted:
+            roots.append(Path(self._cwd) / ".cluxmate" / "lsp.json")
+        return roots
 
     def load(self) -> dict[str, ServerSpec]:
         return self.load_config().specs
@@ -880,13 +883,14 @@ class LSPManager:
     """
 
     def __init__(self, workspace_root: str, specs: dict[str, ServerSpec] | None = None, sandbox=None,
-                 auto_install: bool = True):
+                 auto_install: bool = True, *, trusted: bool = True):
         self.ws_root = workspace_root
+        self._trusted = trusted
         if specs is not None:
             self.specs = specs
             self._auto_install_default = False
         else:
-            cfg = LSPConfigManager(workspace_root).load_config()
+            cfg = LSPConfigManager(workspace_root, trusted=trusted).load_config()
             self.specs = cfg.specs
             self._auto_install_default = cfg.auto_install
         self._sandbox = sandbox

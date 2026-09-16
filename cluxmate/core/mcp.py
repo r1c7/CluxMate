@@ -143,14 +143,17 @@ class MCPConfigManager:
     override per-server fields or add new servers).
     """
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, *, trusted: bool = True):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        # Project trust gate (core/trust.py): an untrusted directory contributes
+        # no servers, so load() never spawns a subprocess for it.
+        self._trusted = trusted
 
     def _roots(self) -> list[Path]:
-        return [
-            Path.home() / ".cluxmate" / "mcp.json",
-            Path(self._cwd) / ".cluxmate" / "mcp.json",
-        ]
+        roots = [Path.home() / ".cluxmate" / "mcp.json"]
+        if self._trusted:
+            roots.append(Path(self._cwd) / ".cluxmate" / "mcp.json")
+        return roots
 
     def load(self) -> dict[str, MCPConfig]:
         merged: dict[str, dict[str, Any]] = {}
@@ -732,8 +735,9 @@ class MCPManager:
     """
 
     def __init__(self, cwd: str, sandbox=None, egress_mode: str = "shared",
-                 auth_store: MCPAuthStore | None = None):
+                 auth_store: MCPAuthStore | None = None, *, trusted: bool = True):
         self._cwd = cwd
+        self._trusted = trusted
         self._sandbox = sandbox  # ShellSandbox | None — passed to stdio clients
         self._egress_mode = egress_mode
         # One store per manager, shared by every client it builds: the file is
@@ -759,7 +763,7 @@ class MCPManager:
         if self._loaded:
             return
         self._loaded = True
-        self._configs = MCPConfigManager(self._cwd).load()
+        self._configs = MCPConfigManager(self._cwd, trusted=self._trusted).load()
 
         for cfg in self._configs.values():
             self._clients[cfg.name] = MCPClient(

@@ -34,6 +34,8 @@ Trust model: hooks are the USER's own configuration, not model output, so they
 run with ``subprocess.run`` at normal integrity (NOT the Low-IL / bwrap sandbox
 that guards model-generated bash). They are still bounded — per-hook timeout and
 a stdout/stderr cap — and a crash/timeout is a no-op, never a turn failure.
+Project entries are additionally gated by core/trust.py — an untrusted working
+directory contributes no hooks at all.
 
 Config lives at ``<cwd>/.cluxmate/settings.json`` (project) and
 ``~/.cluxmate/settings.json`` (global); project entries run after global ones.
@@ -121,8 +123,11 @@ class HookManager:
     I/O (a missing/corrupt settings.json yields an empty hook set, never raises).
     """
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, *, trusted: bool = True):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        # Project trust gate (core/trust.py). False ⇒ only the global
+        # settings.json is read: opening a cloned repository must not run shell.
+        self._trusted = trusted
         self.session_id = ""
         self._specs: dict[str, list[_HookSpec]] = self._load()
         # Optional transport observer — called with ("hook_start"|"hook_result",
@@ -149,10 +154,10 @@ class HookManager:
         return merged
 
     def _roots(self) -> list[tuple[Path, str]]:
-        return [
-            (Path.home() / ".cluxmate" / "settings.json", "global"),
-            (Path(self._cwd) / ".cluxmate" / "settings.json", "project"),
-        ]
+        roots = [(Path.home() / ".cluxmate" / "settings.json", "global")]
+        if self._trusted:
+            roots.append((Path(self._cwd) / ".cluxmate" / "settings.json", "project"))
+        return roots
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
