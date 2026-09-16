@@ -157,6 +157,16 @@ Both write boundaries are enabled in every mode **except `yolo`** — the one ex
 
 Change it from desktop Settings → Sandbox → Network egress, or via the `egress/config/set` JSON-RPC method; a mode change rebuilds the agent so the new mode is baked into the sandbox backend. Like the other boundaries, egress is off in `yolo` mode.
 
+## Project trust
+
+Config under `<cwd>/.cluxmate/` belongs to *the repository*, not to *you*: hooks run shell commands, `mcp.json` spawns subprocesses, `lsp.json` can install toolchains, `skills/` and `agents/` reach the model's context, and `permissions.json` can pre-authorize tools. So the first time CluxMate starts in a directory that **actually ships such config**, it asks once, with three answers: trust and remember / trust this run only / do not trust.
+
+While the directory is untrusted — "do not trust" and "not answered yet" behave the same — none of that project-level config is read, and `permissions.json` is not written either (the approval card stops offering "always allow"); global `~/.cluxmate/` config and the built-in defaults are unaffected. Untrusted is **not** read-only: file writes, the sandbox boundaries and the approval tiers behave exactly as before. The decision is recorded in `~/.cluxmate/trust.json` (per directory; not a writable location, so the model cannot change it).
+
+- **CLI** — `cluxmate trust status` shows the verdict for the current directory and what is being withheld; `cluxmate trust add` pre-authorizes it (for headless / CI).
+- **Desktop** — a card on first contact; Settings → Project trust to review the decisions and revoke them.
+- **TUI** — asks inline at startup (and when the working directory changes).
+
 
 ## Subagents
 
@@ -327,6 +337,9 @@ cluxmate agent stdio                                            # JSON-RPC stdio
 cluxmate mcp status                                             # MCP servers + auth state
 cluxmate mcp auth linear                                        # OAuth login for a remote MCP server
 cluxmate mcp logout linear                                      # delete stored MCP credentials
+
+cluxmate trust status                                           # is this directory's .cluxmate config loaded?
+cluxmate trust [list|add|deny|remove|status] [path]             # project trust: inspect / grant / revoke
 ```
 
 Run `cluxmate` once to seed a default config, then pick a model in the TUI/desktop Settings.
@@ -366,9 +379,9 @@ Per-project state lives under `<project>/.cluxmate/` — it stays with the proje
 | Scope | Files |
 |---|---|
 | **Project** (`<project>/.cluxmate/`) | `permissions.json` (always-allow lists), `mcp.json`, `lsp.json`, `settings.json` ([hooks](#lifecycle-hooks)), `skills/` (skill packs) + `skills.json` (which copies are disabled), `agents/` (custom subagent types), `memory/facts/` (retrieval facts), plus scratch dirs like `tmp-spill/` |
-| **Global** (`~/.cluxmate/`) | `config.json` (models), `AGENTS.md` (global memory), `sandbox-grants.json` (extra writable folders), `forbid-read.json` (read denylist), `ssrf.json` (network allow/block), `egress.json` (bash/MCP egress mode), `retrieval-memory.json`, `mcp-auth.json` (OAuth tokens), `checkpoints/`, plus the global halves of the two-root families — `mcp.json`, `lsp.json`, `settings.json`, `agents/`, `skills/`, `memory/global/facts/` |
+| **Global** (`~/.cluxmate/`) | `config.json` (models), `AGENTS.md` (global memory), `sandbox-grants.json` (extra writable folders), `forbid-read.json` (read denylist), `ssrf.json` (network allow/block), `egress.json` (bash/MCP egress mode), `trust.json` (project-trust decisions), `retrieval-memory.json`, `mcp-auth.json` (OAuth tokens), `checkpoints/`, plus the global halves of the two-root families — `mcp.json`, `lsp.json`, `settings.json`, `agents/`, `skills/`, `memory/global/facts/` |
 
-Config families with a global and a project half are resolved global-then-project: `mcp.json`, `lsp.json` and custom subagent types let the project copy override the global one, while hooks are **additive** — global hooks run first, then the project's. The registers the model must never be able to edit — writable-folder grants, the read denylist, the SSRF rules, the egress mode — are deliberately **user-global**, out of a prompt-injected model's reach.
+Config families with a global and a project half are resolved global-then-project: `mcp.json`, `lsp.json` and custom subagent types let the project copy override the global one, while hooks are **additive** — global hooks run first, then the project's. The registers the model must never be able to edit — writable-folder grants, the read denylist, the SSRF rules, the egress mode, the project-trust registry — are deliberately **user-global**, out of a prompt-injected model's reach.
 
 ## Desktop app
 

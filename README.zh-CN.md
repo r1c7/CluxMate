@@ -157,6 +157,16 @@ MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配�
 
 可在桌面端 Settings → 沙箱 → 网络出口切换，或通过 `egress/config/set` JSON-RPC 方法修改；模式变更会重建 agent，让新模式烘焙进沙箱后端。与其它边界一样，egress 在 `yolo` 模式下关闭。
 
+## 项目信任（Project trust）
+
+`<cwd>/.cluxmate/` 下的配置属于"这个仓库"，而不是"你"：hooks 会跑 shell、mcp.json 会起子进程、lsp.json 能装工具链、skills/agents 会进模型上下文、permissions.json 能预授权工具。因此首次在一个**确实带了这些配置**的目录里启动时会询问一次，三档：信任并记住 / 仅本次会话 / 不信任。
+
+未信任（含"不信任"与"还没回答"）时，以上项目级配置**一律不读**，`permissions.json` 也不写（审批卡不再提供"总是允许"）；全局 `~/.cluxmate/` 配置与内置默认不受影响。未信任不等于只读：文件写入、沙箱边界与审批档位照旧。信任决定记录在 `~/.cluxmate/trust.json`（按目录，精确匹配；不在可写范围内，模型改不了）。
+
+- CLI：`cluxmate trust status` 看当前目录的判定与被拦下的项，`cluxmate trust add` 预授权（headless/CI 用）。
+- 桌面：首次接触时弹卡片；设置 → 项目信任 可查看与撤销。
+- TUI：启动（或切换工作目录）时内联询问。
+
 
 ## 子 agent
 
@@ -327,6 +337,9 @@ cluxmate agent stdio                                    # JSON-RPC stdio 服务�
 cluxmate mcp status                                     # MCP 服务器 + 认证状态
 cluxmate mcp auth linear                                # 为远程 MCP 服务器做 OAuth 登录
 cluxmate mcp logout linear                              # 删除已存的 MCP 凭据
+
+cluxmate trust status                                   # 当前目录的 .cluxmate 配置是否加载
+cluxmate trust [list|add|deny|remove|status] [path]     # 项目信任：查看 / 授予 / 撤销
 ```
 
 运行一次 `cluxmate` 会生成默认配置，然后在 TUI/桌面端设置里选择模型。
@@ -366,9 +379,9 @@ cluxmate mcp logout linear                              # 删除已存的 MCP �
 | 作用域 | 文件 |
 |---|---|
 | **项目**（`<项目>/.cluxmate/`） | `permissions.json`（always-allow 列表）、`mcp.json`、`lsp.json`、`settings.json`（[hooks](#生命周期-hooks)）、`skills/`（技能包）+ `skills.json`（哪些副本被禁用）、`agents/`（自定义子 agent 类型）、`memory/facts/`（检索事实），以及 `tmp-spill/` 等临时目录 |
-| **全局**（`~/.cluxmate/`） | `config.json`（模型）、`AGENTS.md`（全局记忆）、`sandbox-grants.json`（可写文件夹授权）、`forbid-read.json`（读黑名单）、`ssrf.json`（网络允许/封禁）、`egress.json`（bash/MCP 出网模式）、`retrieval-memory.json`、`mcp-auth.json`（OAuth 令牌）、`checkpoints/`，以及双侧配置族的全局半边——`mcp.json`、`lsp.json`、`settings.json`、`agents/`、`skills/`、`memory/global/facts/` |
+| **全局**（`~/.cluxmate/`） | `config.json`（模型）、`AGENTS.md`（全局记忆）、`sandbox-grants.json`（可写文件夹授权）、`forbid-read.json`（读黑名单）、`ssrf.json`（网络允许/封禁）、`egress.json`（bash/MCP 出网模式）、`trust.json`（项目信任决定）、`retrieval-memory.json`、`mcp-auth.json`（OAuth 令牌）、`checkpoints/`，以及双侧配置族的全局半边——`mcp.json`、`lsp.json`、`settings.json`、`agents/`、`skills/`、`memory/global/facts/` |
 
-两侧都有半边的配置族按全局 → 项目解析：`mcp.json`、`lsp.json` 与自定义子 agent 类型由项目侧覆盖全局侧，而 hooks 是**累加**的——全局的先跑，然后跑项目的。模型绝不该能改的寄存器——可写文件夹授权、读黑名单、SSRF 规则、出网模式——刻意只放在**用户级**，在有提示词注入的模型够不着的地方。
+两侧都有半边的配置族按全局 → 项目解析：`mcp.json`、`lsp.json` 与自定义子 agent 类型由项目侧覆盖全局侧，而 hooks 是**累加**的——全局的先跑，然后跑项目的。模型绝不该能改的寄存器——可写文件夹授权、读黑名单、SSRF 规则、出网模式、项目信任注册表——刻意只放在**用户级**，在有提示词注入的模型够不着的地方。
 
 ## 桌面端
 
