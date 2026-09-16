@@ -42,9 +42,29 @@ def test_reload_client_rebuilds_the_tool_list(tmp_path, monkeypatch):
     server, mgr = _manager_with_one_remote(monkeypatch, tmp_path)
     try:
         assert [t.name for t in mgr.list_tools()] == ["mcp__remote__echo"]
-        changed = mgr.reload_client("remote")
-        assert changed is False            # same server, same tools
+        first = mgr.client("remote")
+        # A reload always replaces the wrapper objects for that server, so the
+        # caller MUST rebuild the agent even when the tool names are unchanged.
+        assert mgr.reload_client("remote") is True
+        assert mgr.client("remote") is not first
         assert [t.name for t in mgr.list_tools()] == ["mcp__remote__echo"]
+        assert mgr.list_tools()[0]._client is mgr.client("remote")
+    finally:
+        mgr.shutdown()
+        server.stop()
+
+
+def test_a_second_reload_still_reports_a_change(tmp_path, monkeypatch):
+    """A re-login replaces the wrapper objects even when the tool names are
+    identical, so the caller MUST rebuild the agent — otherwise the session
+    keeps dispatching through wrappers whose client was just shut down."""
+    server, mgr = _manager_with_one_remote(monkeypatch, tmp_path)
+    try:
+        assert mgr.reload_client("remote") is True      # first reload == change
+        first = mgr.client("remote")
+        assert mgr.reload_client("remote") is True      # re-login, same tools
+        assert mgr.client("remote") is not first
+        assert mgr.list_tools()[0]._client is mgr.client("remote")
     finally:
         mgr.shutdown()
         server.stop()

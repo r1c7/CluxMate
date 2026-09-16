@@ -842,7 +842,9 @@ class MCPManager:
 
     def reload_client(self, name: str) -> bool:
         """Re-spawn ONE server (its credentials or config changed) and refresh
-        the tool list. Returns True when the exposed tool set changed.
+        the tool list. Returns True when the exposed wrappers were replaced (a
+        successful reconnect ALWAYS counts, even when the tool names are
+        identical).
 
         A failed start is NOT an error here: the new client keeps whatever status
         start() recorded (needs_auth / failed) and the old wrappers are dropped —
@@ -879,7 +881,12 @@ class MCPManager:
             return False
         self._rebuild_tools()
         after = {(t._client.config.name, t._tool_name) for t in self._tools}
-        return before != after
+        # A reload REPLACES the wrappers for this server even when the exposed
+        # tool names are identical, and the old wrappers now point at a client
+        # that was just shut down. Reporting "unchanged" would leave the agent
+        # dispatching through them (every call answering "no response") until a
+        # session restart — so a successful reconnect always counts as a change.
+        return client._status == "connected" or before != after
 
     def _start_and_handshake(self, client: MCPClient) -> None:
         if not client.start():
