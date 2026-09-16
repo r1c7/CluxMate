@@ -3,6 +3,7 @@ import { IPC } from '../shared/ipc-channels'
 import type {
   ElectronAPI, CreateSessionParams,
   ChatResult, SessionStreamEvent, SsrConfigPayload, EgressConfigPayload,
+  TrustSnapshot,
 } from '../shared/types'
 
 const api: ElectronAPI = {
@@ -84,6 +85,18 @@ const api: ElectronAPI = {
     const handler = (_: unknown, data: { server: string; status: string; error?: string | null }) => callback(data)
     ipcRenderer.on(IPC.MCP_AUTH_COMPLETED, handler)
     return () => { ipcRenderer.removeListener(IPC.MCP_AUTH_COMPLETED, handler) }
+  },
+
+  trustGet: (sessionId: string, cwd: string, modelId: string) =>
+    ipcRenderer.invoke(IPC.TRUST_GET, sessionId, cwd, modelId),
+  trustSet: (sessionId: string, cwd: string, modelId: string, status: 'trusted' | 'denied', persist: boolean) =>
+    ipcRenderer.invoke(IPC.TRUST_SET, sessionId, cwd, modelId, status, persist),
+  trustRemove: (sessionId: string, cwd: string, modelId: string) =>
+    ipcRenderer.invoke(IPC.TRUST_REMOVE, sessionId, cwd, modelId),
+  onTrustRequired: (handler: (payload: TrustSnapshot & { sessionId: string }) => void) => {
+    const listener = (_: unknown, data: TrustSnapshot & { sessionId: string }) => handler(data)
+    ipcRenderer.on(IPC.TRUST_REQUIRED, listener)
+    return () => { ipcRenderer.removeListener(IPC.TRUST_REQUIRED, listener) }
   },
 
   getVersion: () => ipcRenderer.invoke(IPC.APP_VERSION),

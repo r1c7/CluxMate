@@ -699,6 +699,23 @@ export interface MemoryFactList {
   total: number
 }
 
+// Project trust. `findings` is the project config the directory carries
+// (hooks / MCP servers / skills / permissions); while the directory is not
+// trusted the agent runs WITHOUT it. `source` says where the answer came from
+// (session | registry | default) and `store` is the whole registry, for the
+// settings list. Resolved by the Python side (cluxmate/core/trust.py).
+export type TrustStatus = 'trusted' | 'denied' | 'unknown'
+
+export interface TrustFinding { kind: string; label: string; path: string }
+
+export interface TrustSnapshot {
+  cwd: string
+  status: TrustStatus
+  source: string
+  findings: TrustFinding[]
+  store: Record<string, string>
+}
+
 declare global {
   interface Window {
     electronAPI: ElectronAPI
@@ -873,6 +890,18 @@ export interface ElectronAPI {
   // Python side has already hot-swapped the client, so the listener re-fetches
   // the list and sees the NEW status (unlike setMcpDisabled).
   onMcpAuthCompleted: (cb: (payload: { server: string; status: string; error?: string | null }) => void) => () => void
+
+  // Project trust: the directory's answer + the config it withholds. `get` and
+  // `remove` read/forget it; `set` records `status` either in the user-global
+  // registry (persist) or for this run only (`sessionTrust` in main, re-sent on
+  // every spawn). Granting trust changes what `initialize` loads, so the
+  // session's bridge is killed and respawned on the next interaction.
+  trustGet: (sessionId: string, cwd: string, modelId: string) => Promise<TrustSnapshot>
+  trustSet: (sessionId: string, cwd: string, modelId: string, status: 'trusted' | 'denied', persist: boolean) => Promise<TrustSnapshot>
+  trustRemove: (sessionId: string, cwd: string, modelId: string) => Promise<TrustSnapshot>
+  // Fires when the Python side decides a directory needs a prompt
+  // (trust/required) — after an initialize that found withheld config.
+  onTrustRequired: (cb: (payload: TrustSnapshot & { sessionId: string }) => void) => () => void
 
   getVersion: () => Promise<string>
   getDefaultCwd: () => Promise<string>

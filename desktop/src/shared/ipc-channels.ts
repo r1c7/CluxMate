@@ -71,6 +71,11 @@ export const IPC = {
   MCP_AUTH_LOGOUT: 'mcp:auth-logout',
   MCP_AUTH_COMPLETED: 'mcp:auth-completed',
 
+  TRUST_REQUIRED: 'trust:required',
+  TRUST_GET: 'trust:get',
+  TRUST_SET: 'trust:set',
+  TRUST_REMOVE: 'trust:remove',
+
   APP_VERSION:    'app:version',
   GET_DEFAULT_CWD: 'app:default-cwd',
   GET_MODELS_CONFIG: 'app:models-config',

@@ -17,6 +17,11 @@ const bridges = new Map<string, AgentBridge>()
 const pendingSpawns = new Map<string, Promise<void>>()
 let activeSessionId: string | null = null
 
+// Session-only trust decisions ("trust this run only"), keyed by cwd: they are
+// re-sent on every spawn because the Python process that held the in-memory
+// override is killed on a bridge restart.
+const sessionTrust = new Map<string, 'trusted' | 'denied'>()
+
 // Full session teardown shared by SESSION_DELETE and GROUP_DELETE: DB row +
 // on-disk logs first, then the bridge, then the active pointer.
 function deleteSessionFully(id: string) {
@@ -470,8 +475,16 @@ async function ensureBridge(sid: string, cwd: string, modelId: string): Promise<
       win.webContents.send(IPC.MCP_AUTH_COMPLETED, payload)
     }
   }
+  // trust/required follows the same push pattern; the session id is what tells
+  // the renderer card WHICH session's cwd this is about (the payload itself
+  // carries only the resolved directory).
+  b.onTrustRequired = (payload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC.TRUST_REQUIRED, { sessionId: sid, ...payload })
+    }
+  }
   bridges.set(sid, b)
-  const spawnPromise = b.spawn(cwd, modelId, sid).catch((e) => {
+  const spawnPromise = b.spawn(cwd, modelId, sid, sessionTrust.get(cwd)).catch((e) => {
     console.error(`Agent spawn failed for ${sid} at ${cwd}:`, e?.message)
     bridges.delete(sid)
   })
@@ -785,6 +798,50 @@ export function registerIpcHandlers() {
     // reflects state right after a session switch, before any chat/send.
     const meta = sessionStore.getSession(sid)
     return readProjectPermissions(meta?.cwd || '')
+  })
+
+  // Project trust: the Python process owns the resolution (registry + the
+  // findings probe over the project's config files), so all three go over the
+  // bridge. A cold bridge is warmed first — but the fresh spawn re-runs the
+  // same resolution, so the answer is never staler than the process. `modelId`
+  // is required for that warm-up: ensureBridge with an empty one would spawn a
+  // process with no model to run.
+  ipcMain.handle(IPC.TRUST_GET, async (_, sid: string, cwd: string, modelId: string) => {
+    const b = await ensureBridge(sid, cwd, modelId)
+    return b.call('trust/get', { cwd })
+  })
+
+  ipcMain.handle(IPC.TRUST_REMOVE, async (_, sid: string, cwd: string, modelId: string) => {
+    const b = await ensureBridge(sid, cwd, modelId)
+    return b.call('trust/remove', { cwd })
+  })
+
+  ipcMain.handle(IPC.TRUST_SET, async (
+    _, sid: string, cwd: string, modelId: string,
+    status: 'trusted' | 'denied', persist: boolean,
+  ) => {
+    const b = await ensureBridge(sid, cwd, modelId)
+    const result = await b.call('trust/set', { cwd, status, persist })
+    // An invalid status comes back as an ordinary RESULT payload carrying
+    // `error`, not as a JSON-RPC error, so it has to be surfaced here — passing
+    // it through would read as a recorded decision in the renderer.
+    const error = (result as { error?: unknown } | null)?.error
+    if (typeof error === 'string') throw new Error(error)
+    if (persist) sessionTrust.delete(cwd)
+    else sessionTrust.set(cwd, status)
+    // Trusting a directory changes exactly what initialize loads (hooks, MCP,
+    // skills, permissions) — same class as the grants / forbid-read toggles, so
+    // kill the bridge and let the next interaction re-initialize with the new
+    // decision instead of trying to hot-swap it. A `denied` answer only removes
+    // access, so it needs no respawn.
+    if (status === 'trusted') {
+      const live = bridges.get(sid)
+      if (live) {
+        bridges.delete(sid)
+        live.kill().catch(() => { /* already gone */ })
+      }
+    }
+    return result
   })
 
   // Lifecycle hooks (settings.json, global + project merged). The merged view is

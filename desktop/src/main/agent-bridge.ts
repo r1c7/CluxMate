@@ -66,12 +66,16 @@ export class AgentBridge {
   // hot-swapped the client, so a re-fetch returns the NEW status (unlike
   // setMcpDisabled, whose effect is not visible until a new session).
   onMcpAuthCompleted: ((payload: { server: string; status: string; error?: string | null }) => void) | null = null
+  // Invoked when the Python side asks about project trust (trust/required),
+  // pushed right after an initialize that found withheld project config. The
+  // renderer shows the prompt card; the answer comes back over trust/set.
+  onTrustRequired?: (payload: { cwd: string; status: string; source: string; findings: unknown[]; store: Record<string, string> }) => void
 
   get isRunning(): boolean {
     return this._initialized && this.proc !== null && !this.proc.killed
   }
 
-  async spawn(cwd: string, modelId: string, sessionId: string): Promise<void> {
+  async spawn(cwd: string, modelId: string, sessionId: string, trust?: 'trusted' | 'denied'): Promise<void> {
     await this.kill()
     this._spawnCwd = cwd
 
@@ -112,6 +116,8 @@ export class AgentBridge {
             this.streamHandlers.forEach(h => h(data.params as StreamEvent))
           } else if (data.method === 'mcp/auth/completed') {
             this.onMcpAuthCompleted?.(data.params as { server: string; status: string; error?: string | null })
+          } else if (data.method === 'trust/required') {
+            this.onTrustRequired?.(data.params)
           }
         } catch { /* skip parse errors */ }
       }
@@ -141,7 +147,11 @@ export class AgentBridge {
 
       // Initialize handshake. Pass the current mode so a respawn (e.g. after a
       // crash) restores it; on a fresh spawn it's the 'default' default.
-      this.request('initialize', { cwd, model_id: modelId, session_id: sessionId, mode: this._mode })
+      const initParams: Record<string, unknown> = { cwd, model_id: modelId, session_id: sessionId, mode: this._mode }
+      // A session-only decision ("trust this run only") dies with the Python
+      // process, so the main process re-sends it on every spawn.
+      if (trust) initParams.trust = trust
+      this.request('initialize', initParams)
         .then(() => { this._initialized = true; resolve() })
         .catch((e) => {
           this._initialized = false
@@ -178,6 +188,12 @@ export class AgentBridge {
         }
       }, timeoutMs)
     })
+  }
+
+  // Public face of request() for the trust RPCs (ipc-handlers drives them on an
+  // already-running bridge).
+  async call(method: string, params: unknown): Promise<unknown> {
+    return this.request(method, params)
   }
 
   async streamChat(
