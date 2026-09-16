@@ -2473,6 +2473,20 @@ window.electronAPI.onBridgeStatusChanged(({ sessionIds, running }) => {
   const bridgeStatuses = { ...useStore.getState().bridgeStatuses }
   for (const sid of sessionIds) bridgeStatuses[sid] = running ?? false
   useStore.setState({ bridgeStatuses })
+
+  // A dead bridge can never deliver mcp/auth/completed (kill() nulls the
+  // completion callback), so the 6-minute login watchdog would be the only
+  // recovery. Clear the pending state as soon as the ACTIVE session's bridge is
+  // reported down — the login button must not read "Waiting for browser…"
+  // when nothing can answer it. Only the active session's status matters: a
+  // background session going down must not cancel the visible flow.
+  if (running === false) {
+    const sid = useStore.getState().activeSessionId
+    if (sid && sessionIds.includes(sid)) {
+      clearAuthPendingTimer()
+      if (useStore.getState().authPending) useStore.setState({ authPending: null })
+    }
+  }
 })
 
 // Live branch-change push: the main-process .git watcher fires this the moment
