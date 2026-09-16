@@ -206,6 +206,8 @@ class CluxMateApp(App):
     # ── actions ──────────────────────────────────────────────────────────
 
     def action_new_session(self):
+        if self._defer_to_pending_question():
+            return
         self._prompt_new_session()
 
     def action_delete_session(self):
@@ -282,6 +284,20 @@ class CluxMateApp(App):
 
     # ── helpers ──────────────────────────────────────────────────────────
 
+    def _defer_to_pending_question(self) -> bool:
+        """True while an inline question owns the next input submission.
+
+        Creating or loading a session here would replace the session and clear
+        the chat the question lives in: the question would vanish while its
+        future stayed armed and silently swallowed the user's answer.
+        """
+        if self._question_future is None:
+            return False
+        self.query_one(ChatView).add_info(
+            "[yellow]Answer the pending question first.[/]"
+        )
+        return True
+
     def _update_mode_button(self):
         self.query_one("#btn-cycle-mode", Button).label = (
             PERMISSION_LABELS[self._permission_mode]
@@ -340,7 +356,8 @@ class CluxMateApp(App):
             return
         # ── chat buttons ──
         if bid == "btn-new-session":
-            self._prompt_new_session()
+            if not self._defer_to_pending_question():
+                self._prompt_new_session()
         elif bid == "btn-delete-session":
             self.action_delete_session()
         elif bid == "btn-open-settings":
@@ -433,6 +450,15 @@ class CluxMateApp(App):
                 return answer
         return None
 
+    @staticmethod
+    def _withheld_notice(decision) -> str:
+        """One line naming what a not-trusted directory keeps unloaded."""
+        kinds = ", ".join(f.kind for f in decision.findings)
+        return (
+            "[yellow]Project config not loaded[/] (directory not trusted): "
+            f"{kinds} — run `cluxmate trust add` and restart to load it."
+        )
+
     async def _ensure_trust(self) -> str:
         """Ask once per untrusted directory, BEFORE a session is created — the
         session build is what loads project hooks/MCP, so the answer has to come
@@ -444,13 +470,7 @@ class CluxMateApp(App):
         """
         decision = self.ctrl.trust_for(self._cwd)
         if not decision.pending:
-            if decision.gated:
-                kinds = ", ".join(f.kind for f in decision.findings)
-                return (
-                    "[yellow]Project config not loaded[/] (directory not trusted): "
-                    f"{kinds} — run `cluxmate trust add` and restart to load it."
-                )
-            return ""
+            return self._withheld_notice(decision) if decision.gated else ""
         chat = self.query_one(ChatView)
         chat.add_info(f"[yellow]Project trust[/]  {decision.cwd} ships project config:")
         for f in decision.findings:
@@ -474,7 +494,11 @@ class CluxMateApp(App):
         if session_only:
             self.ctrl.set_session_trust(self._cwd, status)
         else:
-            self.ctrl._trust_store.set(self._cwd, status)
+            self.ctrl.set_trust(self._cwd, status)
+        if status == DENIED:
+            # The run the user declined in has to carry the escape hatch too —
+            # deferring it to the next launch leaves them without a way forward.
+            return self._withheld_notice(self.ctrl.trust_for(self._cwd))
         return ""
 
     async def _switch_cwd_async(self, path: str) -> None:
@@ -513,6 +537,8 @@ class CluxMateApp(App):
             chat.add_info("[red]No API key — Ctrl+S Settings[/]")
 
     def _load_session(self, session_id: str):
+        if self._defer_to_pending_question():
+            return
         data = self.ctrl.switch_session(
             session_id, self._permission_mode, self._cwd,
         )

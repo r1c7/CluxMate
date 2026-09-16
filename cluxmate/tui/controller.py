@@ -213,6 +213,10 @@ class TuiController:
         """The trust decision for ``cwd`` (registry + this run's overrides)."""
         return resolve_trust(cwd, self._trust_store)
 
+    def set_trust(self, cwd: str, status: str) -> None:
+        """Record a remembered answer — written to ~/.cluxmate/trust.json."""
+        self._trust_store.set(cwd, status)
+
     def set_session_trust(self, cwd: str, status: str) -> None:
         """"This run only" — never written to ~/.cluxmate/trust.json."""
         self._trust_store.set_session(cwd, status)
