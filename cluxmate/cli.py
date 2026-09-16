@@ -166,6 +166,10 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
     builder.with_context_1m(entry.get("context_1m", False))
     decision = _trust_decision(cwd)
     _prompt_trust(cwd, decision)
+    # The answer just landed in the store, but `decision` is a frozen snapshot
+    # taken before the prompt — re-resolve so the run that grants trust is the
+    # run that gets it (and so the banner below reports what was actually used).
+    decision = _trust_decision(cwd)
     builder.with_trust(decision)
 
     log = _make_log(entry)
