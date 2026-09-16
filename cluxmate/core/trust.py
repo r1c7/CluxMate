@@ -121,10 +121,38 @@ class TrustStore:
             Path(path) if path is not None
             else Path.home() / ".cluxmate" / "trust.json"
         )
-        self._folders = self._load()
+        self._folders: dict[str, str] = {}
+        self._stamp: tuple[int, int] | None = None
+        self._loaded = False
+        self._refresh()
         self._session: dict[str, str] = {}
 
     # ── registry ──────────────────────────────────────────────
+
+    def _file_stamp(self) -> tuple[int, int] | None:
+        try:
+            st = self._path.stat()
+        except OSError:  # no registry yet (or an unreadable one) — nothing to compare
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _refresh(self) -> None:
+        """Re-read the registry when the file changed under us.
+
+        The store is process-global (RPC server, TUI, CLI) while the file is
+        written by any CluxMate process: `cluxmate trust deny <dir>` in a second
+        terminal must reach the session that is already running in that
+        directory, and `trust/get` must stop reporting the superseded answer.
+        Same mtime/size cache as RetrievalConfig, so an unchanged file is not
+        re-parsed on every lookup. A write this process just made refreshes the
+        stamp in `_save`, so its own answer is never reloaded away.
+        """
+        stamp = self._file_stamp()
+        if self._stamp == stamp and self._loaded:
+            return
+        self._folders = self._load()
+        self._stamp = stamp
+        self._loaded = True
 
     def _load(self) -> dict[str, str]:
         try:
@@ -147,6 +175,7 @@ class TrustStore:
         three front-ends, so an exact-string lookup would ask a directory the user
         already answered for.
         """
+        self._refresh()
         want = os.path.normcase(canonical(cwd))
         for key in self._folders:
             if os.path.normcase(key) == want:
@@ -158,6 +187,7 @@ class TrustStore:
         return self._folders[key] if key is not None else UNKNOWN
 
     def entries(self) -> dict[str, str]:
+        self._refresh()
         return dict(self._folders)
 
     def set(self, cwd: str, status: str) -> None:
@@ -190,6 +220,11 @@ class TrustStore:
             )
         except OSError:
             traceback.print_exc(file=sys.stderr)
+            return
+        # Our own write is the file now: re-stamp so the next lookup does not
+        # re-parse it (and so a failed write leaves the in-memory answer alone).
+        self._stamp = self._file_stamp()
+        self._loaded = True
 
     # ── per-run overrides ─────────────────────────────────────
 

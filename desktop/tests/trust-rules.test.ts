@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isUntrusted, shouldPromptTrust, trustSummary, trustChangeRestartsBridge, planTrustCall } from '../src/shared/trust-rules.ts'
+import { isUntrusted, shouldPromptTrust, trustSummary, trustChangeRestartsBridge, bridgesToRestart, planTrustCall } from '../src/shared/trust-rules.ts'
 
 const snapshot = (status: string, findings: { kind: string; label: string; path: string }[] = []) => ({
   cwd: 'E:\\proj', status, source: 'registry', findings, store: {},
@@ -86,6 +86,42 @@ test('nothing loaded means nothing to tear down', () => {
   assert.equal(restarts('trusted', 'denied', 'E:\\proj', null), false)
   assert.equal(restarts(null, 'denied'), false)
   assert.equal(restarts('trusted', null), false)
+})
+
+// ── which live bridges a write tears down, across sessions ─────────────────
+// The Settings list can revoke any recorded row while another session is the
+// active one, so the decision is about the DIRECTORY, not about the caller.
+const liveBridges = (...bridges: [string, string | null][]) =>
+  bridges.map(([sessionId, cwd]) => ({ sessionId, cwd }))
+
+test('a revoke kills every live bridge running in that directory', () => {
+  // Session B revoked X while session A is the one running in X: A's process is
+  // the one executing X's hooks / MCP clients / skills.
+  assert.deepEqual(
+    bridgesToRestart('trusted', 'denied', 'E:\\proj', liveBridges(['a', 'E:\\proj'], ['b', 'E:\\other']), sameDir),
+    ['a'],
+  )
+  // Two sessions in the same directory both go; a variant spelling still counts.
+  assert.deepEqual(
+    bridgesToRestart('trusted', 'denied', 'E:\\proj', liveBridges(['a', 'E:\\proj'], ['c', 'E:\\PROJ\\'], ['d', 'E:\\elsewhere']), sameDir),
+    ['a', 'c'],
+  )
+})
+
+test('a foreign-cwd edit kills nothing', () => {
+  assert.deepEqual(
+    bridgesToRestart('trusted', 'denied', 'E:\\other', liveBridges(['a', 'E:\\proj'], ['b', 'E:\\third']), sameDir),
+    [],
+  )
+})
+
+test('an unchanged answer, an unknown bridge dir or no update all kill nothing', () => {
+  for (const status of ['trusted', 'denied', 'unknown']) {
+    assert.deepEqual(bridgesToRestart(status, status, 'E:\\proj', liveBridges(['a', 'E:\\proj']), sameDir), [])
+  }
+  assert.deepEqual(bridgesToRestart('trusted', 'denied', 'E:\\proj', [], sameDir), [])
+  assert.deepEqual(bridgesToRestart('trusted', 'denied', 'E:\\proj', liveBridges(['a', null]), sameDir), [])
+  assert.deepEqual(bridgesToRestart(null, 'denied', 'E:\\proj', liveBridges(['a', 'E:\\proj']), sameDir), [])
 })
 
 // ── the trust-call plan: which directory the session's bridge serves ────────

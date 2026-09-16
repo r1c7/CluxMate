@@ -65,6 +65,35 @@ export function trustChangeRestartsBridge(
   return statusBefore !== statusAfter
 }
 
+/** A live bridge, described by the directory it was spawned for. */
+export interface LiveBridge {
+  sessionId: string
+  cwd: string | null | undefined
+}
+
+/**
+ * Every live bridge whose answer changed — the whole set, not the one that
+ * served the call.
+ *
+ * Settings can revoke a row for ANY recorded directory, and the call is
+ * answered by whichever session is active: a revoke of directory X issued from
+ * session B must still tear down session A's process, which is the one holding
+ * X's hooks / MCP clients / skills / always-allow rules. So the per-bridge rule
+ * above is applied to every live bridge, and the ones running in the target
+ * directory are returned.
+ */
+export function bridgesToRestart(
+  statusBefore: string | null | undefined,
+  statusAfter: string | null | undefined,
+  targetCwd: string,
+  liveBridges: readonly LiveBridge[],
+  sameDir: (a: string, b: string) => boolean,
+): string[] {
+  return liveBridges
+    .filter((b) => trustChangeRestartsBridge(statusBefore, statusAfter, targetCwd, b.cwd, sameDir))
+    .map((b) => b.sessionId)
+}
+
 /**
  * What a project-trust call owes the SESSION's bridge.
  *

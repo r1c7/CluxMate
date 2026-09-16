@@ -5,7 +5,7 @@ import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
 import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
-import { planTrustCall, trustChangeRestartsBridge } from '../shared/trust-rules'
+import { bridgesToRestart, planTrustCall } from '../shared/trust-rules'
 import { canonicalCwdKey } from './cwd-key'
 import { AgentBridge } from './agent-bridge'
 import { setAttention } from './attention'
@@ -29,17 +29,21 @@ let activeSessionId: string | null = null
 // consumer.
 const sessionTrust = new Map<string, 'trusted' | 'denied'>()
 
-// Kill the session's bridge when a trust write changed the answer for the
-// directory it is running in, so the next interaction re-initializes without the
-// config the user just revoked (see trustChangeRestartsBridge). Both snapshots
-// come from the live process itself, so the comparison is against the answer it
-// actually resolved, not the one the renderer asked for.
-function restartBridgeOnTrustChange(sid: string, cwd: string, before: TrustSnapshot | null, after: TrustSnapshot | null) {
-  const live = bridges.get(sid)
-  if (!live) return
-  if (!trustChangeRestartsBridge(before?.status, after?.status, cwd, live._spawnCwd, sameCwd)) return
-  bridges.delete(sid)
-  live.kill().catch(() => { /* already gone */ })
+// Kill EVERY bridge running in a directory whose answer changed, so the next
+// interaction re-initializes without the config the user just revoked (see
+// bridgesToRestart). Not just the session that served the call: the Settings
+// list can revoke any recorded row, and the session running in that directory
+// is the one executing its hooks / MCP servers / skills. Both snapshots come
+// from the live process that answered, so the comparison is against the answer
+// it actually resolved, not the one the renderer asked for.
+function restartBridgesOnTrustChange(cwd: string, before: TrustSnapshot | null, after: TrustSnapshot | null) {
+  const live = [...bridges].map(([sessionId, b]) => ({ sessionId, cwd: b._spawnCwd }))
+  for (const sid of bridgesToRestart(before?.status, after?.status, cwd, live, sameCwd)) {
+    const b = bridges.get(sid)
+    if (!b) continue
+    bridges.delete(sid)
+    b.kill().catch(() => { /* already gone */ })
+  }
 }
 
 // Full session teardown shared by SESSION_DELETE and GROUP_DELETE: DB row +
@@ -851,7 +855,7 @@ export function registerIpcHandlers() {
     // remove() forgets the registry entry only — a session-only answer to the
     // same directory stands (it lives in the Python process and in sessionTrust),
     // so there is nothing to clean up here; the restart decision sees both.
-    restartBridgeOnTrustChange(sid, cwd, before, result)
+    restartBridgesOnTrustChange(cwd, before, result)
     return result
   })
 
@@ -883,10 +887,10 @@ export function registerIpcHandlers() {
     // skills, subagents, always-allow rules) — and so does denying it: an agent
     // that already loaded that config keeps running it until its process dies,
     // because Python only recomputes the decision in `initialize` and `trust/set`
-    // just rewrites the registry. The same class as the grants / forbid-read
-    // toggles, so the bridge is killed and the next interaction re-initializes
-    // with the new decision instead of trying to hot-swap it.
-    restartBridgeOnTrustChange(sid, cwd, before, result as TrustSnapshot)
+    // just rewrites the registry. Whatever the caller asked, every session
+    // running in the target directory is killed and its next interaction
+    // re-initializes with the new decision instead of hot-swapping it.
+    restartBridgesOnTrustChange(cwd, before, result as TrustSnapshot)
     return result
   })
 

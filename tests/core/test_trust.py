@@ -210,3 +210,66 @@ def test_a_failed_write_is_logged_and_swallowed(tmp_path, capsys):
     assert store.status(str(target)) == TRUSTED  # the in-memory answer survives
     assert "Traceback" in capsys.readouterr().err
     assert TrustStore(path).entries() == {}
+
+
+# ── another process writing the registry ─────────────────────────────────
+# The store is process-global (RPC server, TUI, CLI) but the file is shared, so
+# a `cluxmate trust deny <dir>` run in a second terminal has to reach a store
+# that is already constructed.
+
+
+def _rewrite_registry(path: Path, folders: dict[str, str], mtime_ns: int) -> None:
+    """Write the registry the way a second process would.
+
+    The mtime is set explicitly so the test never depends on how coarse the
+    filesystem clock is between two writes in the same tick.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "folders": folders}), encoding="utf-8")
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def test_an_out_of_band_write_is_observed_without_a_new_store(tmp_path):
+    path = tmp_path / "home" / ".cluxmate" / "trust.json"
+    store = TrustStore(path)
+    target = tmp_path / "proj"
+    target.mkdir()
+    key = canonical(str(target))
+    assert store.status(str(target)) == UNKNOWN
+
+    _rewrite_registry(path, {key: DENIED}, 1_500_000_000_000_000_000)
+    assert store.registry_status(str(target)) == DENIED
+    assert resolve_trust(str(target), store).status == DENIED
+    assert store.entries() == {key: DENIED}
+
+    # The reverse direction matters as much: a revocation elsewhere must drop
+    # the answer this process is still holding, not just add new ones.
+    _rewrite_registry(path, {}, 1_500_000_000_000_000_001)
+    assert store.status(str(target)) == UNKNOWN
+    assert store.entries() == {}
+
+
+def test_an_out_of_band_write_leaves_a_session_override_on_top(tmp_path):
+    path = tmp_path / "home" / ".cluxmate" / "trust.json"
+    store = TrustStore(path)
+    target = tmp_path / "proj"
+    target.mkdir()
+    store.set_session(str(target), TRUSTED)
+
+    _rewrite_registry(
+        path, {canonical(str(target)): DENIED}, 1_500_000_000_000_000_000
+    )
+    assert store.status(str(target)) == TRUSTED
+    assert resolve_trust(str(target), store).source == "session"
+
+
+def test_a_reread_keeps_the_answer_this_process_wrote(tmp_path):
+    """Our own `set` must not be re-read away by the next lookup."""
+    path = tmp_path / "home" / ".cluxmate" / "trust.json"
+    store = TrustStore(path)
+    target = tmp_path / "proj"
+    target.mkdir()
+    store.set(str(target), TRUSTED)
+    assert store.registry_status(str(target)) == TRUSTED
+    store.remove(str(target))
+    assert store.registry_status(str(target)) == UNKNOWN
