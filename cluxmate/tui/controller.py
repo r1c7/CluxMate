@@ -11,6 +11,7 @@ from cluxmate.core.permissions import PermissionPolicy
 from cluxmate.core.session_log import SessionLog, fold_todos
 from cluxmate.core.session_log_store import IncrementalPersister
 from cluxmate.core.session_store import SessionStore
+from cluxmate.core.trust import TrustStore, resolve_trust
 from cluxmate.core.providers.base import LLMProvider
 
 
@@ -33,19 +34,22 @@ class TuiController:
         # Reset to provider default on a model switch; kept across same-model
         # rebuilds (MCP ready / mode change).
         self._reasoning_effort: str | None = None
-        # Build key — (cwd, model_name, mode, model_id). Rebuilding the agent
-        # is expensive (MCPManager.load spawns subprocesses, system prompt
+        # Build key — (cwd, model_name, mode, model_id, trusted). Rebuilding the
+        # agent is expensive (MCPManager.load spawns subprocesses, system prompt
         # render reads skills/memory), so skip it when nothing changed.
         self._build_key: tuple | None = None
-        # One MCPManager per working directory, shared across builders/agents.
-        # A fresh manager per build would re-spawn MCP subprocesses on every
-        # session switch. Managers are loaded lazily on first use per cwd.
-        self._mcp_cache: dict[str, "MCPManager"] = {}
+        # One MCPManager per (working directory, trust) — shared across
+        # builders/agents. A fresh manager per build would re-spawn MCP
+        # subprocesses on every session switch. Managers are loaded lazily on
+        # first use. The trust component keeps a manager built while the
+        # directory was untrusted (project MCP config skipped) from being
+        # reused after the user grants trust.
+        self._mcp_cache: dict[tuple[str, bool], "MCPManager"] = {}
         # Background load threads per cwd — MCPManager.load() spawns subprocesses
         # (e.g. npx) + runs the tools/list handshake, which can take seconds.
         # Loading off the UI thread keeps session switching responsive; the
         # agent is rebuilt once the load completes (see _maybe_rebuild_after_mcp).
-        self._mcp_threads: dict[str, threading.Thread | None] = {}
+        self._mcp_threads: dict[tuple[str, bool], threading.Thread | None] = {}
         # Approval policy for the current working directory. Created when the
         # agent is built; mode is synced by set_mode. Without it, mode changes
         # (acceptEdits/yolo/default) would have no effect on tool approval.
@@ -59,6 +63,9 @@ class TuiController:
         # first prompt) — one per session, mirroring the desktop's per-session
         # lifecycle without a hook storm on every model/mode rebuild.
         self._session_start_fired_for: str | None = None
+        # Project trust (core/trust.py): one store for the whole TUI run — the
+        # app asks before creating a session, we only read the answer here.
+        self._trust_store = TrustStore()
 
     @property
     def active_session_id(self) -> str | None:
@@ -154,10 +161,12 @@ class TuiController:
             self._builder.with_mode(mode)
             self._agent = self._builder.build(session_log=self._session_log)
             # Keep the build key in sync so a later _build_agent with the same
-            # (cwd, model, mode) doesn't rebuild what set_mode just rebuilt.
+            # (cwd, model, mode, trusted) doesn't rebuild what set_mode just
+            # rebuilt.
             if self._build_key is not None:
                 self._build_key = (
-                    self._build_key[0], self._build_key[1], mode, self._build_key[3],
+                    self._build_key[0], self._build_key[1], mode,
+                    self._build_key[3], self._build_key[4],
                 )
 
     def set_model(self, model_id: str):
@@ -198,6 +207,16 @@ class TuiController:
     def current_reasoning_effort(self) -> str | None:
         return self._reasoning_effort
 
+    # ── project trust ──────────────────────────────────────
+
+    def trust_for(self, cwd: str):
+        """The trust decision for ``cwd`` (registry + this run's overrides)."""
+        return resolve_trust(cwd, self._trust_store)
+
+    def set_session_trust(self, cwd: str, status: str) -> None:
+        """"This run only" — never written to ~/.cluxmate/trust.json."""
+        self._trust_store.set_session(cwd, status)
+
     # ── agent lifecycle ────────────────────────────────────
 
     def _build_agent(self, model_id: str, cwd: str, mode: str = "default") -> bool:
@@ -217,7 +236,10 @@ class TuiController:
         # default; a same-model rebuild (MCP ready, mode change) keeps it.
         if resolved_id != self._model_id:
             self._reasoning_effort = default_for(entry)
-        key = (cwd, entry.get("model_name"), mode, model_id)
+        # Project trust gate (core/trust.py): the decision was made before the
+        # session existed; everything project-level read below obeys it.
+        decision = self.trust_for(cwd)
+        key = (cwd, entry.get("model_name"), mode, model_id, decision.trusted)
         if (
             self._build_key == key
             and self._agent is not None
@@ -231,11 +253,12 @@ class TuiController:
         # Policy is scoped to the working directory (always_allow lives in
         # <cwd>/.cluxmate/permissions.json); a cwd change gets a fresh one.
         # Mode is in-memory only, so re-apply the current mode.
-        self._policy = PermissionPolicy(cwd)
+        self._policy = PermissionPolicy(cwd, trusted=decision.trusted)
         self._policy.set_mode(mode)
         llm_provider = _create_provider(entry)
         llm_provider.set_reasoning_effort(self._reasoning_effort)
         builder = AgentBuilder(cwd, llm_provider)
+        builder.with_trust(decision)
         builder.with_default_tools()
         builder.with_subagents()
         builder.with_mode(mode)
@@ -244,7 +267,7 @@ class TuiController:
         builder.with_context_1m(entry.get("context_1m", False))
         # Share one MCP manager per cwd across builders — load() spawns
         # subprocesses + handshake, so only pay it once per directory.
-        builder.with_mcp(self._ensure_mcp(cwd))
+        builder.with_mcp(self._ensure_mcp(cwd, decision.trusted))
         # Subagent logs are persisted through the same JSONL store as the parent.
         builder.with_log_store(self.sessions.log_store)
         self._agent = builder.build(session_log=self._session_log)
@@ -252,21 +275,22 @@ class TuiController:
         self._model_id = resolved_id
         return True
 
-    def _ensure_mcp(self, cwd: str) -> MCPManager:
+    def _ensure_mcp(self, cwd: str, trusted: bool = True) -> MCPManager:
         """Get the shared MCP manager for a cwd, loading it in the background.
 
         The first build for a directory triggers an async load — building the
         agent proceeds immediately with MCP tools absent, and the agent is
         rebuilt with them once the load thread finishes.
         """
-        mcp = self._mcp_cache.get(cwd)
+        key = (cwd, trusted)
+        mcp = self._mcp_cache.get(key)
         if mcp is None:
-            mcp = MCPManager(cwd)
-            self._mcp_cache[cwd] = mcp
+            mcp = MCPManager(cwd, trusted=trusted)
+            self._mcp_cache[key] = mcp
             t = threading.Thread(
                 target=mcp.load, daemon=True, name=f"mcp-load-{cwd[:16]}",
             )
-            self._mcp_threads[cwd] = t
+            self._mcp_threads[key] = t
             t.start()
         return mcp
 
@@ -279,13 +303,14 @@ class TuiController:
         """
         if self._builder is None or self._build_key is None:
             return
-        cwd = self._build_key[0]
-        t = self._mcp_threads.get(cwd)
+        cwd, _, _, _, trusted = self._build_key
+        key = (cwd, trusted)
+        t = self._mcp_threads.get(key)
         if t is None:
             return
         if t.is_alive():
             return
-        self._mcp_threads[cwd] = None
+        self._mcp_threads[key] = None
         # Load finished (success or fail-soft) — rebuild so MCP tools join the
         # toolset. build() is cheap here: MCPManager.load() is idempotent and
         # has already run; only list_tools() is called.

@@ -22,6 +22,7 @@ from .widgets.todo_strip import TodoStrip
 from .widgets.input_box import InputBox
 from .widgets.session_list import SessionList
 from cluxmate.core.reasoning import options_for
+from cluxmate.core.trust import DENIED, TRUSTED
 
 # ── constants ──────────────────────────────────────────────────────────────
 
@@ -182,7 +183,12 @@ class CluxMateApp(App):
             for m in self.ctrl.config.list_models()
         )
         if has_key:
-            self._prompt_new_session()
+            # The gate blocks on the user's answer. Textual dispatches Mount
+            # inline, before its message loop starts, so awaiting it right here
+            # would freeze the app before the input could ever be submitted —
+            # the worker runs it with the loop live. The session (and with it
+            # the agent, MCP and SessionStart) still waits for the answer.
+            self.run_worker(self._gate_then_new_session(), exclusive=True)
         else:
             self._first_setup = True
             self.query_one(ChatView).add_info(
@@ -384,18 +390,105 @@ class CluxMateApp(App):
             # the input so it doesn't linger after the cwd switch.
             self.query_one(InputBox).clear_input()
             if os.path.isabs(text) and os.path.isdir(text):
-                self._cwd = text
-                self.query_one(ChatView).add_info(
-                    f"Working dir: [bold]{self._cwd}[/]"
-                )
-                self._update_status()
-                self._prompt_new_session()
+                # The store may hold a decision for the NEW directory, so the
+                # gate has to re-run before the new session's agent is built.
+                self.run_worker(self._switch_cwd_async(text), exclusive=True)
             else:
                 self.query_one(ChatView).add_info(
                     f"[red]Not a valid directory: {text}[/]"
                 )
             return
         self._send_message(text)
+
+    # ── project trust ─────────────────────────────────────────────────────
+
+    TRUST_OPTIONS = [
+        {"id": "trust-remember", "label": "Trust and remember",
+         "description": "writes ~/.cluxmate/trust.json"},
+        {"id": "trust-session", "label": "Trust this run only",
+         "description": "nothing written to disk"},
+        {"id": "trust-deny", "label": "Do not trust",
+         "description": "project config stays unloaded (remembered)"},
+    ]
+
+    # Option label → (status, session_only). Pure mapping so the answer handling
+    # is testable without a running Textual app. Keys must stay in sync with
+    # TRUST_OPTIONS' labels (pinned by tests/core/test_tui_trust.py).
+    TRUST_ANSWERS: dict[str, tuple[str, bool]] = {
+        "Trust and remember": (TRUSTED, False),
+        "Trust this run only": (TRUSTED, True),
+        "Do not trust": (DENIED, False),
+    }
+
+    @staticmethod
+    def _trust_answer_for(selected: list[str]) -> tuple[str, bool] | None:
+        """Map the picked option labels to ``(status, session_only)``.
+
+        ``None`` means "no answer" — the directory stays untrusted and the
+        session still starts.
+        """
+        for label in selected:
+            answer = CluxMateApp.TRUST_ANSWERS.get(label)
+            if answer is not None:
+                return answer
+        return None
+
+    async def _ensure_trust(self) -> str:
+        """Ask once per untrusted directory, BEFORE a session is created — the
+        session build is what loads project hooks/MCP, so the answer has to come
+        first. Mirrors the inline question idiom (no Screen overlays).
+
+        Returns the one-line "config withheld" notice ("" when there is none):
+        the caller prints it after the session prompt, whose ChatView.clear()
+        would otherwise wipe it before the user could read it.
+        """
+        decision = self.ctrl.trust_for(self._cwd)
+        if not decision.pending:
+            if decision.gated:
+                kinds = ", ".join(f.kind for f in decision.findings)
+                return (
+                    "[yellow]Project config not loaded[/] (directory not trusted): "
+                    f"{kinds} — run `cluxmate trust add` and restart to load it."
+                )
+            return ""
+        chat = self.query_one(ChatView)
+        chat.add_info(f"[yellow]Project trust[/]  {decision.cwd} ships project config:")
+        for f in decision.findings:
+            chat.add_info(f"  • {f.label}  [dim]({f.path})[/]")
+        chat.add_info(
+            "Loading it lets this repository run hooks / MCP servers and "
+            "pre-authorize tool calls."
+        )
+        answer = await self._ask_one_question({
+            "id": "project-trust",
+            "header": "Project trust",
+            "question": f"Trust {decision.cwd}?",
+            "options": self.TRUST_OPTIONS,
+        })
+        selected = answer.get("selected") or []
+        mapped = self._trust_answer_for(selected)
+        if mapped is None:
+            chat.add_info("[dim]No answer — project config stays unloaded.[/]")
+            return ""
+        status, session_only = mapped
+        if session_only:
+            self.ctrl.set_session_trust(self._cwd, status)
+        else:
+            self.ctrl._trust_store.set(self._cwd, status)
+        return ""
+
+    async def _switch_cwd_async(self, path: str) -> None:
+        self._cwd = path
+        self.query_one(ChatView).add_info(f"Working dir: [bold]{self._cwd}[/]")
+        self._update_status()
+        await self._gate_then_new_session()
+
+    async def _gate_then_new_session(self) -> None:
+        """Resolve trust, then create the session that consumes the decision."""
+        notice = await self._ensure_trust()
+        self._prompt_new_session()
+        if notice:
+            self.query_one(ChatView).add_info(notice)
 
     # ── sessions ─────────────────────────────────────────────────────────
 
@@ -519,7 +612,10 @@ class CluxMateApp(App):
         self.query_one("#settings-panel", VerticalScroll).display = False
         if self._first_setup:
             self._first_setup = False
-            self._prompt_new_session()
+            # Startup had no API key, so on_mount never reached the gate — the
+            # first session must not be built before the directory is asked
+            # about either.
+            self.run_worker(self._gate_then_new_session(), exclusive=True)
         self.query_one("#prompt-input").focus()
 
     @staticmethod
