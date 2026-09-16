@@ -134,3 +134,56 @@ def test_symlinked_path_resolves_to_the_same_key(tmp_path):
     store = _store(tmp_path)
     store.set(str(real), TRUSTED)
     assert store.status(str(link)) == TRUSTED
+
+
+def test_forward_slash_form_is_the_same_directory(tmp_path):
+    store = _store(tmp_path)
+    target = tmp_path / "proj"
+    target.mkdir()
+    store.set(str(target).replace(os.sep, "/"), TRUSTED)
+    assert store.status(str(target)) == TRUSTED
+    assert list(store.entries()) == [canonical(str(target))]
+
+
+def test_set_reuses_a_case_variant_key(tmp_path):
+    """A key already recorded in another casing is updated, not duplicated."""
+    if os.name != "nt":
+        pytest.skip("registry keys are only matched case-insensitively on Windows")
+    target = tmp_path / "proj"
+    target.mkdir()
+    variant = canonical(str(target)).upper()
+    assert variant != canonical(str(target))  # else the test would prove nothing
+    path = tmp_path / "trust.json"
+    path.write_text(
+        json.dumps({"version": 1, "folders": {variant: DENIED}}), encoding="utf-8"
+    )
+    store = TrustStore(path)
+    store.set(str(target), TRUSTED)
+    assert store.entries() == {variant: TRUSTED}
+    assert store.status(str(target)) == TRUSTED
+
+
+def test_canonical_survives_a_symlink_loop(tmp_path):
+    """`resolve()` raises RuntimeError on a loop — the probe must still answer."""
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform")
+    assert canonical(str(loop)) == str(loop.absolute())
+    store = _store(tmp_path)
+    assert store.status(str(loop)) == UNKNOWN
+    assert resolve_trust(str(loop), store).status == UNKNOWN
+
+
+def test_a_failed_write_is_logged_and_swallowed(tmp_path, capsys):
+    """A home the registry cannot be written to must not break the caller."""
+    path = tmp_path / "trust.json"
+    path.mkdir()  # a directory squatting on the registry path fails every write
+    target = tmp_path / "proj"
+    target.mkdir()
+    store = TrustStore(path)
+    store.set(str(target), TRUSTED)  # must not raise
+    assert store.status(str(target)) == TRUSTED  # the in-memory answer survives
+    assert "Traceback" in capsys.readouterr().err
+    assert TrustStore(path).entries() == {}

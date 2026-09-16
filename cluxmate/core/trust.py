@@ -70,8 +70,13 @@ def canonical(cwd: str) -> str:
     """
     try:
         return str(Path(cwd).resolve())
-    except OSError:  # deleted / unreadable path — fall back to the absolute form
-        return str(Path(cwd).absolute())
+    except (OSError, RuntimeError):
+        # Deleted, unreadable or symlink-looped path: degrade to the absolute form
+        # instead of raising (this runs on the front-ends' startup probe).
+        try:
+            return str(Path(cwd).absolute())
+        except OSError:  # no cwd to be absolute against — the raw path is all we have
+            return str(cwd)
 
 
 def project_findings(cwd: str) -> list[Finding]:
@@ -84,12 +89,20 @@ def project_findings(cwd: str) -> list[Finding]:
     base = Path(cwd) / _STATE_DIR
     found: dict[str, Finding] = {}
     for kind, label, name in _FINDING_FILES:
-        if (base / name).is_file():
+        try:  # an unreadable .cluxmate is "nothing found", not an error
+            present = (base / name).is_file()
+        except OSError:
+            present = False
+        if present:
             found[kind] = Finding(kind, label, f"{_STATE_DIR}{os.sep}{name}")
     for kind, label, pattern in _FINDING_GLOBS:
         if kind in found:
             continue
-        if next(iter(sorted(base.glob(pattern))), None) is not None:
+        try:
+            present = next(iter(sorted(base.glob(pattern))), None) is not None
+        except OSError:
+            present = False
+        if present:
             found[kind] = Finding(kind, label, f"{_STATE_DIR}{os.sep}{pattern}")
     return list(found.values())
 
@@ -142,7 +155,7 @@ class TrustStore:
 
     def registry_status(self, cwd: str) -> str:
         key = self._key(cwd)
-        return self._folders[key] if key else UNKNOWN
+        return self._folders[key] if key is not None else UNKNOWN
 
     def entries(self) -> dict[str, str]:
         return dict(self._folders)
@@ -150,7 +163,10 @@ class TrustStore:
     def set(self, cwd: str, status: str) -> None:
         if status not in _STATUSES:
             raise ValueError(f"invalid trust status: {status!r}")
-        self._folders[canonical(cwd)] = status
+        # Reuse an existing case/separator variant key, otherwise the same
+        # directory ends up recorded twice (we would then read the stale one).
+        key = self._key(cwd)
+        self._folders[key if key is not None else canonical(cwd)] = status
         self._save()
 
     def remove(self, cwd: str) -> bool:

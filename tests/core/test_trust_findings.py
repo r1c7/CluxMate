@@ -77,6 +77,30 @@ def test_paths_are_relative_to_the_working_directory(tmp_path):
     assert finding.as_dict() == {"kind": "mcp", "label": "MCP servers (mcp.json)", "path": rel}
 
 
+def test_an_unreadable_file_probe_is_not_a_finding(tmp_path, monkeypatch):
+    """`Path.is_file()` re-raises EACCES (it is not one of pathlib's ignored errnos)."""
+    state = _state(tmp_path)
+    (state / "mcp.json").write_text("{}", encoding="utf-8")
+
+    def denied(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    assert project_findings(str(tmp_path)) == []
+
+
+def test_an_unreadable_glob_probe_is_not_a_finding(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    (state / "agents").mkdir()
+    (state / "agents" / "reviewer.md").write_text("---\ndescription: x\n---\n", encoding="utf-8")
+
+    def denied(self, pattern, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "glob", denied)
+    assert project_findings(str(tmp_path)) == []
+
+
 def test_decision_reports_gated_only_with_findings(tmp_path):
     from cluxmate.core.trust import TrustStore, resolve_trust
 
