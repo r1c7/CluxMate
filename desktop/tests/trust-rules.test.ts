@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isUntrusted, shouldPromptTrust, trustSummary, trustChangeRestartsBridge } from '../src/shared/trust-rules.ts'
+import { isUntrusted, shouldPromptTrust, trustSummary, trustChangeRestartsBridge, planTrustCall } from '../src/shared/trust-rules.ts'
 
 const snapshot = (status: string, findings: { kind: string; label: string; path: string }[] = []) => ({
   cwd: 'E:\\proj', status, source: 'registry', findings, store: {},
@@ -86,4 +86,52 @@ test('nothing loaded means nothing to tear down', () => {
   assert.equal(restarts('trusted', 'denied', 'E:\\proj', null), false)
   assert.equal(restarts(null, 'denied'), false)
   assert.equal(restarts('trusted', null), false)
+})
+
+// ── the trust-call plan: which directory the session's bridge serves ────────
+// Settings can revoke a row for a directory that is NOT the active session's,
+// and the call is answered by the active session's own bridge. The plan is what
+// keeps the target out of that bridge's spawn directory: warming at the target
+// would make ensureBridge respawn the live process over there.
+test('a foreign trust target never moves the session bridge', () => {
+  for (const target of ['E:\\other', 'E:\\proj\\nested', 'C:\\', '', 'E:/OTHER']) {
+    const plan = planTrustCall(target, 'E:\\proj', sameDir)
+    assert.equal(plan.warmCwd, 'E:\\proj')
+    assert.equal(plan.targetIsSessionDir, false)
+  }
+})
+
+test('a directory this session does not run in never files a session decision', () => {
+  // sessionTrust is only read back for the directory the session spawns at, so
+  // an entry for a foreign target would be a decision with no consumer.
+  assert.equal(planTrustCall('E:\\other', 'E:\\proj', sameDir).targetIsSessionDir, false)
+  // A session with no directory (or no record) files nothing either.
+  assert.equal(planTrustCall('E:\\other', null, sameDir).targetIsSessionDir, false)
+  assert.equal(planTrustCall('E:\\other', '', sameDir).targetIsSessionDir, false)
+  assert.equal(planTrustCall('', '', sameDir).targetIsSessionDir, false)
+})
+
+test('the session directory itself is the one target that may file a decision', () => {
+  for (const target of ['E:\\proj', 'E:\\proj\\', 'e:\\proj', 'E:\\PROJ']) {
+    const plan = planTrustCall(target, 'E:\\proj', sameDir)
+    assert.equal(plan.warmCwd, 'E:\\proj')
+    assert.equal(plan.targetIsSessionDir, true)
+  }
+})
+
+test('revoking a foreign row leaves the live process where it is', () => {
+  // plan.warmCwd is the directory the live bridge runs in, so the restart rule
+  // applied to it is exactly what the handler decides after the write: the row's
+  // answer changed, but not the answer for the directory holding the process.
+  const plan = planTrustCall('E:\\other', 'E:\\proj', sameDir)
+  assert.equal(trustChangeRestartsBridge('trusted', 'unknown', 'E:\\other', plan.warmCwd, sameDir), false)
+  assert.equal(trustChangeRestartsBridge('denied', 'unknown', 'E:\\other', plan.warmCwd, sameDir), false)
+  assert.equal(plan.targetIsSessionDir, false)
+})
+
+test('revoking the session directory still tears the live process down', () => {
+  const plan = planTrustCall('E:\\proj', 'E:\\proj', sameDir)
+  assert.equal(trustChangeRestartsBridge('trusted', 'unknown', 'E:\\proj', plan.warmCwd, sameDir), true)
+  assert.equal(trustChangeRestartsBridge('denied', 'unknown', 'E:\\proj', plan.warmCwd, sameDir), true)
+  assert.equal(plan.targetIsSessionDir, true)
 })

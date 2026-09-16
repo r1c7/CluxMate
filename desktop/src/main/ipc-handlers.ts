@@ -5,7 +5,7 @@ import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
 import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
-import { trustChangeRestartsBridge } from '../shared/trust-rules'
+import { planTrustCall, trustChangeRestartsBridge } from '../shared/trust-rules'
 import { canonicalCwdKey } from './cwd-key'
 import { AgentBridge } from './agent-bridge'
 import { setAttention } from './attention'
@@ -23,7 +23,10 @@ let activeSessionId: string | null = null
 // cwd (canonicalCwdKey): they are re-sent on every spawn because the Python
 // process that held the in-memory override is killed on a bridge restart, and a
 // variant spelling of the directory must not file the decision under a second
-// key that the respawn then misses.
+// key that the respawn then misses. Only decisions about the directory a session
+// actually runs in belong here (TRUST_SET enforces it): a spawn reads this map
+// with its own cwd, so an entry for any other directory is a decision with no
+// consumer.
 const sessionTrust = new Map<string, 'trusted' | 'denied'>()
 
 // Kill the session's bridge when a trust write changed the answer for the
@@ -819,17 +822,27 @@ export function registerIpcHandlers() {
 
   // Project trust: the Python process owns the resolution (registry + the
   // findings probe over the project's config files), so all three go over the
-  // bridge. A cold bridge is warmed first — but the fresh spawn re-runs the
-  // same resolution, so the answer is never staler than the process. `modelId`
-  // is required for that warm-up: ensureBridge with an empty one would spawn a
-  // process with no model to run.
-  ipcMain.handle(IPC.TRUST_GET, async (_, sid: string, cwd: string, modelId: string) => {
-    const b = await ensureBridge(sid, cwd, modelId)
+  // session's bridge. A cold bridge is warmed first — the fresh spawn re-runs
+  // the same resolution, so the answer is never staler than the process — and it
+  // is warmed at the session's own cwd, the way every other handler here does:
+  // `cwd` is the directory the call is ABOUT, which the settings list lets the
+  // user point at any recorded row. planTrustCall says what warming at that
+  // target would cost; the rest of the call is plain JSON-RPC parameters.
+  ipcMain.handle(IPC.TRUST_GET, async (_, sid: string, cwd: string) => {
+    // A missing session record is not "undecided": throw, rather than spawn a
+    // process for a directory the store never had.
+    const meta = sessionStore.getSession(sid)
+    if (!meta) throw new Error(`Session record not found (sid=${sid})`)
+    const plan = planTrustCall(cwd, meta.cwd, sameCwd)
+    const b = await ensureBridge(sid, plan.warmCwd, resolveModelId(meta.model_id))
     return b.call('trust/get', { cwd })
   })
 
-  ipcMain.handle(IPC.TRUST_REMOVE, async (_, sid: string, cwd: string, modelId: string) => {
-    const b = await ensureBridge(sid, cwd, modelId)
+  ipcMain.handle(IPC.TRUST_REMOVE, async (_, sid: string, cwd: string) => {
+    const meta = sessionStore.getSession(sid)
+    if (!meta) throw new Error(`Session record not found (sid=${sid})`)
+    const plan = planTrustCall(cwd, meta.cwd, sameCwd)
+    const b = await ensureBridge(sid, plan.warmCwd, resolveModelId(meta.model_id))
     // The answer the live process is running with, read BEFORE the write: the
     // restart decision below is a comparison between the two, not a guess from
     // what the caller asked for.
@@ -843,10 +856,13 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.TRUST_SET, async (
-    _, sid: string, cwd: string, modelId: string,
+    _, sid: string, cwd: string,
     status: 'trusted' | 'denied', persist: boolean,
   ) => {
-    const b = await ensureBridge(sid, cwd, modelId)
+    const meta = sessionStore.getSession(sid)
+    if (!meta) throw new Error(`Session record not found (sid=${sid})`)
+    const plan = planTrustCall(cwd, meta.cwd, sameCwd)
+    const b = await ensureBridge(sid, plan.warmCwd, resolveModelId(meta.model_id))
     const before = (await b.call('trust/get', { cwd })) as TrustSnapshot
     const result = await b.call('trust/set', { cwd, status, persist })
     // An invalid status comes back as an ordinary RESULT payload carrying
@@ -854,9 +870,15 @@ export function registerIpcHandlers() {
     // it through would read as a recorded decision in the renderer.
     const error = (result as { error?: unknown } | null)?.error
     if (typeof error === 'string') throw new Error(error)
-    const key = canonicalCwdKey(cwd)
-    if (persist) sessionTrust.delete(key)
-    else sessionTrust.set(key, status)
+    // sessionTrust is what this session's next spawn re-sends as
+    // `initialize {trust}`, and ensureBridge reads it back with the session's own
+    // cwd — so a decision about a foreign directory would sit in the map with
+    // nothing able to consume it. The plan drops those instead of filing them.
+    if (plan.targetIsSessionDir) {
+      const key = canonicalCwdKey(plan.warmCwd)
+      if (persist) sessionTrust.delete(key)
+      else sessionTrust.set(key, status)
+    }
     // Trusting a directory changes exactly what initialize loads (hooks, MCP,
     // skills, subagents, always-allow rules) — and so does denying it: an agent
     // that already loaded that config keeps running it until its process dies,

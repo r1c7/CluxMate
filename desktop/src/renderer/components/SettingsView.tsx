@@ -342,7 +342,6 @@ export default function SettingsView() {
   const activeTrust = useStore((s) => s.activeTrust)
   const refreshTrust = useStore((s) => s.refreshTrust)
   const answerTrust = useStore((s) => s.answerTrust)
-  const trustModelId = useStore((s) => (s.activeSessionId ? s.sessionStates.get(s.activeSessionId)?.modelId ?? '' : ''))
   const [trustBusy, setTrustBusy] = useState(false)
 
   useEffect(() => {
@@ -355,12 +354,13 @@ export default function SettingsView() {
     if (!activeSessionId || trustBusy) return
     setTrustBusy(true)
     try {
-      // The row's own path names the registry entry to forget; the ACTIVE
-      // directory's entry is sent as the cwd this session was spawned with,
-      // because `trust/remove` is answered by the session's bridge and a
-      // differently-spelled cwd reads as a directory change there.
+      // The row's own path names the registry entry to forget — never the active
+      // session's directory, which would revoke a different decision than the
+      // one the user clicked. The call is answered by the active session's
+      // bridge either way: a foreign target is one more argument to it, not a
+      // reason to spawn somewhere else.
       const cwd = activeTrust && path === activeTrust.cwd ? workingDir : path
-      await window.electronAPI.trustRemove(activeSessionId, cwd, trustModelId)
+      await window.electronAPI.trustRemove(activeSessionId, cwd)
     } catch (e: any) {
       setError(t('error.trustRemoveFailed', { msg: e?.message }))
     } finally {

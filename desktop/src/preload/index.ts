@@ -87,12 +87,12 @@ const api: ElectronAPI = {
     return () => { ipcRenderer.removeListener(IPC.MCP_AUTH_COMPLETED, handler) }
   },
 
-  trustGet: (sessionId: string, cwd: string, modelId: string) =>
-    ipcRenderer.invoke(IPC.TRUST_GET, sessionId, cwd, modelId),
-  trustSet: (sessionId: string, cwd: string, modelId: string, status: 'trusted' | 'denied', persist: boolean) =>
-    ipcRenderer.invoke(IPC.TRUST_SET, sessionId, cwd, modelId, status, persist),
-  trustRemove: (sessionId: string, cwd: string, modelId: string) =>
-    ipcRenderer.invoke(IPC.TRUST_REMOVE, sessionId, cwd, modelId),
+  trustGet: (sessionId: string, cwd: string) =>
+    ipcRenderer.invoke(IPC.TRUST_GET, sessionId, cwd),
+  trustSet: (sessionId: string, cwd: string, status: 'trusted' | 'denied', persist: boolean) =>
+    ipcRenderer.invoke(IPC.TRUST_SET, sessionId, cwd, status, persist),
+  trustRemove: (sessionId: string, cwd: string) =>
+    ipcRenderer.invoke(IPC.TRUST_REMOVE, sessionId, cwd),
   onTrustRequired: (handler: (payload: TrustSnapshot & { sessionId: string }) => void) => {
     const listener = (_: unknown, data: TrustSnapshot & { sessionId: string }) => handler(data)
     ipcRenderer.on(IPC.TRUST_REQUIRED, listener)

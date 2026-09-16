@@ -1557,11 +1557,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   // Current session's trust state, for the panels' banner and the settings pane.
   refreshTrust: async () => {
-    const { activeSessionId, workingDir, sessionStates } = get()
+    const { activeSessionId, workingDir } = get()
     if (!activeSessionId) { set({ activeTrust: null }); return }
-    const modelId = sessionStates.get(activeSessionId)?.modelId ?? ''
     try {
-      const snapshot = await window.electronAPI.trustGet(activeSessionId, workingDir, modelId)
+      const snapshot = await window.electronAPI.trustGet(activeSessionId, workingDir)
       // Stale-response guard (same shape as refreshGitInfo's): resolving the
       // answer can outlive the switch that asked for it, and the reply is only
       // about the directory the session had at request time — painting it over a
@@ -1577,11 +1576,10 @@ export const useStore = create<AppState>((set, get) => ({
     if (!activeSessionId) return
     const states = new Map(sessionStates)
     const ss = states.get(activeSessionId)
-    const modelId = ss?.modelId ?? ''
     if (ss) ss.pendingTrust = null
     set({ sessionStates: states, pendingTrust: null })
     try {
-      await window.electronAPI.trustSet(activeSessionId, workingDir, modelId, status, persist)
+      await window.electronAPI.trustSet(activeSessionId, workingDir, status, persist)
     } catch (e: any) {
       // The main process rejects when the Python side refuses the write (invalid
       // status, dead bridge). The card is already dismissed above — say what

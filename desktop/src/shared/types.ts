@@ -890,10 +890,12 @@ export interface ElectronAPI {
   // registry (persist) or for this run only (`sessionTrust` in main, re-sent on
   // every spawn). Any change of the answer — granting, revoking or removing it —
   // changes what `initialize` loads, so the session's bridge is killed and
-  // respawned on the next interaction.
-  trustGet: (sessionId: string, cwd: string, modelId: string) => Promise<TrustSnapshot>
-  trustSet: (sessionId: string, cwd: string, modelId: string, status: 'trusted' | 'denied', persist: boolean) => Promise<TrustSnapshot>
-  trustRemove: (sessionId: string, cwd: string, modelId: string) => Promise<TrustSnapshot>
+  // respawned on the next interaction. `cwd` is the directory the call is about
+  // and need not be the session's own: the session's bridge answers for any
+  // registry row, and a row for another directory leaves that bridge untouched.
+  trustGet: (sessionId: string, cwd: string) => Promise<TrustSnapshot>
+  trustSet: (sessionId: string, cwd: string, status: 'trusted' | 'denied', persist: boolean) => Promise<TrustSnapshot>
+  trustRemove: (sessionId: string, cwd: string) => Promise<TrustSnapshot>
   // Fires when the Python side decides a directory needs a prompt
   // (trust/required) — after an initialize that found withheld config.
   onTrustRequired: (cb: (payload: TrustSnapshot & { sessionId: string }) => void) => () => void

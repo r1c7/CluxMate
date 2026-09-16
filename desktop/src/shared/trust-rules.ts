@@ -64,3 +64,40 @@ export function trustChangeRestartsBridge(
   if (!sameDir(cwd, liveCwd)) return false
   return statusBefore !== statusAfter
 }
+
+/**
+ * What a project-trust call owes the SESSION's bridge.
+ *
+ * `warmCwd` is the directory that bridge has to be running in, and it is always
+ * the session's own cwd. The trust TARGET travels as a plain JSON-RPC parameter
+ * (the Python side resolves `params["cwd"]`, falling back to the session's cwd),
+ * so the target is allowed to be a directory this session does not run in — the
+ * settings list revokes any recorded directory. Warming at the target instead
+ * makes `ensureBridge` kill the live process and respawn it over there (it
+ * respawns whenever the cwd it is handed differs from the live one): an
+ * in-flight turn dies with the process, and the replacement runs the OTHER
+ * project's `SessionStart` hooks while that project's entry is still trusted —
+ * and dies again when the revoke this call was warming for lands.
+ *
+ * `targetIsSessionDir` is the half that concerns the session-only trust map: a
+ * decision is only ever re-sent to a spawn of THIS session, at its own
+ * directory, so an answer about a foreign directory has no consumer.
+ */
+export interface TrustCallPlan {
+  warmCwd: string
+  targetIsSessionDir: boolean
+}
+
+export function planTrustCall(
+  targetCwd: string,
+  sessionCwd: string | null | undefined,
+  sameDir: (a: string, b: string) => boolean,
+): TrustCallPlan {
+  const session = sessionCwd ?? ''
+  return {
+    warmCwd: session,
+    // A session with no directory can be neither spawned at nor compared, so a
+    // call about it may not file a decision anywhere either.
+    targetIsSessionDir: session !== '' && sameDir(targetCwd, session),
+  }
+}
