@@ -3,6 +3,7 @@ import { useStore } from '../stores'
 import type { McpServer } from '../../shared/types'
 import { useT } from '../useI18n'
 import { formatTime } from '../../shared/format-time'
+import TrustBanner from './TrustBanner'
 
 // Transport badge — local (stdio) is muted gray (data stays on this machine),
 // remote (http) is orange (every tool call is a network egress, data may leave).
@@ -105,7 +106,12 @@ export default function McpView() {
   }
 
   return (
-    <div className="flex-1 flex min-h-0">
+    // The panel root is a two-pane ROW, so the banner is a sibling above it:
+    // the parent column gives it full width, and the row keeps the rest of the
+    // height without re-nesting either pane.
+    <>
+      <TrustBanner />
+      <div className="flex-1 flex min-h-0">
       {/* Server list */}
       <div className="w-64 flex-shrink-0 border-r border-surface-border flex flex-col">
         <div className="px-3 h-9 flex items-center gap-2 border-b border-surface-border flex-shrink-0">
@@ -271,6 +277,7 @@ export default function McpView() {
         )}
       </div>
     </div>
+      </>
   )
 }
 

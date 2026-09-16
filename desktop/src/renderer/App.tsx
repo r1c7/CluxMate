@@ -7,6 +7,7 @@ import QuickNav from './components/QuickNav'
 import WorkingDirBar from './components/WorkingDirBar'
 import InputBox from './components/InputBox'
 import QuestionCard from './components/QuestionCard'
+import TrustCard from './components/TrustCard'
 import TodoPanel from './components/TodoPanel'
 import SettingsView from './components/SettingsView'
 import AgentInspector from './components/AgentInspector'
@@ -64,6 +65,7 @@ function AppInner() {
   const showChat = useStore((s) => s.showChat)
   const showSettings = useStore((s) => s.showSettings)
   const pendingQuestion = useStore((s) => s.pendingQuestion)
+  const pendingTrust = useStore((s) => s.pendingTrust)
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title || t('chat.newSession')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [ready, setReady] = useState(false)
@@ -139,7 +141,7 @@ function AppInner() {
   // of the many places pending* is assigned) keeps it from ever going stale.
   const attention = useStore((s) => {
     for (const ss of s.sessionStates.values()) {
-      if (ss.pendingPermission || ss.pendingBatchEdit || ss.pendingQuestion) return true
+      if (ss.pendingPermission || ss.pendingBatchEdit || ss.pendingQuestion || ss.pendingTrust) return true
     }
     return false
   })
@@ -259,7 +261,9 @@ function AppInner() {
                 <ChatView />
                 {!focusAgent && <QuickNav />}
               </div>
-              {!focusAgent && (pendingQuestion ? (
+              {!focusAgent && (pendingTrust ? (
+                <TrustCard />
+              ) : pendingQuestion ? (
                 <QuestionCard />
               ) : (
                 <>

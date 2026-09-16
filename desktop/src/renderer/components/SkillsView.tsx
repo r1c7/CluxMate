@@ -3,6 +3,7 @@ import { useStore } from '../stores'
 import type { SkillMeta } from '../../shared/types'
 import { TextChunk } from './MessageBubble'
 import { useT } from '../useI18n'
+import TrustBanner from './TrustBanner'
 
 const SOURCE_BADGE: Record<SkillMeta['source'], { labelKey: string; cls: string }> = {
   global: { labelKey: 'skills.sourceGlobal', cls: 'bg-accent/15 text-accent border-accent/30' },
@@ -80,7 +81,12 @@ export default function SkillsView() {
   const selected = skills.find((s) => s.path === selectedPath)
 
   return (
-    <div className="flex-1 flex min-h-0">
+    // The panel root is a two-pane ROW, so the banner is a sibling above it:
+    // the parent column gives it full width, and the row keeps the rest of the
+    // height without re-nesting either pane.
+    <>
+      <TrustBanner />
+      <div className="flex-1 flex min-h-0">
       {/* Skill list */}
       <div className="w-64 flex-shrink-0 border-r border-surface-border flex flex-col">
         <div className="px-3 h-9 flex items-center border-b border-surface-border flex-shrink-0">
@@ -173,6 +179,7 @@ export default function SkillsView() {
         )}
       </div>
     </div>
+      </>
   )
 }
 

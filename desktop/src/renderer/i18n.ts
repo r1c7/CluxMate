@@ -549,6 +549,25 @@ const en = {
   'tree.expand': 'Expand sub-agent',
   'tree.collapse': 'Collapse sub-agent',
 
+  // ── project trust ──
+  'trust.title': 'Trust this directory?',
+  'trust.body': 'This directory ships project configuration. Loading it lets the repository run hooks and MCP servers and pre-authorize tool calls.',
+  'trust.remember': 'Trust and remember',
+  'trust.session': 'Trust this run only',
+  'trust.deny': 'Do not trust',
+  'trust.section': 'Project trust',
+  'trust.sectionHint': 'Directories whose .cluxmate configuration may be loaded. Anything not listed here and not trusted runs with global config only.',
+  'trust.current': 'Current directory',
+  'trust.notTrusted': 'Project config not loaded (directory not trusted)',
+  'trust.trustButton': 'Trust this directory',
+  'trust.revoke': 'Revoke',
+  'trust.empty': 'No trust decisions recorded yet.',
+  'trust.banner': 'This project config is not loaded — the directory is not trusted.',
+  'trust.trusted': 'Trusted',
+  'trust.denied': 'Denied',
+  'trust.registry': 'Recorded decisions',
+  'trust.cannotRemember': 'This directory is not trusted, so grants cannot be remembered.',
+
   // ── store / errors ──
   'error.unexpected': 'An unexpected error occurred. Please try again.',
   'error.unknown': 'unknown error',
@@ -576,6 +595,8 @@ const en = {
   'error.listHooksFailed': 'Failed to list hooks: {msg}',
   'error.notifyHooksFailed': 'Failed to trigger notification hooks: {msg}',
   'error.openHooksFailed': 'Failed to open settings.json: {msg}',
+  'error.trustSetFailed': 'Failed to set project trust: {msg}',
+  'error.trustRemoveFailed': 'Failed to revoke the trust decision: {msg}',
 
   // ── app shell ──
   'app.renderError': 'Render Error',
@@ -1118,6 +1139,25 @@ const zh: Record<keyof typeof en, string> = {
   'tree.expand': '展开子agent',
   'tree.collapse': '折叠子agent',
 
+  // ── project trust ──
+  'trust.title': '信任此目录？',
+  'trust.body': '该目录带有项目配置。加载它意味着允许该仓库运行 hooks、MCP 服务器，以及预先授权工具调用。',
+  'trust.remember': '信任并记住',
+  'trust.session': '仅本次运行',
+  'trust.deny': '不信任',
+  'trust.section': '项目信任',
+  'trust.sectionHint': '允许加载其 .cluxmate 配置的目录。未在此列出且未受信任的目录只使用全局配置。',
+  'trust.current': '当前目录',
+  'trust.notTrusted': '项目配置未加载（目录未受信任）',
+  'trust.trustButton': '信任此目录',
+  'trust.revoke': '撤销',
+  'trust.empty': '尚未记录任何信任决定。',
+  'trust.banner': '该项目配置当前不会加载——目录未受信任。',
+  'trust.trusted': '已信任',
+  'trust.denied': '已拒绝',
+  'trust.registry': '已记录的决定',
+  'trust.cannotRemember': '此目录未受信任，无法记住授权。',
+
   // ── store / errors ──
   'error.unexpected': '发生意外错误，请重试。',
   'error.unknown': '未知错误',
@@ -1145,6 +1185,8 @@ const zh: Record<keyof typeof en, string> = {
   'error.listHooksFailed': '获取 Hooks 列表失败：{msg}',
   'error.notifyHooksFailed': '触发通知 hooks 失败：{msg}',
   'error.openHooksFailed': '打开 settings.json 失败：{msg}',
+  'error.trustSetFailed': '设置项目信任失败：{msg}',
+  'error.trustRemoveFailed': '撤销信任决定失败：{msg}',
 
   // ── app shell ──
   'app.renderError': '渲染错误',

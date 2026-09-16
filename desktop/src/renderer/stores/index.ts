@@ -5,7 +5,7 @@ import type {
   Checkpoint, CheckpointFileDiff, SkillMeta, McpServer, BatchEditRequest,
   ModelEntry, PermissionMode, GitInfo, ReplaySubagent, TurnContext,
   PendingQuestion, QuestionAnswer, SessionSearchHit, HookEntry, HookRunEntry,
-  TodoItem,
+  TodoItem, TrustSnapshot,
 } from '../../shared/types'
 import { deriveSessionTitle } from '../../shared/session-title'
 import { markShadowed } from '../../shared/skill-rules'
@@ -206,6 +206,10 @@ interface SessionState {
   pendingPermission: PermissionRequest | null
   pendingBatchEdit: BatchEditRequest | null
   pendingQuestion: PendingQuestion | null
+  // The trust decision the agent is waiting for on this session's directory.
+  // Lives on the session (not only at the top level) so a switch away and back
+  // does not lose the blocking card.
+  pendingTrust: TrustSnapshot | null
   draftText: string
   // The session's selected config model entry id + reasoning level. Both ride
   // every chat/send so the Python agent switches provider/effort per message.
@@ -246,6 +250,12 @@ interface AppState {
   pendingPermission: PermissionRequest | null
   pendingBatchEdit: BatchEditRequest | null
   pendingQuestion: PendingQuestion | null
+  // Same, mirrored from the active session's state.
+  pendingTrust: TrustSnapshot | null
+  // The active session's project-trust answer (null until fetched) — read by the
+  // project-config panels' banner and the Settings "Project trust" section.
+  // Refreshed by refreshTrust() (session switch / spawn / after any answer).
+  activeTrust: TrustSnapshot | null
   // Derived from the active session's state — the plan strip's task list.
   todos: TodoItem[] | null
   // global
@@ -385,6 +395,11 @@ interface AppState {
   // Select the active session's model + reasoning level (the composer seat).
   selectModel: (modelId: string, reasoningEffort: string | null) => Promise<void>
   refreshPermissions: () => Promise<void>
+  // Re-read the ACTIVE session's trust snapshot (the panels' banner + Settings).
+  refreshTrust: () => Promise<void>
+  // Answer the blocking trust card. `persist` records the answer for good; the
+  // session-only variant lives in the main process until the session dies.
+  answerTrust: (status: 'trusted' | 'denied', persist: boolean) => Promise<void>
   refreshBridgeStatuses: () => Promise<void>
   selectAgent: (sel: SelectedAgent | null) => void
   toggleCheckpoints: (open?: boolean) => void
@@ -461,6 +476,7 @@ const NEW_SS: SessionState = {
   pendingPermission: null,
   pendingBatchEdit: null,
   pendingQuestion: null,
+  pendingTrust: null,
   draftText: '',
   modelId: '',
   reasoningEffort: null,
@@ -482,6 +498,8 @@ export const useStore = create<AppState>((set, get) => ({
   pendingPermission: null,
   pendingBatchEdit: null,
   pendingQuestion: null,
+  pendingTrust: null,
+  activeTrust: null,
   todos: null,
   workingDir: '',
   lastSentCwd: null,
@@ -598,6 +616,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: ss?.pendingPermission || null,
       pendingBatchEdit: ss?.pendingBatchEdit || null,
       pendingQuestion: ss?.pendingQuestion || null,
+      pendingTrust: ss?.pendingTrust || null,
       todos: ss?.todos ?? null,
     })
     get().refreshBridgeStatuses()
@@ -799,6 +818,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: null,
       pendingBatchEdit: null,
       pendingQuestion: null,
+      pendingTrust: null,
       todos: null,
       selectedAgent: null,
       error: null,
@@ -830,6 +850,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: ss?.pendingPermission || null,
       pendingBatchEdit: ss?.pendingBatchEdit || null,
       pendingQuestion: ss?.pendingQuestion || null,
+      pendingTrust: ss?.pendingTrust || null,
       todos: ss?.todos ?? null,
     })
     // Bridge for the deleted session is now gone — refresh sidebar dots.
@@ -913,6 +934,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: ss.pendingPermission,
       pendingBatchEdit: ss.pendingBatchEdit,
       pendingQuestion: ss.pendingQuestion,
+      pendingTrust: ss.pendingTrust,
       todos: ss.todos ?? null,
       selectedAgent: null,
       contextOpen: false,
@@ -1007,6 +1029,7 @@ export const useStore = create<AppState>((set, get) => ({
     ss.thinkingContent = ''
     ss.pendingPermission = null
     ss.pendingQuestion = null
+    ss.pendingTrust = null
     // A new turn starts: the previous list is stale (mirrors the todo/write
     // fold's turn/start reset). The model re-writes the whole list when it
     // wants the panel to show a plan again.
@@ -1020,7 +1043,7 @@ export const useStore = create<AppState>((set, get) => ({
         : s
     )
     const bs0 = { ...get().bridgeStatuses, [sid]: true }
-    set({ sessions, sessionStates: states, messages: ss.messages, isStreaming: true, streamingContent: '', thinkingContent: '', pendingPermission: null, pendingQuestion: null, todos: null, error: null, bridgeStatuses: bs0 })
+    set({ sessions, sessionStates: states, messages: ss.messages, isStreaming: true, streamingContent: '', thinkingContent: '', pendingPermission: null, pendingQuestion: null, pendingTrust: null, todos: null, error: null, bridgeStatuses: bs0 })
 
     // Pending throttled-render timer for this turn's text/thinking deltas (see
     // scheduleRender). Held across events so deltas coalesce into one render.
@@ -1040,7 +1063,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         sessionStates: s2,
         bridgeStatuses,
-        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion, todos: css.todos } : {}),
+        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion, pendingTrust: css.pendingTrust, todos: css.todos } : {}),
         ...extra,
       })
     }
@@ -1398,8 +1421,8 @@ export const useStore = create<AppState>((set, get) => ({
     await window.electronAPI.cancelChat(sid)
     const states = new Map(get().sessionStates)
     const ss = states.get(sid)
-    if (ss) { ss.isStreaming = false; ss.pendingPermission = null; ss.pendingBatchEdit = null; ss.pendingQuestion = null }
-    set({ sessionStates: states, isStreaming: false, pendingPermission: null, pendingBatchEdit: null, pendingQuestion: null })
+    if (ss) { ss.isStreaming = false; ss.pendingPermission = null; ss.pendingBatchEdit = null; ss.pendingQuestion = null; ss.pendingTrust = null }
+    set({ sessionStates: states, isStreaming: false, pendingPermission: null, pendingBatchEdit: null, pendingQuestion: null, pendingTrust: null })
   },
 
   approveTool: async (callId, always = false) => {
@@ -1456,13 +1479,14 @@ export const useStore = create<AppState>((set, get) => ({
     const ss = states.get(sid)
     if (ss) {
       ss.pendingQuestion = null
+      ss.pendingTrust = null
       // The tool block (from tool_start) is still "running" — keep it so the
       // subsequent tool_result flips it to "done"; we only dismiss the card.
       ss.messages = ss.messages.map((m) =>
         m.role === 'agent' ? patchTool(m, callId, { status: 'running' }) : m
       )
     }
-    set({ sessionStates: states, pendingQuestion: null, messages: ss ? ss.messages : get().messages })
+    set({ sessionStates: states, pendingQuestion: null, pendingTrust: null, messages: ss ? ss.messages : get().messages })
     await window.electronAPI.answerQuestion(sid, callId, answers)
   },
 
@@ -1531,6 +1555,46 @@ export const useStore = create<AppState>((set, get) => ({
     } catch { /* leave current state */ }
   },
 
+  // Current session's trust state, for the panels' banner and the settings pane.
+  refreshTrust: async () => {
+    const { activeSessionId, workingDir, sessionStates } = get()
+    if (!activeSessionId) { set({ activeTrust: null }); return }
+    const modelId = sessionStates.get(activeSessionId)?.modelId ?? ''
+    try {
+      const snapshot = await window.electronAPI.trustGet(activeSessionId, workingDir, modelId)
+      // Stale-response guard (same shape as refreshGitInfo's): resolving the
+      // answer can outlive the switch that asked for it, and the reply is only
+      // about the directory the session had at request time — painting it over a
+      // later session's panels would show the wrong project's trust state.
+      if (get().activeSessionId === activeSessionId && get().workingDir === workingDir) {
+        set({ activeTrust: snapshot })
+      }
+    } catch { /* best-effort — an unreachable bridge leaves the previous state */ }
+  },
+
+  answerTrust: async (status: 'trusted' | 'denied', persist: boolean) => {
+    const { activeSessionId, workingDir, sessionStates } = get()
+    if (!activeSessionId) return
+    const states = new Map(sessionStates)
+    const ss = states.get(activeSessionId)
+    const modelId = ss?.modelId ?? ''
+    if (ss) ss.pendingTrust = null
+    set({ sessionStates: states, pendingTrust: null })
+    try {
+      await window.electronAPI.trustSet(activeSessionId, workingDir, modelId, status, persist)
+    } catch (e: any) {
+      // The main process rejects when the Python side refuses the write (invalid
+      // status, dead bridge). The card is already dismissed above — say what
+      // happened instead of leaving the user with a card that vanished and a
+      // directory that is still undecided (the panels' and settings' trust
+      // buttons are the retry path).
+      set({ error: tGlobal('error.trustSetFailed', { msg: e?.message }) })
+    }
+    // The bridge was killed when the answer changed: the next chat/send respawns
+    // it with the new decision, so only the panels' view needs a refresh here.
+    await get().refreshTrust()
+  },
+
   refreshBridgeStatuses: async () => {
     const ids = get().sessions.map((s) => s.id)
     if (ids.length === 0) return
@@ -1541,6 +1605,10 @@ export const useStore = create<AppState>((set, get) => ({
       for (const s of statuses) map[s.sessionId] = s.running || (current[s.sessionId] ?? false)
       set({ bridgeStatuses: map })
     } catch { /* best-effort — leave stale state */ }
+    // Session switch / spawn complete — the trust answer of the (new) active
+    // directory is now resolvable, so the panels' banner can say whether the
+    // project config is in force.
+    void get().refreshTrust()
   },
 
   // The agent inspector, checkpoint timeline, context inspector, and diff preview
@@ -1725,6 +1793,7 @@ export const useStore = create<AppState>((set, get) => ({
     ss.pendingPermission = null
     ss.pendingBatchEdit = null
     ss.pendingQuestion = null
+    ss.pendingTrust = null
     window.electronAPI.saveDisplay(sid, kept).catch(() => {})
 
     const isActive = get().activeSessionId === sid
@@ -1732,7 +1801,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       sessionStates: states,
       inputDraft: draft,
-      ...(isActive ? { messages: kept, isStreaming: false, pendingPermission: null, pendingBatchEdit: null, pendingQuestion: null } : {}),
+      ...(isActive ? { messages: kept, isStreaming: false, pendingPermission: null, pendingBatchEdit: null, pendingQuestion: null, pendingTrust: null } : {}),
     })
     // 5. Refresh the checkpoint timeline if it's open (restore adds nodes).
     if (get().checkpointsOpen) get().loadCheckpoints()
@@ -1778,6 +1847,7 @@ export const useStore = create<AppState>((set, get) => ({
     ss.pendingPermission = null
     ss.pendingBatchEdit = null
     ss.pendingQuestion = null
+    ss.pendingTrust = null
     // Retry restarts the turn — the previous attempt's list is stale (mirrors
     // sendMessage; the turn_start event's reset cannot be relied on because the
     // Python side only emits it when checkpoints/git are available).
@@ -1793,6 +1863,7 @@ export const useStore = create<AppState>((set, get) => ({
       pendingPermission: null,
       pendingBatchEdit: null,
       pendingQuestion: null,
+      pendingTrust: null,
       todos: null,
       bridgeStatuses: { ...get().bridgeStatuses, [sid]: true },
     })
@@ -1834,7 +1905,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         sessionStates: s2,
         bridgeStatuses,
-        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion, todos: css.todos } : {}),
+        ...(active ? { messages: css.messages, pendingPermission: css.pendingPermission, pendingBatchEdit: css.pendingBatchEdit, pendingQuestion: css.pendingQuestion, pendingTrust: css.pendingTrust, todos: css.todos } : {}),
         ...extra,
       })
     }
@@ -2503,4 +2574,20 @@ window.electronAPI.onGitChanged(({ cwd }) => {
 // list comes back with the NEW status — no session restart needed.
 window.electronAPI.onMcpAuthCompleted(({ server, status, error }) => {
   useStore.getState().refreshMcpAuthStatus(server, status, error)
+})
+
+// The agent asks for a project-trust decision during initialize (its own
+// notification, like mcp/auth/completed). Park it on the session that owns the
+// cwd so the card survives a session switch, and mirror it to the top level.
+window.electronAPI.onTrustRequired((payload) => {
+  const st = useStore.getState()
+  const sid = payload.sessionId || st.activeSessionId
+  if (!sid) return
+  const states = new Map(st.sessionStates)
+  const ss = states.get(sid)
+  if (ss) ss.pendingTrust = payload
+  useStore.setState({
+    sessionStates: states,
+    ...(sid === st.activeSessionId ? { pendingTrust: payload } : {}),
+  })
 })

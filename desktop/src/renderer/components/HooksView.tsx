@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../stores'
 import type { HookEntry, HooksScope } from '../../shared/types'
 import { useT } from '../useI18n'
+import TrustBanner from './TrustBanner'
 
 // Static reference for the help page. Event names are identifiers (English in
 // both locales); the ✓/✗ columns read from this table.
@@ -102,6 +103,7 @@ export default function HooksView() {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0">
+      <TrustBanner />
       {/* Header */}
       <div className="h-9 border-b border-surface-border flex items-center gap-2 px-4 flex-shrink-0">
         <span className="text-xs font-semibold text-ink-soft">{t('hooks.title')}</span>

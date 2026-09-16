@@ -151,6 +151,8 @@ export default function PermissionCard() {
   const pending = useStore((s) => s.pendingPermission)
   const cwd = useStore((s) => s.workingDir)
   const sid = useStore((s) => s.activeSessionId)
+  const trust = useStore((s) => s.activeTrust)
+  const answerTrust = useStore((s) => s.answerTrust)
   const approve = useStore((s) => s.approveTool)
   const deny = useStore((s) => s.denyTool)
   const [agentTypes, setAgentTypes] = useState<Map<string, AgentTypeInfo>>(new Map())
@@ -164,17 +166,25 @@ export default function PermissionCard() {
     return () => { alive = false }
   }, [sid, pending?.tool_name])
 
+  // "Always allow" is withheld for an untrusted directory: the grant would be
+  // written to a project permissions.json that is not being loaded, so it could
+  // never take effect (the engine's is_always_allowable() reports the same).
+  // Offer the decision that unblocks it instead of a button that silently does
+  // nothing. Untrusted ≠ read-only: approval itself stays available.
+  const alwaysBlockedByTrust = pending?.always_allowable === false &&
+    !!trust && trust.status !== 'trusted'
+
   // Keyboard shortcuts: y = approve, a = always, n/esc = deny.
   useEffect(() => {
     if (!pending) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'y') { e.preventDefault(); approve(pending.call_id, false) }
-      else if (e.key === 'a') { e.preventDefault(); approve(pending.call_id, true) }
+      else if (e.key === 'a') { if (alwaysBlockedByTrust) return; e.preventDefault(); approve(pending.call_id, true) }
       else if (e.key === 'n' || e.key === 'Escape') { e.preventDefault(); deny(pending.call_id) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [pending, approve, deny])
+  }, [pending, alwaysBlockedByTrust, approve, deny])
 
   if (!pending) return null
   const style = RISK_STYLE[pending.risk_level]
@@ -200,6 +210,16 @@ export default function PermissionCard() {
       <EscalationNotice params={pending.params as Record<string, unknown>} />
 
       <PermissionBody tool={pending.tool_name} params={pending.params} cwd={cwd} agentTypes={agentTypes} />
+
+      {alwaysBlockedByTrust && (
+        <div className="flex items-center gap-2 px-3 py-2 border-t border-surface-border text-xs text-ink-soft">
+          <span className="flex-1">{t('trust.cannotRemember')}</span>
+          <button
+            onClick={() => answerTrust('trusted', true)}
+            className="px-2.5 py-1 rounded bg-accent hover:bg-accent-hover text-accent-ink font-medium shrink-0"
+          >{t('trust.trustButton')}</button>
+        </div>
+      )}
 
       <div className="flex gap-2 px-3 py-2 border-t border-surface-border">
         <button

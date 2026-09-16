@@ -9,7 +9,7 @@ import { isValidSsrEntry } from '../../shared/ssrf'
 import { formatTime } from '../../shared/format-time'
 import type { MemoryFact, MemoryFactList, ModelEntry } from '../../shared/types'
 
-type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'memory' | 'notification' | 'language'
+type Section = 'model' | 'theme' | 'font' | 'sandbox' | 'trust' | 'memory' | 'notification' | 'language'
 
 // Built-in sensitive-file template (mirrors cluxmate/core/read_denies.py) —
 // shown read-only in the forbid-read card; the toggle turns them all on.
@@ -60,6 +60,10 @@ const SECTIONS: { id: Section; labelKey: MessageKey; icon: React.ReactNode }[] =
         <path d="M9 12l2 2 4-4" />
       </svg>
     ),
+  },
+  {
+    id: 'trust', labelKey: 'trust.section',
+    icon: <LockIcon className="w-4 h-4" />,
   },
   {
     id: 'memory', labelKey: 'settings.section.memory',
@@ -329,6 +333,40 @@ export default function SettingsView() {
     } catch (e: any) {
       setError(t('error.deleteFactFailed', { msg: e?.message }))
     }
+  }
+
+  // Project trust (trust.json) — the answer is resolved by the active session's
+  // Python process, so it is read and written through that bridge: fetch on
+  // entering the section, re-fetch after every write (a changed answer restarts
+  // the bridge, so the old process's view is not trusted).
+  const activeTrust = useStore((s) => s.activeTrust)
+  const refreshTrust = useStore((s) => s.refreshTrust)
+  const answerTrust = useStore((s) => s.answerTrust)
+  const trustModelId = useStore((s) => (s.activeSessionId ? s.sessionStates.get(s.activeSessionId)?.modelId ?? '' : ''))
+  const [trustBusy, setTrustBusy] = useState(false)
+
+  useEffect(() => {
+    if (section === 'trust') void refreshTrust()
+  }, [section, refreshTrust])
+
+  const trustEntries = Object.entries(activeTrust?.store || {})
+
+  const revokeTrust = async (path: string) => {
+    if (!activeSessionId || trustBusy) return
+    setTrustBusy(true)
+    try {
+      // The row's own path names the registry entry to forget; the ACTIVE
+      // directory's entry is sent as the cwd this session was spawned with,
+      // because `trust/remove` is answered by the session's bridge and a
+      // differently-spelled cwd reads as a directory change there.
+      const cwd = activeTrust && path === activeTrust.cwd ? workingDir : path
+      await window.electronAPI.trustRemove(activeSessionId, cwd, trustModelId)
+    } catch (e: any) {
+      setError(t('error.trustRemoveFailed', { msg: e?.message }))
+    } finally {
+      setTrustBusy(false)
+    }
+    await refreshTrust()
   }
 
   const addSsrAllow = () => {
@@ -842,6 +880,68 @@ export default function SettingsView() {
                 <p className="text-[11px] text-ink-faint">{t('settings.sandbox.egress.footnote')}</p>
               </SectionCard>
             </div>
+          ) : section === 'trust' ? (
+            <div className="space-y-4">
+              {/* The active session's directory: its answer + the way to change it. */}
+              <SectionCard icon={<LockIcon className="w-4 h-4" />} title={t('trust.current')}>
+                <p className="text-xs text-ink-faint">{t('trust.sectionHint')}</p>
+                <div className="flex items-center gap-2.5">
+                  <span
+                    className="flex-1 min-w-0 text-sm text-ink font-mono truncate"
+                    title={activeTrust?.cwd || workingDir}
+                  >{activeTrust?.cwd || workingDir || '—'}</span>
+                  {activeTrust && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                      activeTrust.status === 'trusted' ? 'bg-emerald-500/15 text-emerald-700' : 'bg-amber-500/15 text-amber-700'
+                    }`}>
+                      {activeTrust.status === 'trusted' ? t('trust.trusted') : t('trust.notTrusted')}
+                    </span>
+                  )}
+                </div>
+                {activeTrust?.status !== 'trusted' && (
+                  <button
+                    onClick={() => answerTrust('trusted', true)}
+                    disabled={trustBusy}
+                    className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink text-sm rounded-lg font-medium transition-colors"
+                  >{t('trust.trustButton')}</button>
+                )}
+              </SectionCard>
+
+              {/* The registry: every recorded decision, each revocable back to
+                  "undecided" so the next session in that directory asks again. */}
+              <SectionCard
+                icon={<LockIcon className="w-4 h-4" />}
+                title={t('trust.registry')}
+                badge={activeTrust ? <CountBadge n={trustEntries.length} /> : undefined}
+              >
+                {!activeTrust ? (
+                  // The snapshot is the registry's only source (it is read
+                  // through the session's bridge) — "nothing recorded" would be
+                  // a guess while it has not answered yet.
+                  <p className="text-sm text-ink-faint py-2 text-center">{t('common.loading')}</p>
+                ) : trustEntries.length === 0 ? (
+                  <EmptyState text={t('trust.empty')} />
+                ) : (
+                  <div className="space-y-2">
+                    {trustEntries.map(([path, status]) => (
+                      <div key={path} className="flex items-center gap-2.5 bg-surface-raised rounded-lg border border-surface-border px-3 py-2">
+                        <span className="flex-1 min-w-0 text-sm text-ink font-mono truncate" title={path}>{path}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                          status === 'trusted' ? 'bg-emerald-500/15 text-emerald-700' : 'bg-amber-500/15 text-amber-700'
+                        }`}>
+                          {status === 'trusted' ? t('trust.trusted') : t('trust.denied')}
+                        </span>
+                        <button
+                          onClick={() => revokeTrust(path)}
+                          disabled={trustBusy}
+                          className="text-xs text-ink-faint hover:text-red-600 px-2 py-1 shrink-0 rounded transition-colors disabled:opacity-50"
+                        >{t('trust.revoke')}</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </SectionCard>
+            </div>
           ) : section === 'memory' ? (
             <div className="space-y-4">
               <SectionCard
@@ -1140,6 +1240,15 @@ function ShieldIcon({ className = 'w-4 h-4' }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
       <path d="M9 12l2 2 4-4" />
+    </svg>
+  )
+}
+
+function LockIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="11" width="18" height="10" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
     </svg>
   )
 }
