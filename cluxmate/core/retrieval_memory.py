@@ -177,9 +177,13 @@ def _tokenize(q: str) -> list[str]:
 class RetrievalMemory:
     """Fact store + in-memory FTS5 (trigram) index with per-turn recall."""
 
-    def __init__(self, cwd: str, config: RetrievalConfig):
+    def __init__(self, cwd: str, config: RetrievalConfig, *, trusted: bool = True):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
         self._config = config
+        # Project trust gate (core/trust.py): an untrusted directory's facts are
+        # neither recalled (they would reach the model) nor written (a
+        # write-only store would be a silent trap).
+        self._trusted = trusted
         # One connection is created lazily on whichever thread first built the
         # agent (initialize / MCP loader) but recall() runs on the per-turn
         # worker thread (JSON-RPC server spins up a fresh thread + loop per
@@ -235,10 +239,10 @@ class RetrievalMemory:
 
     def _collect_docs(self, cfg: dict[str, Any]) -> list[Doc]:
         docs: list[Doc] = []
-        for scope, d in (
-            ("global", self._facts_dir("global")),
-            ("project", self._facts_dir("project")),
-        ):
+        scopes = [("global", self._facts_dir("global"))]
+        if self._trusted:
+            scopes.append(("project", self._facts_dir("project")))
+        for scope, d in scopes:
             if d.is_dir():
                 for p in sorted(d.glob("*.md")):
                     docs.append(self._doc_from_fact(scope, p))
@@ -342,6 +346,11 @@ class RetrievalMemory:
             return "Error: content is empty — nothing to record."
         if scope not in ("global", "project"):
             scope = "project"
+        if scope == "project" and not self._trusted:
+            return (
+                "Error: this directory is not trusted — project memory would not "
+                "be recalled. Use scope=global, or trust the directory first."
+            )
         d = self._facts_dir(scope)
         d.mkdir(parents=True, exist_ok=True)
         fact_id = uuid.uuid4().hex[:12]
@@ -352,7 +361,8 @@ class RetrievalMemory:
         fact_id = (fact_id or "").strip()
         if not _FACT_ID_RE.match(fact_id):
             return "Error: invalid fact id."
-        for scope in ("global", "project"):
+        scopes = ["global"] if not self._trusted else ["global", "project"]
+        for scope in scopes:
             path = self._facts_dir(scope) / f"{fact_id}.md"
             if path.is_file():
                 path.unlink()

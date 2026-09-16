@@ -268,8 +268,10 @@ class SubagentRegistry:
     ``errors()`` (surfaced by the ``agents/list`` RPC).
     """
 
-    def __init__(self, cwd: str, *, model_ids: set[str] | None = None):
+    def __init__(self, cwd: str, *, model_ids: set[str] | None = None,
+                 trusted: bool = True):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        self._trusted = trusted
         self._model_ids = model_ids
         self._types: dict[str, AgentType] = {}
         self._errors: list[dict[str, str]] = []
@@ -277,10 +279,10 @@ class SubagentRegistry:
 
     # --- discovery -----------------------------------------------------
     def _roots(self) -> list[tuple[Path, str]]:
-        return [
-            (Path.home() / ".cluxmate", "global"),
-            (Path(self._cwd) / ".cluxmate", "project"),
-        ]
+        roots = [(Path.home() / ".cluxmate", "global")]
+        if self._trusted:
+            roots.append((Path(self._cwd) / ".cluxmate", "project"))
+        return roots
 
     def _signature(self) -> tuple:
         sig: list[tuple[str, int, int]] = []

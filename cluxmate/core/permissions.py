@@ -118,10 +118,17 @@ class PermissionPolicy:
     loaded at construction and written through on mutation; the development mode
     starts at DEFAULT_MODE and is never persisted."""
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, *, trusted: bool = True):
         self._lock = threading.Lock()
+        # Project trust gate (core/trust.py): an untrusted directory's
+        # permissions.json is ignored AND must not be written — a
+        # silently-inert "always allow" is worse than not offering one.
+        self._trusted = trusted
         self._store = PermissionStore(cwd)
-        state = self._store.load()
+        state = self._store.load() if trusted else {
+            "always_allow_tools": [],
+            "always_allow_dangerous_tools": [],
+        }
         self.mode: str = DEFAULT_MODE
         self.always_allow: set[str] = set(state["always_allow_tools"])
         self.always_allow_dangerous: set[str] = set(
@@ -187,6 +194,8 @@ class PermissionPolicy:
         prompts), for critical (device/system-level destruction), for sandbox
         escalation, and for other dangerous tools.
         """
+        if not self._trusted:
+            return False
         if escalated:
             return False
         if risk_level in ("safe", "critical"):
@@ -206,6 +215,7 @@ class PermissionPolicy:
                 "always_allow_dangerous_tools": sorted(
                     self.always_allow_dangerous
                 ),
+                "trusted": self._trusted,
             }
 
     def set_mode(self, mode: str):
@@ -232,6 +242,8 @@ class PermissionPolicy:
     def add_always_allow(self, name: str):
         """Persist "always allow" at the tool's WRITE tier."""
         with self._lock:
+            if not self._trusted:
+                return
             if name in self.always_allow:
                 return
             self.always_allow.add(name)
@@ -250,6 +262,8 @@ class PermissionPolicy:
         if name != "delete_file" and not name.startswith("bash:"):
             return
         with self._lock:
+            if not self._trusted:
+                return
             if name in self.always_allow_dangerous:
                 return
             self.always_allow_dangerous.add(name)

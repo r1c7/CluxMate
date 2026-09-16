@@ -87,15 +87,19 @@ def _parse_frontmatter(md: str) -> dict[str, str]:
 class SkillManager:
     """Discover and read skills for a working directory."""
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, *, trusted: bool = True):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        # Project trust gate (core/trust.py): an untrusted directory contributes
+        # no skills and no disable list — a repository must not be able to inject
+        # instructions into the model just by being opened.
+        self._trusted = trusted
 
     def _roots(self) -> list[tuple[Path, str]]:
         """Scan roots farthest-first — a later entry shadows an earlier one."""
-        return [
-            (Path.home() / ".cluxmate" / "skills", "global"),
-            (Path(self._cwd) / ".cluxmate" / "skills", "project"),
-        ]
+        roots = [(Path.home() / ".cluxmate" / "skills", "global")]
+        if self._trusted:
+            roots.append((Path(self._cwd) / ".cluxmate" / "skills", "project"))
+        return roots
 
     @staticmethod
     def _disabled_by(raw: set[str], source: str, slug: str) -> bool:
@@ -112,6 +116,8 @@ class SkillManager:
         identically, and a hand-edited ``[]``/``null`` must not raise out of
         every turn's injection.
         """
+        if not self._trusted:
+            return set()
         cfg_path = Path(self._cwd) / ".cluxmate" / "skills.json"
         try:
             cfg = json.loads(cfg_path.read_text("utf-8"))
