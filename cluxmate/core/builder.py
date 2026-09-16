@@ -166,6 +166,10 @@ class AgentBuilder:
         # Effective shell-sandbox state, computed in _get_tools and passed to the
         # AgentLoop for request/header.config audit metadata.
         self._sandbox_state = "off"
+        # Project trust decision for this working directory (core/trust.py).
+        # None ⇒ no gate applied (library/test default). Children inherit the
+        # parent's decision via _child_builder.
+        self._trust: Any = None
         # Per-turn tracker (an AgentCallbacks-like object exposing
         # on_agent_start/on_agent_end/scoped). Set by set_tracker each turn.
         self._tracker: Any = None
@@ -240,7 +244,7 @@ class AgentBuilder:
     def _agent_registry(self) -> SubagentRegistry:
         """Lazy registry of subagent types for this cwd."""
         if self._agents_registry is None:
-            self._agents_registry = SubagentRegistry(self._cwd)
+            self._agents_registry = SubagentRegistry(self._cwd, trusted=self.trusted)
         return self._agents_registry
 
     def agent_type(self, slug: str) -> AgentType | None:
@@ -309,6 +313,25 @@ class AgentBuilder:
         self._hooks = hooks
         return self
 
+    def with_trust(self, decision: Any) -> "AgentBuilder":
+        """Apply a project trust decision (core/trust.TrustDecision).
+
+        Every project-level config reader this builder constructs takes
+        ``trusted=decision.trusted``; the injection tells the model what was
+        withheld and the AgentLoop records it in request/header for the audit
+        trail.
+        """
+        self._trust = decision
+        return self
+
+    @property
+    def trusted(self) -> bool:
+        return True if self._trust is None else bool(self._trust.trusted)
+
+    @property
+    def trust_source(self) -> str:
+        return "default" if self._trust is None else str(self._trust.source)
+
     def with_retrieval_memory(self, config: "RetrievalConfig | None") -> "AgentBuilder":
         """Attach the retrieval-memory config (shared across rebuilds)."""
         self._retrieval_config = config
@@ -319,13 +342,15 @@ class AgentBuilder:
         if self._retrieval_config is None:
             return None
         if self._retrieval is None:
-            self._retrieval = RetrievalMemory(self._cwd, self._retrieval_config)
+            self._retrieval = RetrievalMemory(
+                self._cwd, self._retrieval_config, trusted=self.trusted
+            )
         return self._retrieval
 
     def _hooks_manager(self) -> "HookManager | None":
         """Current HookManager, lazily constructed from the cwd when unset."""
         if self._hooks is None:
-            self._hooks = HookManager(self._cwd)
+            self._hooks = HookManager(self._cwd, trusted=self.trusted)
         return self._hooks
 
     def reload_hooks(self) -> list[dict[str, Any]]:
@@ -542,6 +567,7 @@ class AgentBuilder:
                 self._mcp = MCPManager(
                     self._cwd, sandbox=self._mcp_sandbox(),
                     egress_mode=self._egress_mode(),
+                    trusted=self.trusted,
                 )
             mcp = self._mcp
         # load() spawns subprocesses and blocks — run it OUTSIDE the lock so a
@@ -584,7 +610,9 @@ class AgentBuilder:
                         LspTool(manager=self._lsp_manager()),
                     ) if t.name in readonly
                 ])
-                if self._depth == 0 and SkillManager(self._cwd).discover_enabled():
+                if self._depth == 0 and SkillManager(
+                    self._cwd, trusted=self.trusted
+                ).discover_enabled():
                     tools.append(SkillTool(cwd=self._cwd, builder=self))
                 # ask_user_question is read-only, so it stays available in plan
                 # mode — clarifying questions are how plan mode disambiguates a
@@ -674,7 +702,9 @@ class AgentBuilder:
                 tools.append(TaskTool(builder=self))
             # use_skill only for the parent (depth 0) and only when enabled skills exist.
             # Subagents don't get skills this round (avoids scope creep).
-            if self._depth == 0 and SkillManager(self._cwd).discover_enabled():
+            if self._depth == 0 and SkillManager(
+                self._cwd, trusted=self.trusted
+            ).discover_enabled():
                 tools.append(SkillTool(cwd=self._cwd, builder=self))
             # update_memory only for the parent (depth 0) — subagents shouldn't
             # write durable memory (explore/subtasks would pollute it), matching
@@ -706,6 +736,7 @@ class AgentBuilder:
                     self._mcp = MCPManager(
                         self._cwd, sandbox=self._mcp_sandbox(),
                         egress_mode=self._egress_mode(),
+                        trusted=self.trusted,
                     )
                     # Deferred mode: construct but don't load here (load spawns
                     # subprocesses and blocks). The caller loads it off the
@@ -804,7 +835,9 @@ class AgentBuilder:
     def _lsp_manager(self) -> "LSPManager":
         """Lazy, cached LSP manager for this builder's cwd. Shared by children."""
         if self._lsp is None:
-            self._lsp = LSPManager(self._cwd, sandbox=self._shell_sandbox())
+            self._lsp = LSPManager(
+                self._cwd, sandbox=self._shell_sandbox(), trusted=self.trusted
+            )
         # Auto-install runs installer commands — a write-class side effect — so
         # plan mode keeps it off regardless of lsp.json: hard isolation holds.
         # Children inherit the parent's mode, so their _get_tools sets the same
@@ -863,11 +896,12 @@ class AgentBuilder:
         )
 
     def render_injections(self) -> list[tuple[str, str]]:
-        """Current ``(source, content)`` synthetic user messages: memory + skills.
+        """Current ``(source, content)`` synthetic user messages: memory + skills
+        (+ a trust notice when project config is being withheld).
 
-        ``source`` is ``"memory"`` or ``"skill"`` — recorded on the logged
-        ``user/message`` event so the UI can fold them and replay can tell them
-        apart from human input.
+        ``source`` is ``"memory"``, ``"skill"`` or ``"trust"`` — recorded on the
+        logged ``user/message`` event so the UI can fold them and replay can tell
+        them apart from human input.
         """
         parts: list[tuple[str, str]] = []
         project_memory = MemoryManager(self._cwd).render()
@@ -878,7 +912,7 @@ class AgentBuilder:
                 "authoritative background — follow its conventions unless the current\n"
                 "request overrides them.\n\n" + project_memory
             )))
-        skills = SkillManager(self._cwd).discover_enabled()
+        skills = SkillManager(self._cwd, trusted=self.trusted).discover_enabled()
         if skills:
             skills_list = "\n".join(
                 f"- **{s.slug}**: {s.description or s.name}" for s in skills
@@ -887,6 +921,22 @@ class AgentBuilder:
                 "[Available skills]\n"
                 "Skills are reusable instruction sets identified by a slug. When a skill\n"
                 "is relevant, call the `use_skill` tool with its slug.\n\n" + skills_list
+            )))
+        # Withheld project config: the model must know that this repository's
+        # hooks / MCP / skills / always-allow rules are NOT in force, otherwise it
+        # reads their absence as a bug and keeps asking about them.
+        trust = self._trust
+        if trust is not None and getattr(trust, "gated", False):
+            kinds = ", ".join(f.path for f in trust.findings)
+            parts.append(("trust", (
+                "[Project trust]\n"
+                f"This working directory ({self._cwd}) is NOT trusted, so "
+                "project-level configuration was not loaded: hooks, MCP servers, "
+                "LSP servers, skills, subagents, always-allow rules and project "
+                f"memory facts (found: {kinds}). Global configuration and the "
+                "built-in toolset are unaffected. Do not assume any of the above "
+                "are active, and do not claim they are. The user can grant trust "
+                "with `cluxmate trust add` or the front-end's trust prompt."
             )))
         return parts
 
@@ -948,18 +998,15 @@ class AgentBuilder:
 
         Called once per process, when the builder first attaches to an EXISTING
         log with the fingerprints still unset — i.e. crash recovery / session
-        reopen. Memory/skills are suppressed only when the log's last injection
-        of each source matches the current render and was not followed by a
+        reopen. Each injected source is suppressed only when the log's last
+        injection of it matches the current render and was not followed by a
         compaction (which may have folded it). Mode is trusted only when a mode
         announcement exists after the last compaction.
         """
         log = self._session_log
         if log is None or log.seq == 0:
             return
-        last_mem: str | None = None
-        last_mem_seq: int | None = None
-        last_skill: str | None = None
-        last_skill_seq: int | None = None
+        last_seen: dict[str, tuple[str, int]] = {}
         last_mode_seq: int = -1
         last_compaction_seq: int = -1
         last_header_mode: str | None = None
@@ -973,28 +1020,20 @@ class AgentBuilder:
                 content = (event.data.get("message") or {}).get("content")
                 if not isinstance(content, str):
                     continue
-                if src == "memory":
-                    last_mem, last_mem_seq = content, event.seq
-                elif src == "skill":
-                    last_skill, last_skill_seq = content, event.seq
-                elif src == "mode":
+                if src == "mode":
                     last_mode_seq = event.seq
                 elif src == "compaction":
                     last_compaction_seq = event.seq
+                elif isinstance(src, str):
+                    last_seen[src] = (content, event.seq)
 
         current = self.render_injections()
         if current:
-            matches = True
             for src, content in current:
-                if src == "memory":
-                    seen, seq = last_mem, last_mem_seq
-                else:
-                    seen, seq = last_skill, last_skill_seq
-                if seen != content or seq is None or seq < last_compaction_seq:
-                    matches = False
-                    break
-            if matches:
-                self._last_injection_sig = tuple(current)
+                seen = last_seen.get(src)
+                if seen is None or seen[0] != content or seen[1] < last_compaction_seq:
+                    return  # at least one part is stale → re-inject all of them
+            self._last_injection_sig = tuple(current)
 
         if last_header_mode is not None and last_mode_seq > last_compaction_seq:
             self._last_mode = last_header_mode
@@ -1030,6 +1069,8 @@ class AgentBuilder:
             session_log=session_log,
             mode=self._mode,
             sandbox=self._sandbox_state,
+            trusted=self.trusted,
+            trust_source=self.trust_source,
             hooks=self._hooks_manager(),
             retrieval=self._retrieval_manager(),
             cwd=self._cwd,
@@ -1052,6 +1093,7 @@ class AgentBuilder:
         child._tracker = self._tracker
         child._log_store = self._log_store
         child._mode = self._mode
+        child._trust = self._trust
         child._grants = self._grants
         child._read_denies = self._read_denies
         child._ssrf = self._ssrf
@@ -1158,6 +1200,8 @@ class AgentBuilder:
             session_log=child._session_log,
             mode=self._mode,
             sandbox=child._sandbox_state,
+            trusted=child.trusted,
+            trust_source=child.trust_source,
             hooks=child._hooks_manager(),
             cwd=self._cwd,
             max_turns=profile.max_turns,

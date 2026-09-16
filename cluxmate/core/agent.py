@@ -357,6 +357,8 @@ class AgentLoop:
         session_log: SessionLog | None = None,
         mode: str = "default",
         sandbox: str = "off",
+        trusted: bool = True,
+        trust_source: str = "default",
         hooks: HookManager | None = None,
         cwd: str | None = None,
         retrieval: Any = None,
@@ -396,6 +398,11 @@ class AgentLoop:
         # audit metadata (NOT model-visible; the model learns the boundary only
         # empirically from denials). The builder computes the real value.
         self.sandbox = sandbox
+        # Project trust decision (core/trust.py) — recorded in request/header as
+        # audit metadata (NOT model-visible; the model learns it from the
+        # source:"trust" injection instead).
+        self.trusted = trusted
+        self.trust_source = trust_source
         # Current turn/step, set only while a logged run() is in flight so the
         # per-step helpers know where to place assistant/tool events.
         self._log_turn: int | None = None
@@ -983,6 +990,10 @@ class AgentLoop:
                         # AgentLoop.sandbox). A mode switch to/from yolo re-arms or
                         # disarms the sandbox, so it surfaces as a `change` header.
                         "sandbox": self.sandbox,
+                        # Project trust decision for this session's working
+                        # directory — audit metadata only (see AgentLoop.trusted).
+                        "trusted": self.trusted,
+                        "trust_source": self.trust_source,
                         # Reasoning effort is model-visible (it changes the request
                         # the provider sends), so it belongs in the logged envelope
                         # — a switch mid-session then surfaces as a `change` header.
