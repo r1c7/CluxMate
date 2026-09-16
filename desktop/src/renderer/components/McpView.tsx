@@ -306,6 +306,32 @@ function HelpPage({ onBack }: { onBack: () => void }) {
         <SampleBlock title={t('mcp.helpStdio')} code={STDIO_SAMPLE} />
         <SampleBlock title={t('mcp.helpHttp')} code={HTTP_SAMPLE} />
         <p className="mt-2 text-[11px] text-ink-faint leading-relaxed">{t('mcp.helpHttpNote')}</p>
+
+        <div className="mt-4">
+          <h4 className="text-[10px] uppercase tracking-wide text-ink-faint/70 mb-1">
+            {t('mcp.helpFields')}
+          </h4>
+          <ul className="text-[11px] text-ink-soft list-disc list-inside space-y-1 leading-relaxed">
+            <li>{t('mcp.helpFieldCommand')}</li>
+            <li>{t('mcp.helpFieldDisabled')}</li>
+            <li>{t('mcp.helpFieldEnvVar')}</li>
+            <li>{t('mcp.helpFieldAuthEnv')}</li>
+            <li>{t('mcp.helpFieldNaming')}</li>
+          </ul>
+        </div>
+
+        <p className="mt-4 text-[11px] text-ink-soft leading-relaxed">{t('mcp.helpSandbox')}</p>
+
+        <div className="mt-4">
+          <h4 className="text-[10px] uppercase tracking-wide text-ink-faint/70 mb-1">
+            {t('mcp.helpNotes')}
+          </h4>
+          <ul className="text-[11px] text-ink-faint list-disc list-inside space-y-1">
+            <li>{t('mcp.helpNoteRestart')}</li>
+            <li>{t('mcp.helpNoteToggle')}</li>
+            <li>{t('mcp.helpNoteFailed')}</li>
+          </ul>
+        </div>
       </div>
     </div>
   )
