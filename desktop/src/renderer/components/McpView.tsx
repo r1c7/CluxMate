@@ -28,6 +28,36 @@ const STATUS_DOT: Record<string, string> = {
   disconnected: 'bg-slate-300',
 }
 
+// Copyable config samples (language-neutral — they are JSON, and the field
+// names must match cluxmate/core/mcp.py byte for byte, so they are NOT i18n).
+// Deliberately free of `${` sequences: inside a TS template literal those
+// would be interpolation, and a sample that silently renders as an empty
+// string is worse than one that teaches the feature in the field notes.
+const STDIO_SAMPLE = `{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "env": { "SOME_TOKEN": "…" },
+      "disabled": false
+    }
+  }
+}`
+
+const HTTP_SAMPLE = `{
+  "mcpServers": {
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "oauth": {
+        "client_id": "…",
+        "client_secret_env": "LINEAR_MCP_SECRET",
+        "scopes": "read write",
+        "callback_port": 0
+      }
+    }
+  }
+}`
+
 // Main-area view (swaps in for ChatView) that lists configured MCP servers on
 // the left and the selected server's tools on the right. The only mutations are
 // the mcp.json disable toggle (takes effect next session, not hot-swapped), the
@@ -272,8 +302,49 @@ function HelpPage({ onBack }: { onBack: () => void }) {
             {t('mcp.helpLocationsBody')}
           </p>
         </div>
+
+        <SampleBlock title={t('mcp.helpStdio')} code={STDIO_SAMPLE} />
+        <SampleBlock title={t('mcp.helpHttp')} code={HTTP_SAMPLE} />
+        <p className="mt-2 text-[11px] text-ink-faint leading-relaxed">{t('mcp.helpHttpNote')}</p>
       </div>
     </div>
+  )
+}
+
+// One copyable JSON block: title row + copy button + monospace body.
+function SampleBlock({ title, code }: { title: string; code: string }) {
+  const t = useT()
+  return (
+    <div className="mt-4 rounded-md border border-surface-border bg-surface-raised/30 overflow-hidden">
+      <div className="px-3 py-1.5 border-b border-surface-border flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wide text-ink-faint/70">{title}</span>
+        <CopyButton text={code} label={t('common.copy')} copiedLabel={t('mcp.helpCopied')} />
+      </div>
+      <pre className="px-3 py-2 text-[11px] font-mono text-ink-soft/90 overflow-x-auto">{code}</pre>
+    </div>
+  )
+}
+
+// Copy through the main process: the renderer's navigator.clipboard is flaky
+// under file:// (see the CLIPBOARD_WRITE handler in ipc-handlers.ts).
+function CopyButton({ text, label, copiedLabel }: { text: string; label: string; copiedLabel: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await window.electronAPI.writeClipboard(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+  return (
+    <button
+      onClick={copy}
+      className="ml-auto text-[11px] text-accent hover:text-accent-hover transition-colors"
+    >
+      {copied ? copiedLabel : label}
+    </button>
   )
 }
 

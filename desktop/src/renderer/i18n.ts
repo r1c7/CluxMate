@@ -349,6 +349,10 @@ const en = {
   'mcp.helpIntro': 'MCP servers are configured in a JSON file. This page is the full reference: both config locations, local (stdio) and remote (HTTP/OAuth) examples, and when changes take effect.',
   'mcp.helpLocations': 'Config files',
   'mcp.helpLocationsBody': '~/.cluxmate/mcp.json          global  — every project\n<project>/.cluxmate/mcp.json  project — merged over the global file',
+  'mcp.helpStdio': 'Local (stdio) server',
+  'mcp.helpHttp': 'Remote (HTTP + OAuth) server',
+  'mcp.helpHttpNote': 'oauth is valid on url servers only — on a stdio server it is a config error. A url server without oauth shows a "Log in" button when it answers 401. Static credentials go in headers ({"Authorization": "Bearer …"}) or in authorization_env.',
+  'mcp.helpCopied': 'Copied',
   // ── MCP OAuth (interactive login lives in the Python process; this panel only
   //    starts it, reports the waiting state and shows the resulting token state) ──
   'mcp.login': 'Log in',
@@ -905,6 +909,10 @@ const zh: Record<keyof typeof en, string> = {
   'mcp.helpIntro': 'MCP 服务器通过 JSON 文件配置。本页是完整参考：两个配置文件位置、本地（stdio）与远程（HTTP/OAuth）示例，以及改动何时生效。',
   'mcp.helpLocations': '配置文件',
   'mcp.helpLocationsBody': '~/.cluxmate/mcp.json          全局——所有项目\n<项目>/.cluxmate/mcp.json    项目——深合并覆盖全局',
+  'mcp.helpStdio': '本地（stdio）服务器',
+  'mcp.helpHttp': '远程（HTTP + OAuth）服务器',
+  'mcp.helpHttpNote': 'oauth 只对 url 服务器有效——写在 stdio 服务器上是配置错误。不带 oauth 的 url 服务器收到 401 时会出现「登录」按钮。静态凭据写在 headers（{"Authorization": "Bearer …"}）或 authorization_env 里。',
+  'mcp.helpCopied': '已复制',
   'mcp.login': '登录',
   'mcp.logout': '登出',
   'mcp.authPending': '等待浏览器…',
