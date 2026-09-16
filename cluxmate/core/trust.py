@@ -201,6 +201,16 @@ class TrustStore:
             raise ValueError(f"invalid trust status: {status!r}")
         self._session[os.path.normcase(canonical(cwd))] = status
 
+    def clear_session(self, cwd: str) -> None:
+        """Drop this run's override for ``cwd``, if any.
+
+        A persisted decision is the user's answer for the DIRECTORY; an override
+        answers only this process. Keeping the override on top of a fresh
+        registry write would let it shadow that write — a persisted ``denied``
+        would still resolve as ``trusted`` for the rest of the run.
+        """
+        self._session.pop(os.path.normcase(canonical(cwd)), None)
+
     def status(self, cwd: str) -> str:
         return self.resolve(cwd)[0]
 

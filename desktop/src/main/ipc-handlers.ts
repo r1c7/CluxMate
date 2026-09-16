@@ -3,8 +3,10 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
+import { trustChangeRestartsBridge } from '../shared/trust-rules'
+import { canonicalCwdKey } from './cwd-key'
 import { AgentBridge } from './agent-bridge'
 import { setAttention } from './attention'
 import * as sessionStore from './session-store'
@@ -17,10 +19,25 @@ const bridges = new Map<string, AgentBridge>()
 const pendingSpawns = new Map<string, Promise<void>>()
 let activeSessionId: string | null = null
 
-// Session-only trust decisions ("trust this run only"), keyed by cwd: they are
-// re-sent on every spawn because the Python process that held the in-memory
-// override is killed on a bridge restart.
+// Session-only trust decisions ("trust this run only"), keyed by the CANONICAL
+// cwd (canonicalCwdKey): they are re-sent on every spawn because the Python
+// process that held the in-memory override is killed on a bridge restart, and a
+// variant spelling of the directory must not file the decision under a second
+// key that the respawn then misses.
 const sessionTrust = new Map<string, 'trusted' | 'denied'>()
+
+// Kill the session's bridge when a trust write changed the answer for the
+// directory it is running in, so the next interaction re-initializes without the
+// config the user just revoked (see trustChangeRestartsBridge). Both snapshots
+// come from the live process itself, so the comparison is against the answer it
+// actually resolved, not the one the renderer asked for.
+function restartBridgeOnTrustChange(sid: string, cwd: string, before: TrustSnapshot | null, after: TrustSnapshot | null) {
+  const live = bridges.get(sid)
+  if (!live) return
+  if (!trustChangeRestartsBridge(before?.status, after?.status, cwd, live._spawnCwd, sameCwd)) return
+  bridges.delete(sid)
+  live.kill().catch(() => { /* already gone */ })
+}
 
 // Full session teardown shared by SESSION_DELETE and GROUP_DELETE: DB row +
 // on-disk logs first, then the bridge, then the active pointer.
@@ -484,7 +501,7 @@ async function ensureBridge(sid: string, cwd: string, modelId: string): Promise<
     }
   }
   bridges.set(sid, b)
-  const spawnPromise = b.spawn(cwd, modelId, sid, sessionTrust.get(cwd)).catch((e) => {
+  const spawnPromise = b.spawn(cwd, modelId, sid, sessionTrust.get(canonicalCwdKey(cwd))).catch((e) => {
     console.error(`Agent spawn failed for ${sid} at ${cwd}:`, e?.message)
     bridges.delete(sid)
   })
@@ -813,7 +830,16 @@ export function registerIpcHandlers() {
 
   ipcMain.handle(IPC.TRUST_REMOVE, async (_, sid: string, cwd: string, modelId: string) => {
     const b = await ensureBridge(sid, cwd, modelId)
-    return b.call('trust/remove', { cwd })
+    // The answer the live process is running with, read BEFORE the write: the
+    // restart decision below is a comparison between the two, not a guess from
+    // what the caller asked for.
+    const before = (await b.call('trust/get', { cwd })) as TrustSnapshot
+    const result = (await b.call('trust/remove', { cwd })) as TrustSnapshot
+    // remove() forgets the registry entry only — a session-only answer to the
+    // same directory stands (it lives in the Python process and in sessionTrust),
+    // so there is nothing to clean up here; the restart decision sees both.
+    restartBridgeOnTrustChange(sid, cwd, before, result)
+    return result
   })
 
   ipcMain.handle(IPC.TRUST_SET, async (
@@ -821,26 +847,24 @@ export function registerIpcHandlers() {
     status: 'trusted' | 'denied', persist: boolean,
   ) => {
     const b = await ensureBridge(sid, cwd, modelId)
+    const before = (await b.call('trust/get', { cwd })) as TrustSnapshot
     const result = await b.call('trust/set', { cwd, status, persist })
     // An invalid status comes back as an ordinary RESULT payload carrying
     // `error`, not as a JSON-RPC error, so it has to be surfaced here — passing
     // it through would read as a recorded decision in the renderer.
     const error = (result as { error?: unknown } | null)?.error
     if (typeof error === 'string') throw new Error(error)
-    if (persist) sessionTrust.delete(cwd)
-    else sessionTrust.set(cwd, status)
+    const key = canonicalCwdKey(cwd)
+    if (persist) sessionTrust.delete(key)
+    else sessionTrust.set(key, status)
     // Trusting a directory changes exactly what initialize loads (hooks, MCP,
-    // skills, permissions) — same class as the grants / forbid-read toggles, so
-    // kill the bridge and let the next interaction re-initialize with the new
-    // decision instead of trying to hot-swap it. A `denied` answer only removes
-    // access, so it needs no respawn.
-    if (status === 'trusted') {
-      const live = bridges.get(sid)
-      if (live) {
-        bridges.delete(sid)
-        live.kill().catch(() => { /* already gone */ })
-      }
-    }
+    // skills, subagents, always-allow rules) — and so does denying it: an agent
+    // that already loaded that config keeps running it until its process dies,
+    // because Python only recomputes the decision in `initialize` and `trust/set`
+    // just rewrites the registry. The same class as the grants / forbid-read
+    // toggles, so the bridge is killed and the next interaction re-initializes
+    // with the new decision instead of trying to hot-swap it.
+    restartBridgeOnTrustChange(sid, cwd, before, result as TrustSnapshot)
     return result
   })
 

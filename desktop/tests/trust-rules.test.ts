@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isUntrusted, shouldPromptTrust, trustSummary } from '../src/shared/trust-rules.ts'
+import { isUntrusted, shouldPromptTrust, trustSummary, trustChangeRestartsBridge } from '../src/shared/trust-rules.ts'
 
 const snapshot = (status: string, findings: { kind: string; label: string; path: string }[] = []) => ({
   cwd: 'E:\\proj', status, source: 'registry', findings, store: {},
@@ -46,4 +46,44 @@ test('trustSummary lists labels then paths', () => {
     { kind: 'mcp', label: 'MCP servers (mcp.json)', path: '.cluxmate/mcp.json' },
   ])
   assert.equal(trustSummary(s), 'Hooks (settings.json), MCP servers (mcp.json)')
+})
+
+// ── the bridge-restart decision (the main process's kill rule) ──────────────
+// The main process has no Electron harness here, so the decision itself is the
+// pure function it calls: `sameDir` stands in for its realpath comparison.
+const sameDir = (a: string, b: string) =>
+  a.toLowerCase().replace(/[\\/]+$/, '') === b.toLowerCase().replace(/[\\/]+$/, '')
+
+const restarts = (before: string | null, after: string | null, cwd = 'E:\\proj', liveCwd: string | null = 'E:\\proj') =>
+  trustChangeRestartsBridge(before, after, cwd, liveCwd, sameDir)
+
+test('every decision change tears the running process down', () => {
+  // Revoking is the case that used to be a no-op: the agent kept running the
+  // hooks / MCP clients / skills it had loaded while trusted.
+  assert.equal(restarts('trusted', 'denied'), true)
+  assert.equal(restarts('trusted', 'unknown'), true) // trust/remove
+  assert.equal(restarts('denied', 'unknown'), true) // trust/remove after a denial
+  assert.equal(restarts('unknown', 'trusted'), true)
+  assert.equal(restarts('unknown', 'denied'), true)
+  assert.equal(restarts('denied', 'trusted'), true)
+})
+
+test('an unchanged answer leaves the warm process alone', () => {
+  for (const status of ['trusted', 'denied', 'unknown']) {
+    assert.equal(restarts(status, status), false)
+  }
+})
+
+test('a change to another directory does not cost this session its process', () => {
+  // Editing an unrelated registry entry: the live bridge is running elsewhere.
+  assert.equal(
+    trustChangeRestartsBridge('trusted', 'denied', 'E:\\other', 'E:\\proj', sameDir),
+    false,
+  )
+})
+
+test('nothing loaded means nothing to tear down', () => {
+  assert.equal(restarts('trusted', 'denied', 'E:\\proj', null), false)
+  assert.equal(restarts(null, 'denied'), false)
+  assert.equal(restarts('trusted', null), false)
 })

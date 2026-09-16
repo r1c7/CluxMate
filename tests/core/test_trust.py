@@ -107,6 +107,29 @@ def test_session_override_beats_a_registry_denial(tmp_path):
     assert resolve_trust(str(tmp_path), store).source == "session"
 
 
+def test_clear_session_drops_the_override(tmp_path):
+    store = _store(tmp_path)
+    target = tmp_path / "proj"
+    target.mkdir()
+    store.set_session(str(target), TRUSTED)
+    # A variant spelling of the same directory must clear it too.
+    store.clear_session(str(target) + os.sep)
+    assert store.session_status(str(target)) == UNKNOWN
+    assert store.status(str(target)) == UNKNOWN
+    store.clear_session(str(target))  # nothing recorded: a no-op, not a KeyError
+
+
+def test_a_persisted_set_clears_an_earlier_override(tmp_path):
+    store = _store(tmp_path)
+    target = tmp_path / "proj"
+    target.mkdir()
+    store.set_session(str(target), TRUSTED)
+    store.set(str(target), DENIED)
+    store.clear_session(str(target))
+    assert resolve_trust(str(target), store).status == DENIED
+    assert resolve_trust(str(target), store).source == "registry"
+
+
 def test_remove_clears_the_entry(tmp_path):
     store = _store(tmp_path)
     store.set(str(tmp_path), TRUSTED)

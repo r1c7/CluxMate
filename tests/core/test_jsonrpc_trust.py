@@ -91,6 +91,26 @@ def test_trust_set_persists_and_remove_reverts(tmp_path, monkeypatch):
     assert removed["store"] == {}
 
 
+def test_a_persisted_set_supersedes_this_runs_override(tmp_path, monkeypatch):
+    """The override is resolved before the registry, so a persisted answer has to
+    clear it — otherwise persisting a revocation still reports the old
+    session-only grant as trusted."""
+    _Emitter(monkeypatch)
+    s = _server(tmp_path, monkeypatch)
+    from cluxmate.core.trust import UNKNOWN
+
+    granted = s._trust_set({"cwd": s._cwd, "status": "trusted", "persist": False})
+    assert granted["status"] == "trusted"
+    assert granted["source"] == "session"
+
+    revoked = s._trust_set({"cwd": s._cwd, "status": "denied"})
+    assert revoked["status"] == "denied"
+    assert revoked["source"] == "registry"
+    assert s._trust_store.session_status(s._cwd) == UNKNOWN
+    # And it stays that way on a later read of the same directory.
+    assert s._trust_get({"cwd": s._cwd})["status"] == "denied"
+
+
 def test_initialize_announces_an_undecided_directory(tmp_path, monkeypatch):
     emitter = _Emitter(monkeypatch)
     s = _server(tmp_path, monkeypatch)

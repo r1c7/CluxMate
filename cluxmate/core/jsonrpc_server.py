@@ -1632,6 +1632,11 @@ class JsonRpcServer:
             return {"error": f"invalid status: {status!r}"}
         if params.get("persist", True):
             self._trust_store.set(cwd, status)
+            # A persisted decision supersedes this run's "trust for this run
+            # only": the override is resolved FIRST, so leaving it in place would
+            # keep reporting it — persisting a denial would still read back as
+            # trusted for the rest of the process.
+            self._trust_store.clear_session(cwd)
         else:
             self._trust_store.set_session(cwd, status)
         return self._trust_get({"cwd": cwd})
