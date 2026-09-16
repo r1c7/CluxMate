@@ -8,6 +8,7 @@ import time
 from cluxmate.core.agent import AgentCallbacks
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.session_log import SessionHeader, SessionLog
+from cluxmate.core.trust import DENIED, TRUSTED
 
 
 class _PrintingCallbacks(AgentCallbacks):
@@ -114,6 +115,9 @@ async def run_headless(
     builder.with_subagents()
     builder.with_model(entry.get("model_name", ""))
     builder.with_context_1m(entry.get("context_1m", False))
+    decision = _trust_decision(cwd)
+    _warn_untrusted(cwd, decision)
+    builder.with_trust(decision)
 
     agent = builder.build(session_log=_make_log(entry))
     hooks = builder._hooks_manager()
@@ -160,6 +164,9 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
     builder.with_subagents()
     builder.with_model(entry.get("model_name", ""))
     builder.with_context_1m(entry.get("context_1m", False))
+    decision = _trust_decision(cwd)
+    _prompt_trust(cwd, decision)
+    builder.with_trust(decision)
 
     log = _make_log(entry)
     agent = builder.build(session_log=log)
@@ -178,6 +185,8 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
     if eff:
         print(f"Reasoning effort: {eff}")
     print(f"Working directory: {cwd}")
+    if decision.gated:
+        print("Project config: NOT loaded (directory not trusted)")
     print()
 
     history = []
@@ -352,6 +361,104 @@ def run_mcp(args) -> int:
     return 0
 
 
+# ── project trust ─────────────────────────────────────────────────────────
+
+# One store per process (the registry is a file; the overrides are per-run).
+_TRUST_STORE = None
+
+
+def _trust_store():
+    global _TRUST_STORE
+    if _TRUST_STORE is None:
+        from cluxmate.core.trust import TrustStore
+
+        _TRUST_STORE = TrustStore()
+    return _TRUST_STORE
+
+
+def _trust_decision(cwd: str):
+    from cluxmate.core.trust import resolve_trust
+
+    return resolve_trust(cwd, _trust_store())
+
+
+def _warn_untrusted(cwd: str, decision) -> None:
+    """Headless/REPL notice — there is no prompt outside a TTY."""
+    if not decision.gated:
+        return
+    kinds = ", ".join(f.kind for f in decision.findings)
+    print(
+        f"warning: {cwd} is not trusted — project config ({kinds}) was NOT "
+        f"loaded; run `cluxmate trust add` in it to enable hooks/MCP/etc.",
+        file=sys.stderr,
+    )
+
+
+def _prompt_trust(cwd: str, decision) -> None:
+    """Ask once, interactively (REPL only). No TTY ⇒ leave the registry alone."""
+    if not decision.pending or not sys.stdin.isatty():
+        _warn_untrusted(cwd, decision)
+        return
+    print(f"\n{cwd} ships project config under .cluxmate/:")
+    for f in decision.findings:
+        print(f"  - {f.label}  ({f.path})")
+    print("Loading it lets this repository run hooks / MCP servers and pre-authorize tools.")
+    while True:
+        try:
+            answer = input(
+                "Trust this directory? [1] yes, remember  [2] yes, this run only  "
+                "[3] no: "
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+        if answer == "1":
+            _trust_store().set(cwd, TRUSTED)
+            return
+        if answer == "2":
+            _trust_store().set_session(cwd, TRUSTED)
+            return
+        if answer == "3":
+            _trust_store().set(cwd, DENIED)
+            return
+
+
+def run_trust(args) -> int:
+    """`cluxmate trust [list|add|deny|remove|status] [path]`."""
+    path = os.path.abspath(args.path) if getattr(args, "path", None) else os.getcwd()
+    action = getattr(args, "action", "list") or "list"
+    store = _trust_store()
+    if action == "list":
+        entries = store.entries()
+        if not entries:
+            print("No trust decisions recorded.")
+            return 0
+        for entry_path, status in sorted(entries.items()):
+            print(f"{status:8} {entry_path}")
+        return 0
+    if action == "add":
+        store.set(path, TRUSTED)
+        print(f"trusted: {path}")
+        return 0
+    if action == "deny":
+        store.set(path, DENIED)
+        print(f"denied: {path}")
+        return 0
+    if action == "remove":
+        print(f"removed: {path}" if store.remove(path)
+              else f"no decision recorded for {path}")
+        return 0
+    decision = _trust_decision(path)
+    print(f"status: {decision.status} ({decision.source})")
+    if decision.findings:
+        print("project config found:")
+        for f in decision.findings:
+            print(f"  {f.kind:11} {f.path}")
+    else:
+        print("no project config found — nothing to gate")
+    return 0
+
+
 async def run_tui() -> None:
     """Launch the Textual TUI."""
     from cluxmate.tui.app import CluxMateApp
@@ -407,6 +514,14 @@ def main():
     mcp_status.add_argument("--cwd", default=None)
     mcp_status.add_argument("--json", action="store_true")
 
+    # cluxmate trust list|add|deny|remove|status [path]
+    trust_parser = sub.add_parser("trust", help="Project trust for <dir>/.cluxmate config")
+    trust_parser.add_argument(
+        "action", nargs="?", default="list",
+        choices=["list", "add", "deny", "remove", "status"],
+    )
+    trust_parser.add_argument("path", nargs="?", default=None)
+
     # cluxmate -p "..."
     parser.add_argument("-p", "--prompt", help="Run in headless mode with the given prompt.")
     parser.add_argument("--model-id", dest="model_id", help="Config model entry id to use (defaults to the active model).")
@@ -426,6 +541,9 @@ def main():
 
     if args.command == "mcp":
         sys.exit(run_mcp(args))
+
+    if args.command == "trust":
+        sys.exit(run_trust(args))
 
     if args.prompt:
         asyncio.run(run_headless(args.prompt, args.model_id, args.reasoning_effort))
