@@ -409,6 +409,37 @@ def test_mode_injection_on_change_and_invalidate(monkeypatch):
     assert "<plan_mode>" not in inj[0][1]
 
 
+def test_reopen_restores_the_mode_fingerprint_beside_a_stale_injection(monkeypatch):
+    """A stale memory/skill part must not cost the mode fingerprint.
+
+    Reopening a log reconstructs each source from its own evidence: a stale part
+    means "re-inject the current parts" and says NOTHING about the mode
+    announcement recorded in request/header — which the method's docstring
+    promises to restore. Skipping it would re-announce the whole mode block on
+    the reopened session's first turn.
+    """
+    log = make_log()
+    log.append("request/header", {"header": {"config": {"mode": "plan"}}})
+    log.append(
+        "user/message",
+        {"message": {"role": "user", "content": "<plan_mode>...</plan_mode>"}, "source": "mode"},
+        surface_op=APPEND,
+    )
+    log.append(
+        "user/message",
+        {"message": {"role": "user", "content": "OLD MEMORY"}, "source": "memory"},
+        surface_op=APPEND,
+    )
+
+    reopened = AgentBuilder(cwd=".", provider=RecordingProvider([])).with_mode("plan")
+    # The project memory differs from what that session last injected → stale.
+    monkeypatch.setattr(reopened, "render_injections", lambda: [("memory", "NEW MEMORY")])
+    reopened.attach_session_log(log)
+
+    assert reopened._last_mode == "plan"
+    assert [src for src, _ in reopened.injections_for_turn()] == ["memory"]
+
+
 @pytest.mark.asyncio
 async def test_repeat_reminder_logged_as_loop_guard_message():
     """The doom-loop reminder is logged as a source:"loop-guard" user/message,

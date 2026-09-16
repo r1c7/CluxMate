@@ -320,6 +320,10 @@ class AgentBuilder:
         ``trusted=decision.trusted``; the injection tells the model what was
         withheld and the AgentLoop records it in request/header for the audit
         trail.
+
+        Call it before the first ``_get_tools()``/``build()``: the readers are
+        constructed lazily and cached on first use, so a later call leaves
+        already-built managers at the default ``trusted=True``.
         """
         self._trust = decision
         return self
@@ -1029,11 +1033,18 @@ class AgentBuilder:
 
         current = self.render_injections()
         if current:
+            # `stale` only suppresses the signature: the mode block below must
+            # stay reachable, because it describes a DIFFERENT source (the
+            # request/header mode) than the stale parts do. Returning early here
+            # would re-announce the whole mode block on the first turn.
+            stale = False
             for src, content in current:
                 seen = last_seen.get(src)
                 if seen is None or seen[0] != content or seen[1] < last_compaction_seq:
-                    return  # at least one part is stale → re-inject all of them
-            self._last_injection_sig = tuple(current)
+                    stale = True  # ≥1 part is stale → drop the signature, re-inject all
+                    break
+            if not stale:
+                self._last_injection_sig = tuple(current)
 
         if last_header_mode is not None and last_mode_seq > last_compaction_seq:
             self._last_mode = last_header_mode
