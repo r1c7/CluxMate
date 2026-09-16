@@ -251,6 +251,39 @@ def test_logout_clears_credentials(tmp_path, monkeypatch, fake):
         s._shutdown_mcp()
 
 
+def test_logout_during_a_flow_discards_its_result(tmp_path, monkeypatch, fake):
+    """A logout that lands while the user is still in the browser must NOT be
+    silently undone by the flow's own store.put(): the epoch captured at start
+    no longer matches, so the record is dropped (`cancelled`, nothing stored)."""
+    sent.clear()
+    server = fake()
+    s = _server(tmp_path, monkeypatch, server.mcp_url)
+    try:
+        import cluxmate.core.mcp_auth_store as store_mod
+
+        real_authorize = MCPOAuthFlow.authorize
+        finished = threading.Event()
+
+        def _slow_authorize(self, challenge=None):
+            record = real_authorize(self, challenge)
+            finished.set()          # the record exists; the thread is about to persist
+            time.sleep(0.4)         # ...but logout gets there first
+            return record
+
+        monkeypatch.setattr(MCPOAuthFlow, "authorize", _slow_authorize)
+        monkeypatch.setattr(webbrowser, "open", _browser(server))
+        assert s._start_mcp_auth("remote")["status"] == "started"
+        assert finished.wait(timeout=15)
+        s._dispatch(3, "mcp/auth/logout", {"server": "remote"})
+        assert _wait_for(lambda: any(
+            p.get("method") == "mcp/auth/completed" for p in sent), timeout=15)
+        done = [p for p in sent if p.get("method") == "mcp/auth/completed"][-1]
+        assert done["params"]["status"] == "cancelled"
+        assert store_mod.MCPAuthStore().get("remote", server.mcp_url) is None
+    finally:
+        s._shutdown_mcp()
+
+
 def test_a_failed_thread_start_does_not_wedge_the_server(tmp_path, monkeypatch, fake):
     """Thread.start() raising (exhaustion) must roll the inflight marker back and
     still emit a completion — otherwise every later start answers

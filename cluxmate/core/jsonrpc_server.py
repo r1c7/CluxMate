@@ -541,6 +541,11 @@ class JsonRpcServer:
         # The live flow per server, so mcp/auth/cancel can interrupt the 300 s
         # callback wait instead of just reporting that something is running.
         self._auth_flows: dict[str, Any] = {}
+        # Per-server generation counter, bumped by a logout. A flow captures the
+        # value it started with and refuses to persist its record when the epoch
+        # moved: otherwise a logout that lands while the user is still in the
+        # browser is silently undone by the flow's own store.put().
+        self._auth_epoch: dict[str, int] = {}
         self._auth_lock = threading.Lock()
         # Per-project tool-approval policy. Bound to the default cwd here; rebuilt
         # against the real workspace in initialize() once the desktop sends it, so
@@ -1369,10 +1374,15 @@ class JsonRpcServer:
             if server in self._auth_inflight:
                 return {"status": "already_running"}
             self._auth_inflight.add(server)
+            # Same block, same lock: a logout landing right after this read
+            # either happens before it (flow sees the new epoch and refuses to
+            # persist) or after the flow is registered in _auth_flows (the
+            # logout cancels it) — never in between, where it would be lost.
+            epoch = self._auth_epoch.get(server, 0)
         gen = self._init_gen
         try:
             threading.Thread(
-                target=self._run_mcp_auth, args=(server, cfg, gen), daemon=True
+                target=self._run_mcp_auth, args=(server, cfg, gen, epoch), daemon=True
             ).start()
         except Exception as e:  # thread exhaustion: the flow never started
             # Roll the marker back and emit the completion here: _run_mcp_auth's
@@ -1388,7 +1398,7 @@ class JsonRpcServer:
             return {"status": "failed", "error": str(e)}
         return {"status": "started"}
 
-    def _run_mcp_auth(self, server: str, cfg: Any, gen: int) -> None:
+    def _run_mcp_auth(self, server: str, cfg: Any, gen: int, epoch: int) -> None:
         status, error = "failed", None
         try:
             from cluxmate.core.mcp_auth_store import MCPAuthStore
@@ -1400,6 +1410,13 @@ class JsonRpcServer:
             with self._auth_lock:
                 self._auth_flows[server] = flow
             record = flow.authorize(challenge)
+            with self._auth_lock:
+                superseded = self._auth_epoch.get(server, 0) != epoch
+            if superseded:
+                # A logout landed while the user was in the browser: persisting
+                # now would silently undo it (and re-enable the server the user
+                # just logged out of). Report it as cancelled, persist nothing.
+                raise OAuthError("authorization was superseded by a logout", "cancelled")
             store.put(server, record)
             changed = self._builder.reload_mcp_server(server) if self._builder else False
             if changed and gen == self._init_gen and self._builder is not None:
@@ -1435,6 +1452,14 @@ class JsonRpcServer:
     def _logout_mcp_auth(self, server: str) -> dict[str, Any]:
         from cluxmate.core.mcp_auth_store import MCPAuthStore
 
+        # Bump the epoch BEFORE the delete: any flow that is already waiting in
+        # the browser captured the previous value, so it can no longer persist a
+        # credential after this point (see _run_mcp_auth).
+        with self._auth_lock:
+            self._auth_epoch[server] = self._auth_epoch.get(server, 0) + 1
+            flow = self._auth_flows.get(server)
+        if flow is not None:
+            flow.cancel()   # a waiting flow must not keep the user hanging
         removed = MCPAuthStore().delete(server)
         changed = self._builder.reload_mcp_server(server) if self._builder else False
         if changed and self._builder is not None:
