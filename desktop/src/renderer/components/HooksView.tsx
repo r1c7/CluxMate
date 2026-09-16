@@ -101,7 +101,7 @@ export default function HooksView() {
   }
 
   return (
-    <div className="flex-1 flex flex-col min-w-0">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0">
       {/* Header */}
       <div className="h-9 border-b border-surface-border flex items-center gap-2 px-4 flex-shrink-0">
         <span className="text-xs font-semibold text-ink-soft">{t('hooks.title')}</span>
@@ -215,11 +215,13 @@ function HookRow({ hook }: { hook: HookEntry }) {
 
 // Full-page help reference. Rendered in place of the hooks list (its own page,
 // with its own header + back button), so the long content gets the whole area
-// and scrolls naturally.
+// and scrolls naturally. `min-h-0` on the root is what makes that scroll work:
+// as a flex item its automatic minimum size is its content height, so without
+// it the page grows past the viewport and is clipped (see McpView's HelpPage).
 function HelpPage({ onBack }: { onBack: () => void }) {
   const t = useT()
   return (
-    <div className="flex-1 flex flex-col min-w-0">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0">
       <div className="h-9 border-b border-surface-border flex items-center gap-2 px-4 flex-shrink-0">
         <button
           onClick={onBack}
