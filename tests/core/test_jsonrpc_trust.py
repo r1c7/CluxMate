@@ -6,6 +6,7 @@ from pathlib import Path
 from cluxmate.core import jsonrpc_server
 from cluxmate.core.jsonrpc_server import JsonRpcServer
 from cluxmate.core.session_log import SessionHeader, SessionLog
+from cluxmate.core.trust import canonical
 
 
 class _Provider:
@@ -162,7 +163,10 @@ def test_the_rpcs_answer_under_their_colon_alias_and_fall_back_to_the_session_cw
     emitter = _Emitter(monkeypatch)
     s = _server(tmp_path, monkeypatch)
     s._dispatch(7, "trust:get", {})
-    assert emitter.result_for(7)["cwd"] == s._cwd
+    # The reply carries the CANONICAL form of the session's cwd (that is the
+    # registry key), which is not necessarily the spelling the process was
+    # started with.
+    assert emitter.result_for(7)["cwd"] == canonical(s._cwd)
     assert emitter.result_for(7)["status"] == "unknown"
 
     s._dispatch(8, "trust:set", {"status": "trusted"})
