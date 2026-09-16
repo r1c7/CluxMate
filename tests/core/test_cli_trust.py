@@ -138,6 +138,22 @@ def test_mcp_auth_refuses_a_server_from_an_untrusted_project(tmp_path, monkeypat
     assert "mcp.json" in err
 
 
+def test_mcp_auth_blames_the_gate_and_not_a_typo(tmp_path, monkeypatch, capsys):
+    """Withheld is not the same as absent: the error has to say which one it is."""
+    _home(tmp_path, monkeypatch)
+    cwd = _project(tmp_path)
+    _ship_a_server(cwd)
+
+    assert cli.run_mcp(_mcp_args(mcp_command="auth", name="proj-server", cwd=str(cwd))) == 1
+    error_line = next(
+        line for line in capsys.readouterr().err.splitlines()
+        if line.startswith("error:")
+    )
+    assert "unknown MCP server 'proj-server'" in error_line
+    assert "not trusted" in error_line
+    assert "trust add" in error_line
+
+
 def test_the_mcp_notice_stays_quiet_without_a_project_mcp_json(tmp_path, monkeypatch, capsys):
     _home(tmp_path, monkeypatch)
     cwd = tmp_path / "plain"

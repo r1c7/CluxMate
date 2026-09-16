@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from cluxmate import cli
 from cluxmate.cli import run_mcp
 from cluxmate.core.mcp_auth_store import MCPAuthStore
+from cluxmate.core.trust import TrustStore
 from tests.core.fake_mcp_http_server import FakeOAuthServer
 
 
@@ -33,6 +35,19 @@ def fake():
         s.stop()
 
 
+def _trust(cwd: Path) -> None:
+    """Record `cwd` as trusted in the redirected home.
+
+    These tests are about the OAuth flow, not the trust policy: `mcp` reads a
+    project mcp.json only from a trusted directory (the gate has its own
+    coverage in test_cli_trust.py). First drop the process-global store, which
+    is a cache bound to the home it was built with — one left by an earlier
+    test's home would answer for the wrong registry.
+    """
+    cli._TRUST_STORE = None
+    TrustStore().set(str(cwd), "trusted")
+
+
 def _write_config(tmp_path, mcp_url: str, extra: dict | None = None) -> str:
     cwd = tmp_path / "proj"
     (cwd / ".cluxmate").mkdir(parents=True)
@@ -40,6 +55,7 @@ def _write_config(tmp_path, mcp_url: str, extra: dict | None = None) -> str:
     entry.update(extra or {})
     (cwd / ".cluxmate" / "mcp.json").write_text(
         json.dumps({"mcpServers": {"remote": entry}}), encoding="utf-8")
+    _trust(cwd)
     return str(cwd)
 
 

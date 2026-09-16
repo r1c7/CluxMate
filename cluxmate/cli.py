@@ -248,6 +248,11 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
         history = result.history
 
 
+def _mcp_withheld(decision) -> bool:
+    """Whether the trust gate kept this directory's mcp.json out of `mcp`."""
+    return not decision.trusted and any(f.kind == "mcp" for f in decision.findings)
+
+
 def _mcp_withheld_notice(cwd: str, decision) -> None:
     """Name the project mcp.json `mcp` is withholding, on stderr.
 
@@ -255,7 +260,7 @@ def _mcp_withheld_notice(cwd: str, decision) -> None:
     the notice is noise. The exit code is untouched: a missing server is still
     "unknown server" to a caller, and stdout stays machine-readable.
     """
-    if decision.trusted or not any(f.kind == "mcp" for f in decision.findings):
+    if not _mcp_withheld(decision):
         return
     withheld = os.path.join(cwd, ".cluxmate", "mcp.json")
     print(
@@ -324,7 +329,18 @@ def run_mcp(args) -> int:
 
     cfg = configs.get(args.name)
     if cfg is None:
-        print(f"error: unknown MCP server {args.name!r}", file=sys.stderr)
+        if _mcp_withheld(decision):
+            # To the user staring at their own mcp.json this is indistinguishable
+            # from a typo, so name the gate as the cause and the way out.
+            print(
+                f"error: unknown MCP server {args.name!r} — its project "
+                f".cluxmate/mcp.json was not loaded because {cwd} is not "
+                f"trusted; run `cluxmate trust add` in it to enable its MCP "
+                f"servers",
+                file=sys.stderr,
+            )
+        else:
+            print(f"error: unknown MCP server {args.name!r}", file=sys.stderr)
         return 1
     if cfg.transport != "http":
         print(f"error: server {args.name!r} is local (stdio) — OAuth does not apply",
