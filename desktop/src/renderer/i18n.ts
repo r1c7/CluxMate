@@ -566,6 +566,7 @@ const en = {
   'trust.trusted': 'Trusted',
   'trust.denied': 'Denied',
   'trust.registry': 'Recorded decisions',
+  'trust.loadFailed': 'Failed to read the trust registry: {msg}',
   'trust.cannotRemember': 'This directory is not trusted, so grants cannot be remembered.',
 
   // ── store / errors ──
@@ -1156,6 +1157,7 @@ const zh: Record<keyof typeof en, string> = {
   'trust.trusted': '已信任',
   'trust.denied': '已拒绝',
   'trust.registry': '已记录的决定',
+  'trust.loadFailed': '读取信任注册表失败：{msg}',
   'trust.cannotRemember': '此目录未受信任，无法记住授权。',
 
   // ── store / errors ──

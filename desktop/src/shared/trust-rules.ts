@@ -30,6 +30,25 @@ export function shouldPromptTrust(snapshot: TrustSnapshot | null | undefined): b
   return snapshot.status === 'unknown' && snapshot.findings.length > 0
 }
 
+/**
+ * May this snapshot (re)open the trust card?
+ *
+ * `fetchEpoch` is the value of the renderer's answer counter when the fetch
+ * started, `currentEpoch` the value now: if the user answered while the reply
+ * was in flight, the reply describes the decision they just replaced, and
+ * re-opening the card would fight them. Otherwise the snapshot is the
+ * authoritative view, so an undecided directory with withheld config gets its
+ * card back even when the pushing notification was lost.
+ */
+export function shouldPromptFromFetch(
+  snapshot: TrustSnapshot | null | undefined,
+  fetchEpoch: number,
+  currentEpoch: number,
+): boolean {
+  if (fetchEpoch !== currentEpoch) return false
+  return shouldPromptTrust(snapshot)
+}
+
 /** One-line list of the withheld config families, for banners and cards. */
 export function trustSummary(snapshot: TrustSnapshot | null | undefined): string {
   if (!snapshot) return ''

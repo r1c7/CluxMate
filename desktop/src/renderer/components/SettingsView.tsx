@@ -340,6 +340,7 @@ export default function SettingsView() {
   // entering the section, re-fetch after every write (a changed answer restarts
   // the bridge, so the old process's view is not trusted).
   const activeTrust = useStore((s) => s.activeTrust)
+  const trustError = useStore((s) => s.trustError)
   const refreshTrust = useStore((s) => s.refreshTrust)
   const answerTrust = useStore((s) => s.answerTrust)
   const [trustBusy, setTrustBusy] = useState(false)
@@ -914,7 +915,17 @@ export default function SettingsView() {
                 title={t('trust.registry')}
                 badge={activeTrust ? <CountBadge n={trustEntries.length} /> : undefined}
               >
-                {!activeTrust ? (
+                {!activeTrust && trustError ? (
+                  // The registry has no source other than this reply — a failed
+                  // fetch must not leave the pane on "Loading…" forever.
+                  <div className="space-y-2">
+                    <p className="text-sm text-amber-600">{t('trust.loadFailed', { msg: trustError })}</p>
+                    <button
+                      onClick={() => { void refreshTrust() }}
+                      className="text-xs text-ink-soft hover:text-ink px-2 py-1 rounded border border-surface-border transition-colors"
+                    >{t('chat.retry')}</button>
+                  </div>
+                ) : !activeTrust ? (
                   // The snapshot is the registry's only source (it is read
                   // through the session's bridge) — "nothing recorded" would be
                   // a guess while it has not answered yet.

@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types'
 import { deriveSessionTitle } from '../../shared/session-title'
 import { markShadowed } from '../../shared/skill-rules'
+import { shouldPromptFromFetch } from '../../shared/trust-rules'
 import { defaultReasoningValue } from '../../shared/reasoning'
 import { editsFromToolInput } from '../components/MultiEditDiff'
 import { saveTheme, DEFAULT_THEME } from '../themes'
@@ -41,6 +42,14 @@ const DISPLAY_PERSIST_MS = 500
 const SEARCH_DEBOUNCE_MS = 200
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchSeq = 0
+
+// ── the trust card's stale-fetch guard ──
+// refreshTrust re-derives the prompt card from the authoritative snapshot (so a
+// dropped trust/required push cannot leave a gated directory with no way back to
+// a card), but a fetch that started BEFORE the user answered must not re-derive
+// from the answer they just replaced. Every answer bumps this epoch; a fetch
+// only touches the card when the epoch it started with is still current.
+let trustAnswerEpoch = 0
 
 // ── MCP OAuth waiting state ──
 // The interactive login runs in Python and its outcome arrives as a
@@ -256,6 +265,9 @@ interface AppState {
   // project-config panels' banner and the Settings "Project trust" section.
   // Refreshed by refreshTrust() (session switch / spawn / after any answer).
   activeTrust: TrustSnapshot | null
+  // Why the last refreshTrust() found nothing, if it failed — without it the
+  // registry pane could only show "Loading…" forever.
+  trustError: string | null
   // Derived from the active session's state — the plan strip's task list.
   todos: TodoItem[] | null
   // global
@@ -500,6 +512,7 @@ export const useStore = create<AppState>((set, get) => ({
   pendingQuestion: null,
   pendingTrust: null,
   activeTrust: null,
+  trustError: null,
   todos: null,
   workingDir: '',
   lastSentCwd: null,
@@ -1558,22 +1571,43 @@ export const useStore = create<AppState>((set, get) => ({
   // Current session's trust state, for the panels' banner and the settings pane.
   refreshTrust: async () => {
     const { activeSessionId, workingDir } = get()
-    if (!activeSessionId) { set({ activeTrust: null }); return }
+    if (!activeSessionId) { set({ activeTrust: null, trustError: null }); return }
+    // Captured before the RPC: an answer landing while it is in flight bumps the
+    // epoch, and this reply is then about a decision the user already replaced.
+    const epoch = trustAnswerEpoch
     try {
       const snapshot = await window.electronAPI.trustGet(activeSessionId, workingDir)
       // Stale-response guard (same shape as refreshGitInfo's): resolving the
       // answer can outlive the switch that asked for it, and the reply is only
       // about the directory the session had at request time — painting it over a
       // later session's panels would show the wrong project's trust state.
-      if (get().activeSessionId === activeSessionId && get().workingDir === workingDir) {
-        set({ activeTrust: snapshot })
+      if (get().activeSessionId !== activeSessionId || get().workingDir !== workingDir) return
+      set({ activeTrust: snapshot, trustError: null })
+      // The snapshot is the server-side authority on the card as well, so the
+      // card self-heals from a lost trust/required push. It only ever OPENS one:
+      // the user's own answer clears the card, and the epoch check keeps an
+      // in-flight fetch from re-opening the card they just answered.
+      if (shouldPromptFromFetch(snapshot, epoch, trustAnswerEpoch)) {
+        const states = new Map(get().sessionStates)
+        const ss = states.get(activeSessionId)
+        if (ss) ss.pendingTrust = snapshot
+        set({ sessionStates: states, pendingTrust: snapshot })
       }
-    } catch { /* best-effort — an unreachable bridge leaves the previous state */ }
+    } catch (e) {
+      // Distinguishable from "not answered yet": without this the registry pane
+      // (whose only source is this reply) reads "Loading…" forever.
+      if (get().activeSessionId === activeSessionId && get().workingDir === workingDir) {
+        set({ trustError: e instanceof Error ? e.message : String(e) })
+      }
+    }
   },
 
   answerTrust: async (status: 'trusted' | 'denied', persist: boolean) => {
     const { activeSessionId, workingDir, sessionStates } = get()
     if (!activeSessionId) return
+    // Close the card against every fetch already in flight (see refreshTrust):
+    // their snapshot predates this answer.
+    trustAnswerEpoch += 1
     const states = new Map(sessionStates)
     const ss = states.get(activeSessionId)
     if (ss) ss.pendingTrust = null

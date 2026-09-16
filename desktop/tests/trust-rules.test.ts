@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isUntrusted, shouldPromptTrust, trustSummary, trustChangeRestartsBridge, bridgesToRestart, planTrustCall } from '../src/shared/trust-rules.ts'
+import { isUntrusted, shouldPromptTrust, shouldPromptFromFetch, trustSummary, trustChangeRestartsBridge, bridgesToRestart, planTrustCall } from '../src/shared/trust-rules.ts'
 
 const snapshot = (status: string, findings: { kind: string; label: string; path: string }[] = []) => ({
   cwd: 'E:\\proj', status, source: 'registry', findings, store: {},
@@ -46,6 +46,26 @@ test('trustSummary lists labels then paths', () => {
     { kind: 'mcp', label: 'MCP servers (mcp.json)', path: '.cluxmate/mcp.json' },
   ])
   assert.equal(trustSummary(s), 'Hooks (settings.json), MCP servers (mcp.json)')
+})
+
+// ── the card derived from a fetched snapshot ───────────────────────────────
+// The renderer's self-healing path back to a card when the trust/required push
+// is lost, plus the guard that keeps the user's own answer winning.
+test('a fetched undecided snapshot re-opens the card', () => {
+  const s = snapshot('unknown', [{ kind: 'hooks', label: 'Hooks (settings.json)', path: '.cluxmate/settings.json' }])
+  assert.equal(shouldPromptFromFetch(s, 3, 3), true)
+})
+
+test('a snapshot fetched before the user answered never re-opens the card', () => {
+  const s = snapshot('unknown', [{ kind: 'hooks', label: 'Hooks (settings.json)', path: '.cluxmate/settings.json' }])
+  assert.equal(shouldPromptFromFetch(s, 3, 4), false)
+})
+
+test('an answered snapshot and a bare directory leave the card closed', () => {
+  assert.equal(shouldPromptFromFetch(snapshot('trusted'), 3, 3), false)
+  assert.equal(shouldPromptFromFetch(snapshot('denied', [{ kind: 'mcp', label: 'MCP', path: '.cluxmate/mcp.json' }]), 3, 3), false)
+  assert.equal(shouldPromptFromFetch(snapshot('unknown'), 3, 3), false)
+  assert.equal(shouldPromptFromFetch(null, 3, 3), false)
 })
 
 // ── the bridge-restart decision (the main process's kill rule) ──────────────
