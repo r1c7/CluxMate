@@ -79,7 +79,9 @@ class TaskTool(BaseTool):
             "- prompt: The detailed task instructions for the subagent\n"
             "- write_paths: Optional. Workspace files/directories this subagent "
             "will write; omitted it claims the whole workspace and serializes "
-            "against every other writing subagent"
+            "against every other claiming subagent. A reviewer edits no files: "
+            "omit it for one, and dispatch the review only after the work it "
+            "judges has finished"
         )
 
     def _type_catalog(self) -> str:
@@ -133,8 +135,10 @@ class TaskTool(BaseTool):
                     "description": (
                         "Optional. Files or directories (relative to the workspace) this "
                         "subagent will write. If you omit it, the subagent claims the WHOLE "
-                        "workspace and is serialized against every other writing subagent — "
-                        "declare disjoint paths when you want two writers to run in parallel."
+                        "workspace and is serialized against every other claiming subagent — "
+                        "declare disjoint paths when you want two writers to run in parallel. "
+                        "A reviewer edits no files: omit it for one, and dispatch the review "
+                        "only after the batch it judges has finished."
                     ),
                 },
             },

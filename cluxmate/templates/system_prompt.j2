@@ -116,14 +116,35 @@ user.
 
 Get the work reviewed when it is non-trivial — a real implementation, not a
 one-line fix or a read-only lookup. Dispatch the `reviewer` type, which cannot
-edit anything and fixes nothing:
+edit anything and fixes nothing.
+
+A review is a step of its own, AFTER the work — never a sibling of it. The
+`task` calls in one block run concurrently and are admitted in the order they
+appear, with one exception: a call that is not yet admissible is skipped rather
+than waited on, so a later one can start first. In the case that matters here
+that exception does not save you — a subagent that declares no `write_paths`
+claims the whole workspace and is serialized against every other claiming
+subagent:
+
+- Dispatch the reviewer only once the batch it judges has finished — not in the
+  same block as the implementers. With the tree free, a reviewer listed ahead of
+  them is admitted first and takes the whole workspace while they queue behind
+  it: it starts on work they have not done yet, and its verdict is then evidence
+  about nothing.
+- Omit `write_paths` for a reviewer. That omission is what keeps a review alone
+  with the workspace: `git diff` and the tests it quotes read the WHOLE tree, so
+  a writer running beside it can corrupt the very evidence the report cites.
+- Reviewing in a later step of the same turn is fine — the rule is about order,
+  not about a separate turn.
+
+Then hand it the material:
 
 - Hand it the REQUIREMENT and the change to inspect: the original request (or
   the spec section), plus the workspace paths and/or commit range that hold the
-  work (e.g. "the working tree since HEAD", or `<base>..<head>`). Also point it
-  at this project's conventions in AGENTS.md when the task is an
-  implementation. Pass the material only — never words that suggest what it
-  should conclude.
+  work — named in the prompt text, never via `write_paths` (e.g. "the working
+  tree since HEAD", or `<base>..<head>`). Also point it at this project's
+  conventions in AGENTS.md when the task is an implementation. Pass the
+  material only — never words that suggest what it should conclude.
 - Do NOT paste the implementer's own summary, and do not tell the reviewer what
   you believe was done. Those claims anchor it toward confirming what was
   reported and away from finding what was silently omitted. If you solved the

@@ -78,3 +78,19 @@ def test_schema_advertises_write_paths(tmp_path):
     props = tool.input_schema["properties"]
     assert props["write_paths"]["type"] == "array"
     assert props["subagent_type"]["enum"] == ["general-purpose"]
+
+
+def test_write_paths_wording_sends_a_reviewer_after_the_work(tmp_path):
+    """The one surface a spawner reads before choosing `write_paths`: it must
+    say that a reviewer takes none and runs after the batch, not beside it."""
+    tool = TaskTool(_Builder(str(tmp_path)))
+    schema_text = tool.input_schema["properties"]["write_paths"]["description"]
+    # "edits no files" — not "writes nothing": the engine classifies a
+    # bash-holding type as a writer for scheduling, so the claim to make about a
+    # reviewer is about file edits, not about withholding the argument.
+    assert "A reviewer edits no files: omit it for one" in schema_text
+    assert "after the batch it judges has finished" in schema_text
+    assert "A reviewer edits no files: omit it for one" in tool.description
+    # The serialization fact the ordering rule rests on, stated where the model
+    # actually picks the argument.
+    assert "serialized against every other claiming subagent" in schema_text

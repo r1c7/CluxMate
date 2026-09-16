@@ -123,6 +123,25 @@ def test_system_prompt_advertises_the_review_gate(tmp_path, monkeypatch):
     assert "<review_gate>" not in no_subs._render_system_prompt(no_subs._get_tools())
 
 
+def test_review_gate_orders_the_review_after_the_work(tmp_path, monkeypatch):
+    """The gate must say WHEN to dispatch, not only what to hand over: siblings
+    in one tool-call block run concurrently and admission follows the order in
+    the block, so a reviewer listed beside (or ahead of) the implementers would
+    judge a tree they have not touched, and one holding a narrower claim would
+    be corrupted by a writer running next to it."""
+    _home(monkeypatch, tmp_path)
+    b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
+    prompt = b._render_system_prompt(b._get_tools())
+    assert "A review is a step of its own, AFTER the work" in prompt
+    assert "Dispatch the reviewer only once the batch it judges has finished" in prompt
+    assert "Omit `write_paths` for a reviewer" in prompt
+    # The admission rule must state its real exception
+    # (SubagentScheduler._pump skips a still-blocked earlier waiter rather than
+    # stopping at it), not the absolute "block order decides who starts first".
+    assert "a call that is not yet admissible is skipped rather" in prompt
+    assert "takes the whole workspace while they queue behind" in prompt
+
+
 def test_builtin_reviewer_child_prompt_carries_its_contract(tmp_path, monkeypatch):
     _home(monkeypatch, tmp_path)
     b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
