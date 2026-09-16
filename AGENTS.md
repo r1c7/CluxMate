@@ -48,7 +48,7 @@ Lifecycle hooks (Claude-Code-style, 9 events): `UserPromptSubmit` / `PreToolUse`
 - `cluxmate/core/` (agent loop, builder, session log + store, context/compaction, permissions, grants, the `*_config.py` stores, hooks, checkpoints, mcp, memory, skills, subagents, retrieval, lsp, jsonrpc, providers/) and `cluxmate/tools/` (the tools plus `_`-prefixed plumbing: fence, sandbox, fileio, output, ssrf, egress proxy, diagnostics); `cluxmate/tui/` (Textual), `cluxmate/templates/` (`.j2` prompts). List the directories for the file inventory.
 - `desktop/` — Electron + electron-vite; spawns `python -m cluxmate agent stdio` (`python3` on mac/linux). The packaged app prefers the bundled `cluxmate/` source (`extraResources` → `<resources>/cluxmate/`, prepended to PYTHONPATH in `agent-bridge.ts`) and still needs a system Python 3.12 with `openai`/`jinja2`/`httpx`.
 - `tests/` — `core/` + `tools/` unit tests, `test_integration.py`; `desktop/tests/` for the desktop. `.github/workflows/ci.yml` runs a 3-platform pytest matrix (`pytest -q -m "not network"`) and a 3-platform desktop package matrix.
-- `docs/` and `scripts/` are **gitignored** (on disk, not in the repo): `docs/plans/` (Chinese design docs — sandbox-current-state.md, sandbox-threat-model.md, hooks.md), `docs/competitive-analysis.md` (source-based comparison of 11 products: feature matrix, gaps G1–G17, roadmap), `docs/superpowers/` (specs + plans), `docs/memory-archive.md`.
+- `docs/` and `scripts/` are **gitignored** (on disk, not in the repo): `docs/plans/` (Chinese design docs — sandbox-current-state.md, sandbox-threat-model.md, hooks.md), `docs/competitive-analysis.md` (2026-09-16 source-checked comparison of CluxMate vs Codex / DeepSeek Harness / Reasonix / grok-build / MiMo-Code / OpenCode / pi: per-axis tables with file:line, advantages, weakness list, P0–P2 roadmap), `docs/superpowers/` (specs + plans), `docs/memory-archive.md`.
 
 ## Commands
 
@@ -71,7 +71,8 @@ Lifecycle hooks (Claude-Code-style, 9 events): `UserPromptSubmit` / `PreToolUse`
 ## Reference corpus & competitive analysis
 
 - Cross-project corpus: `E:\workspace\agents` (OpenAI Codex `codex/`, DeepSeek Harness `deepseek-harness/`, Reasonix `DeepSeek-Reasonix/`, Grok Build `grok-build/`, MiMo-Code `MiMo-Code/`, OpenCode `opencode2/`, pi `pi/`). `E:\workspace\cluxmate_research` no longer exists. Claude Code / Cursor / Trae are closed source (not downloaded).
-- Long-lived conclusions from that corpus: **Windows OS-level sandboxing is the differentiator** — Reasonix's `seatbelt_windows.go` is a stub and it forces bash sandboxing off on Windows; only Codex (DACL restricted token) and DeepSeek Harness (win-acl) ship one besides CluxMate (Windows Low-IL). Product-level evidence per feature (with file:line) is archived in `docs/memory-archive.md`.
+- Long-lived conclusions from that corpus: **Windows OS-level sandboxing is the differentiator** — Reasonix's `seatbelt_windows.go` is a stub and it forces bash sandboxing off on Windows; Codex HAS a real one (restricted token + WFP) but ships it `Disabled` by default; DeepSeek Harness ships win-acl while declaring `enforcement: 'partial'`; grok-build / MiMo-Code / OpenCode / pi ship none. CluxMate's Low-IL backend is the only default-on, fail-closed one. Product-level evidence per feature (with file:line) and the refreshed axis-by-axis audit live in `docs/competitive-analysis.md` + `docs/memory-archive.md`.
+- Recurring gap in that corpus that CluxMate still lacks: **no project-trust gate** — `<cwd>/.cluxmate/*` (hooks/mcp.json/skills.json) is loaded and executed on sight, so a cloned repo runs shell; grok gates project hooks/MCP/LSP on `trusted_folders.toml` and pi prompts for project trust.
 
 ## Feature decisions
 
