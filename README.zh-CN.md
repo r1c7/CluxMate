@@ -159,7 +159,7 @@ MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配�
 
 ## 项目信任（Project trust）
 
-`<cwd>/.cluxmate/` 下的配置属于"这个仓库"，而不是"你"：hooks 会跑 shell、mcp.json 会起子进程、lsp.json 能装工具链、skills/agents 会进模型上下文、permissions.json 能预授权工具。因此首次在一个**确实带了这些配置**的目录里启动时会询问一次，三档：信任并记住 / 仅本次会话 / 不信任。
+`<cwd>/.cluxmate/` 下的配置属于"这个仓库"，而不是"你"：hooks 会跑 shell、mcp.json 会起子进程、lsp.json 能装工具链、skills/agents 会进模型上下文、permissions.json 能预授权工具。因此**桌面端或 TUI** 首次打开一个**确实带了这些配置**的目录时会询问一次，三档：信任并记住 / 仅本次会话 / 不信任。无头运行无法询问——`cluxmate -p "..."`、以及没有 TTY 的 `cluxmate repl`，只在 stderr 打一行警告，然后带着"项目配置不加载"继续跑。**升级影响**：已有的 `<cwd>/.cluxmate/` 从此在你信任该目录之前都不会加载——用 `cluxmate trust add` 放行（脚本 / CI 的路径，例如 `cd "$REPO" && cluxmate trust add .`），或在桌面端 / TUI 里回答一次询问。
 
 未信任（含"不信任"与"还没回答"）时，以上项目级配置**一律不读**，`permissions.json` 也不写（审批卡不再提供"总是允许"）；全局 `~/.cluxmate/` 配置与内置默认不受影响。未信任不等于只读：文件写入、沙箱边界与审批档位照旧。信任决定记录在 `~/.cluxmate/trust.json`（按目录，精确匹配；不在可写范围内，模型改不了）。
 
