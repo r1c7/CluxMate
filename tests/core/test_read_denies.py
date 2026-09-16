@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from cluxmate.core.read_denies import (
     ReadDenyStore,
     is_sensitive_pattern,
@@ -82,11 +84,15 @@ def test_empty_store_is_empty_default(tmp_path):
 # Built-in sensitive-file template (protect_sensitive)
 # ---------------------------------------------------------------------------
 
-def test_protect_sensitive_defaults_off(tmp_path):
-    """Zero behavior change: the toggle is off until the user enables it."""
+def test_protect_sensitive_defaults_off(tmp_path, monkeypatch):
+    """Zero behavior change: the toggle is off until the user enables it.
+
+    The MCP credential file is the ONE unconditional entry (Task 4) — it is
+    not part of the built-in template."""
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
     store = ReadDenyStore(root=tmp_path)
     assert store.protect_sensitive() is False
-    assert store.effective_paths() == []
+    assert store.effective_paths() == [str(mcp_auth_path())]
 
 
 def test_legacy_file_without_toggle_defaults_off(tmp_path):
@@ -122,7 +128,8 @@ def test_effective_paths_gated_by_toggle(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: home)
     store = ReadDenyStore(root=tmp_path)
     user = store.add(str(tmp_path / "secret-folder"))
-    assert store.effective_paths() == [user]  # off: user paths only
+    # off: user paths + the always-denied credential file (Task 4).
+    assert store.effective_paths() == [user, str(mcp_auth_path())]
     store.set_protect_sensitive(True)
     effective = store.effective_paths()
     assert user in effective
@@ -156,3 +163,45 @@ def test_is_sensitive_pattern_basename_and_suffix(tmp_path):
     assert not is_sensitive_pattern(tmp_path / ".env.production")
     assert not is_sensitive_pattern(tmp_path / "app.env")
     assert not is_sensitive_pattern(tmp_path / "monkey.txt")
+
+
+# ---------------------------------------------------------------------------
+# MCP OAuth credential file: always denied, never in the user-visible snapshot
+# ---------------------------------------------------------------------------
+
+from cluxmate.core.mcp_auth_store import default_path as mcp_auth_path
+from cluxmate.tools._fence import ReadDenied, ReadFence
+
+
+def test_mcp_auth_file_is_denied_without_the_sensitive_toggle(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / ".cluxmate").mkdir()
+    store = ReadDenyStore()
+    assert store.protect_sensitive() is False
+    assert str(mcp_auth_path()) in store.effective_paths()
+
+
+def test_mcp_auth_file_is_not_in_the_user_visible_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / ".cluxmate").mkdir()
+    assert ReadDenyStore().snapshot() == []
+
+
+def test_mcp_auth_file_cannot_be_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / ".cluxmate").mkdir()
+    secret = mcp_auth_path()
+    secret.write_text('{"version": 1, "servers": {}}', encoding="utf-8")
+    fence = ReadFence(deny_paths=ReadDenyStore().effective_paths())
+    with pytest.raises(ReadDenied):
+        fence.check(secret)
+    assert fence.is_denied(secret) is True
+
+
+def test_other_files_next_to_it_stay_readable(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / ".cluxmate").mkdir()
+    other = tmp_path / ".cluxmate" / "config.json"
+    other.write_text("{}", encoding="utf-8")
+    fence = ReadFence(deny_paths=ReadDenyStore().effective_paths())
+    assert fence.check(other) == other.resolve()

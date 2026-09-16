@@ -340,8 +340,17 @@ const en = {
   'mcp.restartNote': '· Restart session to take effect',
   'mcp.statusLine': '{count} tools · status: {status}',
   'mcp.noTools': '(no tools exposed — server may have failed to load)',
+  'mcp.needsAuthHint': 'Log in to load this server’s tools.',
   'mcp.selectHint': 'Select an MCP server on the left to view its exposed tools',
   'mcp.inputSchema': 'input schema',
+  // ── MCP OAuth (interactive login lives in the Python process; this panel only
+  //    starts it, reports the waiting state and shows the resulting token state) ──
+  'mcp.login': 'Log in',
+  'mcp.logout': 'Log out',
+  'mcp.authPending': 'Waiting for browser…',
+  'mcp.needsAuth': '· needs login',
+  'mcp.expiresIn': '· token expires {when}',
+  'mcp.oauthConflict': 'This server also has a static Authorization header — OAuth takes precedence.',
 
   // ── hooks view ──
   'hooks.title': 'Hooks',
@@ -541,6 +550,8 @@ const en = {
   'error.toggleSkillFailed': 'Failed to toggle skill: {msg}',
   'error.listMcpFailed': 'Failed to list MCP servers: {msg}',
   'error.toggleMcpFailed': 'Failed to toggle MCP server: {msg}',
+  'error.mcpAuthFailed': 'MCP authorization failed: {msg}',
+  'error.mcpLogoutFailed': 'MCP logout failed: {msg}',
   'error.listHooksFailed': 'Failed to list hooks: {msg}',
   'error.notifyHooksFailed': 'Failed to trigger notification hooks: {msg}',
   'error.openHooksFailed': 'Failed to open settings.json: {msg}',
@@ -879,8 +890,15 @@ const zh: Record<keyof typeof en, string> = {
   'mcp.restartNote': '· 重启 Session 后生效',
   'mcp.statusLine': '{count} 个工具 · 状态：{status}',
   'mcp.noTools': '（未暴露任何工具——服务器可能加载失败）',
+  'mcp.needsAuthHint': '登录后即可加载该服务器的工具。',
   'mcp.selectHint': '在左侧选择 MCP 服务器以查看其暴露的工具',
   'mcp.inputSchema': '输入模式',
+  'mcp.login': '登录',
+  'mcp.logout': '登出',
+  'mcp.authPending': '等待浏览器…',
+  'mcp.needsAuth': '· 需要登录',
+  'mcp.expiresIn': '· 令牌 {when} 过期',
+  'mcp.oauthConflict': '该服务器同时配置了静态 Authorization 头——OAuth 优先。',
 
   // ── hooks view ──
   'hooks.title': 'Hooks',
@@ -1080,6 +1098,8 @@ const zh: Record<keyof typeof en, string> = {
   'error.toggleSkillFailed': '切换 Skill 失败：{msg}',
   'error.listMcpFailed': '获取 MCP 服务器列表失败：{msg}',
   'error.toggleMcpFailed': '切换 MCP 服务器失败：{msg}',
+  'error.mcpAuthFailed': 'MCP 授权失败：{msg}',
+  'error.mcpLogoutFailed': 'MCP 登出失败：{msg}',
   'error.listHooksFailed': '获取 Hooks 列表失败：{msg}',
   'error.notifyHooksFailed': '触发通知 hooks 失败：{msg}',
   'error.openHooksFailed': '打开 settings.json 失败：{msg}',

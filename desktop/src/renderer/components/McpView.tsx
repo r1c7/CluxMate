@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useStore } from '../stores'
 import type { McpServer } from '../../shared/types'
 import { useT } from '../useI18n'
+import { formatTime } from '../../shared/format-time'
 
 // Transport badge — local (stdio) is muted gray (data stays on this machine),
 // remote (http) is orange (every tool call is a network egress, data may leave).
@@ -21,15 +22,18 @@ function transportBadge(t: string): { labelKey: string; cls: string } {
 
 const STATUS_DOT: Record<string, string> = {
   connected: 'bg-emerald-500',
+  needs_auth: 'bg-amber-500',
   failed: 'bg-red-500',
   disabled: 'bg-slate-400',
   disconnected: 'bg-slate-300',
 }
 
 // Main-area view (swaps in for ChatView) that lists configured MCP servers on
-// the left and the selected server's tools on the right. Read-only — toggle
-// is the only mutation, and it writes to mcp.json (takes effect next session,
-// not hot-swapped). Mirrors SkillsView's two-pane layout.
+// the left and the selected server's tools on the right. The only mutations are
+// the mcp.json disable toggle (takes effect next session, not hot-swapped), the
+// OAuth login/logout buttons (hot-swapped by the Python side) and the selected
+// server.
+// Mirrors SkillsView's two-pane layout.
 export default function McpView() {
   const t = useT()
   const servers = useStore((s) => s.mcpServers)
@@ -38,6 +42,9 @@ export default function McpView() {
   const showMcp = useStore((s) => s.showMcp)
   const selectMcpServer = useStore((s) => s.selectMcpServer)
   const setMcpDisabled = useStore((s) => s.setMcpDisabled)
+  const authPending = useStore((s) => s.authPending)
+  const startMcpAuth = useStore((s) => s.startMcpAuth)
+  const logoutMcp = useStore((s) => s.logoutMcp)
   const activeSessionId = useStore((s) => s.activeSessionId)
 
   // Names toggled this view — their new disabled state is written to mcp.json
@@ -126,7 +133,15 @@ export default function McpView() {
                   </div>
                   <div className="text-xs text-ink-faint truncate mt-0.5">
                     {t('mcp.tools', { count: s.tools.length, plural: s.tools.length === 1 ? '' : 's' })}
-                    {s.error && <span className="text-red-600 ml-2 truncate">{s.error}</span>}
+                    {/* needs_auth is actionable (the 401 explanation lives in the
+                        amber hint + the login button), not a failure — so the red
+                        error span stays reserved for genuine breakage. */}
+                    {s.error && s.status !== 'needs_auth' && (
+                      <span className="text-red-600 ml-2 truncate">{s.error}</span>
+                    )}
+                    {s.status === 'needs_auth' && (
+                      <span className="text-amber-600 ml-2">{t('mcp.needsAuth')}</span>
+                    )}
                     {pendingRestart.has(s.name) && (
                       <span className="text-amber-600 ml-2 truncate">{t('mcp.restartNote')}</span>
                     )}
@@ -152,14 +167,46 @@ export default function McpView() {
                   </span>
                 )
               })()}
+              {selected.oauth?.enabled && (
+                selected.oauth.authenticated ? (
+                  <button
+                    onClick={() => logoutMcp(selected.name)}
+                    className="text-[10px] px-2 py-0.5 rounded border border-surface-border text-ink-soft hover:bg-surface-raised"
+                  >
+                    {t('mcp.logout')}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => startMcpAuth(selected.name)}
+                    disabled={authPending === selected.name}
+                    className="text-[10px] px-2 py-0.5 rounded border border-accent text-accent hover:bg-accent/10 disabled:opacity-50"
+                  >
+                    {authPending === selected.name ? t('mcp.authPending') : t('mcp.login')}
+                  </button>
+                )
+              )}
+              {selected.oauth?.authenticated && selected.oauth.expires_at && (
+                <span className="text-[10px] text-ink-faint">
+                  {t('mcp.expiresIn', { when: formatTime(selected.oauth.expires_at * 1000) })}
+                </span>
+              )}
               <span className="text-[10px] text-ink-faint truncate ml-auto">
                 {t('mcp.statusLine', { count: selected.tools.length, status: selected.status })}
               </span>
             </div>
+            {/* The server carries BOTH an OAuth config and a static
+                Authorization header: the Python loader lets OAuth win, so say so
+                rather than leaving the user guessing which credential is used. */}
+            {selected.oauth?.conflict === 'static_header' && (
+              <p className="text-[10px] text-amber-600 px-6 pt-2">{t('mcp.oauthConflict')}</p>
+            )}
             <div className="flex-1 overflow-y-auto px-6 py-4">
               {selected.tools.length === 0 ? (
                 <p className="text-xs text-ink-faint italic">
-                  {t('mcp.noTools')}
+                  {/* A 401 needs_auth server legitimately returns no tools; the
+                      generic "server may have failed to load" wording would frame
+                      a normal login prompt as breakage. */}
+                  {selected.status === 'needs_auth' ? t('mcp.needsAuthHint') : t('mcp.noTools')}
                 </p>
               ) : (
                 <div className="space-y-4">

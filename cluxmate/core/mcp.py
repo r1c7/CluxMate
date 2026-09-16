@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
@@ -39,6 +40,15 @@ from typing import Any
 
 import httpx
 
+from cluxmate.core.mcp_auth_store import MCPAuthStore
+from cluxmate.core.mcp_oauth import (
+    EXPIRY_SKEW_S,
+    Challenge,
+    OAuthError,
+    OAuthFlowConfig,
+    parse_www_authenticate,
+    refresh_access_token,
+)
 from cluxmate.tools.base import BaseTool
 
 # Server and tool names must be identifier-safe so the mcp__<server>__<tool>
@@ -78,6 +88,11 @@ class MCPConfig:
     disabled: bool = False
     risk_level: str = "write"  # 'safe' | 'write' | 'dangerous'
     call_timeout_s: float = _DEFAULT_CALL_TIMEOUT_S
+    # OAuth: None = off for this server. An OAuthFlowConfig with no client_id
+    # means "latent" — a stored token is attached if one exists, and a 401 turns
+    # into needs_auth instead of a hard failure.
+    oauth: OAuthFlowConfig | None = None
+    oauth_error: str | None = None
 
 
 def _validate_name(name: str) -> bool:
@@ -98,6 +113,18 @@ def _expand_env(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _expand_env(v) for k, v in value.items()}
     return value
+
+
+def _has_static_auth(headers: dict[str, str]) -> bool:
+    """True when a non-empty Authorization header is configured. Header names are
+    case-insensitive (RFC 9110), so a lowercase `authorization` must suppress
+    OAuth just like `Authorization` does. A non-string value (a hand-edited
+    `mcp.json` can hold a number) is not a usable credential — it neither
+    suppresses OAuth nor raises."""
+    return any(
+        k.lower() == "authorization" and isinstance(v, str) and bool(v.strip())
+        for k, v in headers.items()
+    )
 
 
 def _derive_transport(entry: dict[str, Any]) -> str:
@@ -164,18 +191,57 @@ class MCPConfigManager:
             risk = entry.get("risk_level", "write")
             if risk not in ("safe", "write", "dangerous"):
                 risk = "write"
+            url = _expand_env(entry.get("url"))
+            # OAuth precedence (see the design doc §4.2): an explicit oauth
+            # object wins over a static Authorization header, which in turn wins
+            # over latent OAuth. A server with no credentials at all still gets
+            # latent OAuth so a 401 reads as "log in" rather than "broken".
+            raw_oauth = entry.get("oauth")
+            explicit_oauth = raw_oauth if isinstance(raw_oauth, dict) else None
+            # A truthy non-object (`"oauth": true`) means "enable with defaults":
+            # silently ignoring it would turn a user's intent into a confusing 401,
+            # and on a stdio server it must reach the config error below.
+            enable_with_defaults = bool(raw_oauth) and explicit_oauth is None
+            opts = explicit_oauth if explicit_oauth is not None else {}
+            oauth_cfg: OAuthFlowConfig | None = None
+            oauth_error: str | None = None
+            if raw_oauth is False:
+                oauth_cfg = None
+            elif explicit_oauth is not None or enable_with_defaults:
+                secret_env = opts.get("client_secret_env") \
+                    or opts.get("clientSecretEnv")
+                secret = os.environ.get(secret_env, "") if secret_env else ""
+                try:
+                    callback_port = int(opts.get("callback_port", 0) or 0)
+                except (TypeError, ValueError):
+                    callback_port = 0
+                oauth_cfg = OAuthFlowConfig(
+                    server_name=name,
+                    server_url=url or "",
+                    client_id=_expand_env(opts.get("client_id")) or None,
+                    client_secret=secret or None,
+                    scopes=_expand_env(opts.get("scopes")) or None,
+                    callback_port=callback_port,
+                )
+            elif transport == "http" and not _has_static_auth(headers):
+                oauth_cfg = OAuthFlowConfig(server_name=name, server_url=url or "")
+            if oauth_cfg is not None and transport != "http":
+                oauth_error = "oauth is only supported for remote (url) MCP servers"
+                oauth_cfg = None
             configs[name] = MCPConfig(
                 name=name,
                 transport=transport,
                 command=_expand_env(entry.get("command")),
                 args=_expand_env(list(entry.get("args", []))),
                 env=_expand_env(dict(entry.get("env", {}))),
-                url=_expand_env(entry.get("url")),
+                url=url,
                 headers=headers,
                 authorization_env=auth_env,
                 disabled=bool(entry.get("disabled", False)),
                 risk_level=risk,
                 call_timeout_s=float(entry.get("call_timeout_s", _DEFAULT_CALL_TIMEOUT_S)),
+                oauth=oauth_cfg,
+                oauth_error=oauth_error,
             )
         return configs
 
@@ -188,7 +254,7 @@ class MCPClient:
     """
 
     def __init__(self, config: MCPConfig, sandbox=None, cwd: str | None = None,
-                 egress_mode: str = "shared"):
+                 egress_mode: str = "shared", auth_store: MCPAuthStore | None = None):
         self.config = config
         self._sandbox = sandbox  # ShellSandbox | None (stdio servers only)
         self._cwd = cwd or os.getcwd()
@@ -198,9 +264,15 @@ class MCPClient:
         self._http: httpx.Client | None = None
         self._next_id = 0
         self._tools: list[dict[str, Any]] = []
-        # 'disconnected' | 'connected' | 'failed' | 'disabled'
+        # 'disconnected' | 'connected' | 'failed' | 'needs_auth' | 'disabled'
         self._status: str = "disconnected"
         self._error: str | None = None
+        # OAuth state. `_auth_store` is only consulted when the config carries a
+        # usable OAuthFlowConfig — a stdio server or a statically-authenticated
+        # one never touches the credential file.
+        self._auth_store = auth_store if config.oauth is not None else None
+        self._auth_challenge: Challenge | None = None
+        self._auth_error: str | None = None
 
     def _next_request_id(self) -> int:
         self._next_id += 1
@@ -211,6 +283,12 @@ class MCPClient:
 
         Returns True on success. On failure, sets _status='failed' and _error.
         """
+        if self.config.oauth_error:
+            # Misconfigured (e.g. oauth on a stdio server): fail fast and
+            # visibly before spawning anything.
+            self._status = "failed"
+            self._error = self.config.oauth_error
+            return False
         try:
             if self.config.transport == "stdio":
                 # Resolve the executable through PATH (+ PATHEXT on Windows).
@@ -266,8 +344,12 @@ class MCPClient:
                 "clientInfo": {"name": "cluxmate", "version": "1.0"},
             })
             if init_resp is None or "error" in init_resp:
-                self._status = "failed"
-                self._error = "initialize handshake failed"
+                # A 401 during the handshake already recorded `needs_auth` (and
+                # the actionable "run: cluxmate mcp auth …" message) in
+                # _send_http — do not downgrade that to a generic failure.
+                if self._status != "needs_auth":
+                    self._status = "failed"
+                    self._error = self._error or "initialize handshake failed"
                 self._cleanup()
                 return False
             # initialized notification — no response expected.
@@ -303,8 +385,19 @@ class MCPClient:
                         self._proc.stdin.write(json.dumps(notif, ensure_ascii=False) + "\n")
                         self._proc.stdin.flush()
                 elif self._http:
+                    # Same two fixes as _send_http: httpx ≥ 0.28 forces a
+                    # trailing slash onto base_url, so a relative post("")
+                    # lands on "<url>/" (404) instead of the MCP endpoint; and
+                    # the bearer goes on THIS request only — never merged into
+                    # the client's static headers (which `conflict` reads).
+                    # A 401-gated server rejects a credential-less
+                    # notifications/initialized, so it must carry the bearer.
+                    headers: dict[str, str] = {}
+                    bearer, may_send = self._ensure_bearer()
+                    if may_send and bearer:
+                        headers["Authorization"] = f"Bearer {bearer}"
                     try:
-                        self._http.post("", json=notif)
+                        self._http.post(self.config.url, json=notif, headers=headers)
                     except Exception:
                         pass  # notifications have no response; ignore
         except Exception:
@@ -353,7 +446,34 @@ class MCPClient:
 
     def _send_http(self, req: dict[str, Any], req_id: int) -> dict[str, Any] | None:
         assert self._http is not None
-        resp = self._http.post("", json=req)
+        # The bearer goes on THIS request only. self._http's static headers are
+        # the configured ones (and the `conflict` check reads them), so a token
+        # must never be merged into the client and leak to another origin on a
+        # redirect or a later rebuild.
+        headers: dict[str, str] = {}
+        bearer, may_send = self._ensure_bearer()
+        if not may_send:
+            return None
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        # Absolute URL, not "": httpx ≥ 0.28 forces a trailing slash onto
+        # base_url, so a relative POST to "" lands on "<url>/" and every real
+        # server answers 404 instead of the JSON-RPC response.
+        resp = self._http.post(self.config.url or "", json=req, headers=headers)
+        if resp.status_code in (401, 403) and self._auth_store is not None:
+            self._auth_challenge = parse_www_authenticate(
+                resp.headers.get("www-authenticate", "")
+            )
+            scope = self._auth_challenge.scope if self._auth_challenge else None
+            detail = "rejected the token" if resp.status_code == 403 else "requires authorization"
+            if resp.status_code == 403 and scope:
+                detail = f"requires additional scope ({scope})"
+            self._auth_failure(
+                f"server '{self.config.name}' {detail} — run: "
+                f"cluxmate mcp auth {self.config.name}",
+                needs_auth=True,
+            )
+            return None
         resp.raise_for_status()
         msg = resp.json()
         if msg.get("id") != req_id:
@@ -362,9 +482,99 @@ class MCPClient:
             return None
         return msg
 
+    def challenge(self) -> Challenge | None:
+        """The last 401 challenge (resource_metadata / scope), if any. Reused by
+        the authorization flow so it skips a redundant probe request."""
+        return self._auth_challenge
+
+    def _auth_failure(self, message: str, *, needs_auth: bool) -> None:
+        self._status = "needs_auth" if needs_auth else "failed"
+        self._error = message
+
+    def _ensure_bearer(self) -> tuple[str | None, bool]:
+        """(bearer_to_attach, may_send). may_send=False means a reason has
+        already been recorded and no credential-less request may go on the wire.
+
+        Silent by construction: this never opens a browser. A missing or
+        URL-mismatched record returns (None, True) so the server's 401 becomes
+        the trigger for the user-visible flow.
+        """
+        cfg = self.config.oauth
+        if self._auth_store is None or cfg is None:
+            return None, True
+        record = self._auth_store.get(self.config.name, self.config.url or "")
+        if record is None:
+            return None, True
+        if record.is_fresh(time.time(), EXPIRY_SKEW_S):
+            return record.access_token, True
+        if not record.refresh_token:
+            self._auth_store.delete(self.config.name)
+            self._auth_failure(
+                f"server '{self.config.name}' authorization expired and no refresh "
+                f"token is stored — run: cluxmate mcp auth {self.config.name}",
+                needs_auth=True,
+            )
+            return None, False
+        try:
+            # No explicit auth_method: the record carries how the AS wants the
+            # client authenticated (client_secret_basic vs _post vs none).
+            refreshed = refresh_access_token(
+                record, token_endpoint=record.token_endpoint,
+                http_timeout=self.config.call_timeout_s,
+            )
+        except OAuthError as e:
+            if e.kind == "refresh_rejected":
+                self._auth_store.delete(self.config.name)
+                self._auth_failure(
+                    f"server '{self.config.name}' rejected the stored OAuth token "
+                    f"({e}) — run: cluxmate mcp auth {self.config.name}",
+                    needs_auth=True,
+                )
+            else:
+                # Transient (timeout / 5xx): keep the credentials so the next
+                # call can retry, and do NOT claim the user must log in again.
+                self._auth_failure(
+                    f"could not refresh the OAuth token for '{self.config.name}': {e}",
+                    needs_auth=False,
+                )
+            return None, False
+        self._auth_store.put(self.config.name, refreshed)
+        return refreshed.access_token, True
+
+    def _force_refresh(self) -> bool:
+        """Refresh once, ignoring the expiry window. Returns True when a new
+        access token is stored and the request may be retried."""
+        if self._auth_store is None:
+            return False
+        record = self._auth_store.get(self.config.name, self.config.url or "")
+        if record is None or not record.refresh_token:
+            return False
+        try:
+            refreshed = refresh_access_token(
+                record, token_endpoint=record.token_endpoint,
+                http_timeout=self.config.call_timeout_s,
+            )
+        except OAuthError as e:
+            if e.kind == "refresh_rejected":
+                self._auth_store.delete(self.config.name)
+            self._auth_failure(str(e), needs_auth=e.kind == "refresh_rejected")
+            return False
+        self._auth_store.put(self.config.name, refreshed)
+        self._status = "connected"
+        self._error = None
+        return True
+
+    def _send_request_authed(self, method: str, params: dict[str, Any] | None = None):
+        """One forced refresh + one retry per call — never a refresh loop."""
+        resp = self._send_request(method, params)
+        if resp is None and self._status == "needs_auth":
+            if self._force_refresh():
+                resp = self._send_request(method, params)
+        return resp
+
     def list_tools(self) -> list[dict[str, Any]]:
         """Fetch tools/list. Called once at handshake. Updates _status on failure."""
-        resp = self._send_request("tools/list")
+        resp = self._send_request_authed("tools/list")
         if resp is None:
             # _send_request already set _error; mark failed if it was a transport error.
             if self._status == "connected":
@@ -379,7 +589,9 @@ class MCPClient:
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Invoke a tool. Returns text content from the result."""
-        resp = self._send_request("tools/call", {"name": name, "arguments": arguments})
+        resp = self._send_request_authed(
+            "tools/call", {"name": name, "arguments": arguments}
+        )
         if resp is None:
             if self._status == "connected":
                 self._status = "failed"
@@ -415,6 +627,25 @@ class MCPClient:
         egress = self._egress_mode
         if egress == "off" and platform.system() == "Windows":
             egress = "off (ineffective on Windows)"
+        # OAuth state for the UI. Built from the record's non-secret fields only
+        # — the access/refresh token values never reach this dict.
+        oauth: dict[str, Any] | None = None
+        if self.config.oauth is not None:
+            record = (
+                self._auth_store.get(self.config.name, self.config.url or "")
+                if self._auth_store is not None else None
+            )
+            oauth = {
+                "enabled": True,
+                "authenticated": record is not None,
+                "expires_at": record.expires_at if record else None,
+                "has_refresh": bool(record and record.refresh_token),
+                # Same rule the loader uses to decide whether a static header
+                # suppresses OAuth: case-insensitive and non-string safe, so a
+                # lowercase `authorization` is reported as the shadowing
+                # credential it truly is (see _has_static_auth).
+                "conflict": "static_header" if _has_static_auth(self.config.headers) else None,
+            }
         return {
             "name": self.config.name,
             "transport": transport_label,
@@ -422,6 +653,7 @@ class MCPClient:
             "disabled": self.config.disabled,
             "egress": egress,
             "error": self._error,
+            "oauth": oauth,
             "tools": [
                 {
                     "name": t.get("name", ""),
@@ -499,14 +731,23 @@ class MCPManager:
     JSON-RPC method.
     """
 
-    def __init__(self, cwd: str, sandbox=None, egress_mode: str = "shared"):
+    def __init__(self, cwd: str, sandbox=None, egress_mode: str = "shared",
+                 auth_store: MCPAuthStore | None = None):
         self._cwd = cwd
         self._sandbox = sandbox  # ShellSandbox | None — passed to stdio clients
         self._egress_mode = egress_mode
+        # One store per manager, shared by every client it builds: the file is
+        # re-read on each access, so an out-of-band `cluxmate mcp auth` run (or
+        # the JSON-RPC auth flow) is visible to the live clients without a
+        # rebuild.
+        self._auth_store = auth_store if auth_store is not None else MCPAuthStore()
         self._configs: dict[str, MCPConfig] = {}
         self._clients: dict[str, MCPClient] = {}
         self._tools: list[MCPToolWrapper] = []
         self._loaded = False
+        # Latches on shutdown(): reload_client() must never respawn a client
+        # into a manager that has already been torn down.
+        self._closed = False
         # Register shutdown at process exit. atexit fires on normal interpreter
         # exit (stdin EOF, SIGTERM on Linux/Mac). Windows TerminateProcess
         # skips atexit — the mcp/shutdown RPC is the fallback for that case
@@ -523,7 +764,7 @@ class MCPManager:
         for cfg in self._configs.values():
             self._clients[cfg.name] = MCPClient(
                 cfg, sandbox=self._sandbox, cwd=self._cwd,
-                egress_mode=self._egress_mode,
+                egress_mode=self._egress_mode, auth_store=self._auth_store,
             )
 
         if not self._clients:
@@ -569,7 +810,13 @@ class MCPManager:
             # times out the TCP connection or the MCP process is killed.
             ex.shutdown(wait=False)
 
-        self._tools = []
+        self._rebuild_tools()
+
+    def _rebuild_tools(self) -> None:
+        """Rebuild the exposed tool list from every CONNECTED client. Called by
+        load() and by reload_client() — one place, so a reload can never leave
+        stale wrappers pointing at a shut-down client."""
+        tools: list[MCPToolWrapper] = []
         for client in self._clients.values():
             if client.config.disabled or client._status != "connected":
                 continue
@@ -577,7 +824,7 @@ class MCPManager:
                 tool_name = tool.get("name", "")
                 if not tool_name or not _validate_name(tool_name):
                     continue
-                self._tools.append(MCPToolWrapper(
+                tools.append(MCPToolWrapper(
                     client=client,
                     tool_name=tool_name,
                     description=tool.get("description", ""),
@@ -585,6 +832,61 @@ class MCPManager:
                     risk_level=client.config.risk_level,
                     cwd=self._cwd,
                 ))
+        self._tools = tools
+
+    def config(self, name: str) -> MCPConfig | None:
+        return self._configs.get(name)
+
+    def client(self, name: str) -> MCPClient | None:
+        return self._clients.get(name)
+
+    def reload_client(self, name: str) -> bool:
+        """Re-spawn ONE server (its credentials or config changed) and refresh
+        the tool list. Returns True when the exposed wrappers were replaced (a
+        successful reconnect ALWAYS counts, even when the tool names are
+        identical).
+
+        A failed start is NOT an error here: the new client keeps whatever status
+        start() recorded (needs_auth / failed) and the old wrappers are dropped —
+        a stale tool set is worse than none, because every call on it would fail.
+        """
+        if not self._loaded or self._closed:
+            return False
+        cfg = self._configs.get(name)
+        if cfg is None:
+            return False
+        old = self._clients.get(name)
+        if old is not None:
+            try:
+                old.shutdown()
+            except Exception:
+                pass
+        before = {(t._client.config.name, t._tool_name) for t in self._tools}
+        client = MCPClient(
+            cfg, sandbox=self._sandbox, cwd=self._cwd,
+            egress_mode=self._egress_mode, auth_store=self._auth_store,
+        )
+        self._clients[name] = client
+        self._start_and_handshake(client)
+        if self._closed:
+            # A concurrent shutdown() tore the manager down while we were
+            # handshaking: it cleared _clients before this client existed, so it
+            # cannot reach it — without this the transport (or, for stdio, the
+            # subprocess) would outlive the manager entirely.
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+            self._clients.pop(name, None)
+            return False
+        self._rebuild_tools()
+        after = {(t._client.config.name, t._tool_name) for t in self._tools}
+        # A reload REPLACES the wrappers for this server even when the exposed
+        # tool names are identical, and the old wrappers now point at a client
+        # that was just shut down. Reporting "unchanged" would leave the agent
+        # dispatching through them (every call answering "no response") until a
+        # session restart — so a successful reconnect always counts as a change.
+        return client._status == "connected" or before != after
 
     def _start_and_handshake(self, client: MCPClient) -> None:
         if not client.start():
@@ -598,7 +900,13 @@ class MCPManager:
         return [client.status() for client in self._clients.values()]
 
     def shutdown(self) -> None:
-        for client in self._clients.values():
+        # FIRST statement: latch closed so a reload_client() racing this teardown
+        # refuses / reclaims instead of leaving an untracked live transport.
+        self._closed = True
+        # Snapshot: a concurrent reload_client() may pop an entry (and another
+        # thread may add one) while this loop runs, and iterating the live dict
+        # would raise RuntimeError mid-teardown, aborting the rest of the kills.
+        for client in list(self._clients.values()):
             try:
                 client.shutdown()
             except Exception:

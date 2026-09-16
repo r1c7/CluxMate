@@ -24,6 +24,7 @@ from cluxmate.core.agent import AgentCallbacks, AgentLoop, NETWORK_FALLBACK_TEXT
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.checkpoints import CheckpointManager
 from cluxmate.core.grants import GrantStore
+from cluxmate.core.mcp_oauth import OAuthError
 from cluxmate.core.read_denies import ReadDenyStore
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.permissions import PermissionPolicy
@@ -533,6 +534,19 @@ class JsonRpcServer:
         # pre-set so a turn on a not-yet-initialized server never blocks.
         self._mcp_ready = threading.Event()
         self._mcp_ready.set()
+        # Server names with an authorization flow in flight. Guarded so a
+        # double-click on "Log in" cannot start two flows for one server (two
+        # loopback listeners, two token exchanges, last write wins).
+        self._auth_inflight: set[str] = set()
+        # The live flow per server, so mcp/auth/cancel can interrupt the 300 s
+        # callback wait instead of just reporting that something is running.
+        self._auth_flows: dict[str, Any] = {}
+        # Per-server generation counter, bumped by a logout. A flow captures the
+        # value it started with and refuses to persist its record when the epoch
+        # moved: otherwise a logout that lands while the user is still in the
+        # browser is silently undone by the flow's own store.put().
+        self._auth_epoch: dict[str, int] = {}
+        self._auth_lock = threading.Lock()
         # Per-project tool-approval policy. Bound to the default cwd here; rebuilt
         # against the real workspace in initialize() once the desktop sends it, so
         # "accept edits" is scoped to <cwd>/.cluxmate/permissions.json and does
@@ -644,6 +658,18 @@ class JsonRpcServer:
             self._shutdown_mcp()
             if req_id is not None:
                 _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {"status": "ok"}})
+        elif method in ("mcp/auth/start", "mcp:auth:start"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id,
+                         "result": self._start_mcp_auth(str(params.get("server", "")))})
+        elif method in ("mcp/auth/logout", "mcp:auth:logout"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id,
+                         "result": self._logout_mcp_auth(str(params.get("server", "")))})
+        elif method in ("mcp/auth/status", "mcp:auth:status"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id,
+                         "result": {"servers": self._mcp_auth_status()}})
+        elif method in ("mcp/auth/cancel", "mcp:auth:cancel"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id,
+                         "result": self._cancel_mcp_auth(str(params.get("server", "")))})
         elif method in ("permissions/get", "permissions:get"):
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._policy.snapshot()})
         elif method in ("hooks/get", "hooks:get"):
@@ -1320,6 +1346,137 @@ class JsonRpcServer:
     def _grants_snapshot(self) -> dict[str, Any]:
         paths = self._grants.snapshot() if self._grants else []
         return {"paths": paths}
+
+    # ── MCP OAuth ──────────────────────────────────────────────────────
+    def _mcp_auth_status(self) -> list[dict[str, Any]]:
+        """Per-server OAuth state. Never includes a token value."""
+        if self._builder is None:
+            return []
+        return self._builder.mcp_status()
+
+    def _start_mcp_auth(self, server: str) -> dict[str, Any]:
+        """Kick off the interactive flow on a background thread.
+
+        MUST NOT block: _dispatch runs on the single stdin reader thread
+        (jsonrpc_server.run), so waiting here for a browser callback would freeze
+        approvals, cancellations and every later request for up to 5 minutes.
+        """
+        cfg = self._builder.mcp_config(server) if self._builder else None
+        if cfg is None:
+            return {"status": "unknown", "error": f"unknown MCP server: {server}"}
+        if cfg.transport != "http":
+            return {"status": "unsupported",
+                    "error": f"server '{server}' is local (stdio) — OAuth does not apply"}
+        if cfg.oauth is None:
+            return {"status": "disabled",
+                    "error": f"server '{server}' has OAuth disabled in mcp.json"}
+        with self._auth_lock:
+            if server in self._auth_inflight:
+                return {"status": "already_running"}
+            self._auth_inflight.add(server)
+            # Same block, same lock: a logout landing right after this read
+            # either happens before it (flow sees the new epoch and refuses to
+            # persist) or after the flow is registered in _auth_flows (the
+            # logout cancels it) — never in between, where it would be lost.
+            epoch = self._auth_epoch.get(server, 0)
+        gen = self._init_gen
+        try:
+            threading.Thread(
+                target=self._run_mcp_auth, args=(server, cfg, gen, epoch), daemon=True
+            ).start()
+        except Exception as e:  # thread exhaustion: the flow never started
+            # Roll the marker back and emit the completion here: _run_mcp_auth's
+            # finally never runs, and a sticky marker would answer
+            # already_running to every later start for the life of the process.
+            with self._auth_lock:
+                self._auth_inflight.discard(server)
+                self._auth_flows.pop(server, None)
+            _write_dict({"jsonrpc": "2.0", "method": "mcp/auth/completed",
+                         "params": {"server": server, "status": "failed",
+                                    "error": f"could not start the authorization "
+                                             f"thread: {e}"}})
+            return {"status": "failed", "error": str(e)}
+        return {"status": "started"}
+
+    def _run_mcp_auth(self, server: str, cfg: Any, gen: int, epoch: int) -> None:
+        status, error = "failed", None
+        try:
+            from cluxmate.core.mcp_auth_store import MCPAuthStore
+            from cluxmate.core.mcp_oauth import MCPOAuthFlow
+
+            store = MCPAuthStore()
+            challenge = self._mcp_client_challenge(server)
+            flow = MCPOAuthFlow(cfg.oauth, on_authorize_url=self._announce_auth_url(server))
+            with self._auth_lock:
+                self._auth_flows[server] = flow
+            record = flow.authorize(challenge)
+            with self._auth_lock:
+                superseded = self._auth_epoch.get(server, 0) != epoch
+            if superseded:
+                # A logout landed while the user was in the browser: persisting
+                # now would silently undo it (and re-enable the server the user
+                # just logged out of). Report it as cancelled, persist nothing.
+                raise OAuthError("authorization was superseded by a logout", "cancelled")
+            store.put(server, record)
+            changed = self._builder.reload_mcp_server(server) if self._builder else False
+            if changed and gen == self._init_gen and self._builder is not None:
+                # Same guard as _load_mcp_async: a re-initialize that landed while
+                # we were in the browser supersedes this rebuild.
+                self._agent = self._builder.build(session_log=self._session_log)
+            status = "ok"
+        except OAuthError as e:
+            status = e.kind if e.kind in ("denied", "cancelled", "timeout") else "failed"
+            error = str(e)
+        except Exception as e:  # never leave a user staring at a spinner
+            error = f"{type(e).__name__}: {e}"
+        finally:
+            with self._auth_lock:
+                self._auth_inflight.discard(server)
+                self._auth_flows.pop(server, None)
+            _write_dict({"jsonrpc": "2.0", "method": "mcp/auth/completed",
+                         "params": {"server": server, "status": status, "error": error}})
+
+    def _announce_auth_url(self, server: str):
+        """Emit the authorization URL so a headless/hostile-browser setup can
+        show it. The desktop currently ignores it; the CLI prints it."""
+        def _emit(url: str) -> None:
+            _write_dict({"jsonrpc": "2.0", "method": "mcp/auth/url",
+                         "params": {"server": server, "url": url}})
+        return _emit
+
+    def _mcp_client_challenge(self, server: str):
+        """Reuse the challenge from the client's last 401 so the flow skips a
+        redundant probe request."""
+        return self._builder.mcp_challenge(server) if self._builder is not None else None
+
+    def _logout_mcp_auth(self, server: str) -> dict[str, Any]:
+        from cluxmate.core.mcp_auth_store import MCPAuthStore
+
+        # Bump the epoch BEFORE the delete: any flow that is already waiting in
+        # the browser captured the previous value, so it can no longer persist a
+        # credential after this point (see _run_mcp_auth).
+        with self._auth_lock:
+            self._auth_epoch[server] = self._auth_epoch.get(server, 0) + 1
+            flow = self._auth_flows.get(server)
+        if flow is not None:
+            flow.cancel()   # a waiting flow must not keep the user hanging
+        removed = MCPAuthStore().delete(server)
+        changed = self._builder.reload_mcp_server(server) if self._builder else False
+        if changed and self._builder is not None:
+            self._agent = self._builder.build(session_log=self._session_log)
+        return {"status": "ok", "removed": removed}
+
+    def _cancel_mcp_auth(self, server: str) -> dict[str, Any]:
+        """Interrupt the callback wait. The flow then fails with an OAuthError and
+        still reports mcp/auth/completed (status `cancelled` — a user action, not
+        a failure), so the UI never keeps a spinner that nothing will ever
+        clear."""
+        with self._auth_lock:
+            flow = self._auth_flows.get(server)
+        if flow is None:
+            return {"status": "not_running"}
+        flow.cancel()
+        return {"status": "cancelled"}
 
     def _forbid_read_snapshot(self) -> dict[str, Any]:
         if self._read_denies is None:

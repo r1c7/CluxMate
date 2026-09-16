@@ -42,6 +42,31 @@ const SEARCH_DEBOUNCE_MS = 200
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchSeq = 0
 
+// ── MCP OAuth waiting state ──
+// The interactive login runs in Python and its outcome arrives as a
+// mcp/auth/completed push — but that push can be LOST: the bridge may die or
+// be reaped by the main process's 2-minute idle reaper, and kill() nulls the
+// completion callback without emitting anything. The same kill() also leaves
+// an in-flight start RPC's promise permanently unsettled, so without a bound
+// authPending would stay set and the server's login button would read "Waiting
+// for browser…" forever. This timer is the safety net: it clears the spinner
+// and reports the missing completion. Kept above the flow's own window PLUS
+// slack: Python's DEFAULT_CALLBACK_TIMEOUT_S is 300 s and that wait starts
+// only AFTER discovery + registration, so the whole flow can outlast 300 s —
+// a genuine timeout must be free to deliver its own `timeout` completion
+// instead of racing this watchdog to the toast.
+const MCP_AUTH_PENDING_TIMEOUT_MS = 6 * 60 * 1000
+let authPendingTimer: ReturnType<typeof setTimeout> | null = null
+
+// Cancel the pending-login watchdog (if armed). Called whenever the flow ends
+// for any reason or the store's session context changes.
+function clearAuthPendingTimer(): void {
+  if (authPendingTimer !== null) {
+    clearTimeout(authPendingTimer)
+    authPendingTimer = null
+  }
+}
+
 let _msgId = 0
 function nextId(): string { return `msg-${++_msgId}` }
 
@@ -319,6 +344,10 @@ interface AppState {
   // True while MCP_LIST is in-flight so the UI can show a loading state
   // during bridge warm-up (cold session just switched to).
   mcpLoading: boolean
+  // Name of the server whose OAuth login is currently in flight — the flow runs
+  // in Python and may keep the user in a browser for a minute, so the button
+  // shows a waiting state until mcp/auth/completed arrives. Null when idle.
+  authPending: string | null
   // Lifecycle hooks (settings.json) active in the current session's project,
   // normalized by the Python side (global + project merged).
   hooks: HookEntry[]
@@ -402,8 +431,21 @@ retryMessage: (messageId: string) => Promise<void>
   selectSkill: (path: string) => Promise<void>
   setSkillDisabled: (id: string, disabled: boolean) => Promise<void>
   showMcp: () => Promise<void>
+  // Re-fetch mcp/list WITHOUT switching the main view. The completion push and
+  // logout use this: a login the user started and then navigated away from must
+  // not yank them back into the MCP panel.
+  fetchMcpServers: () => Promise<void>
   selectMcpServer: (name: string) => void
   setMcpDisabled: (name: string, disabled: boolean) => Promise<void>
+  // Kick off the interactive OAuth flow for one server (no-op without an active
+  // session). Resolves once Python has STARTED the flow; the outcome is
+  // delivered later through refreshMcpAuthStatus.
+  startMcpAuth: (name: string) => Promise<void>
+  // Forget the stored OAuth tokens for one server and re-render from mcp/list.
+  logoutMcp: (name: string) => Promise<void>
+  // Called from the mcp/auth/completed push: clear the waiting state, re-fetch
+  // (the Python client was hot-swapped), and surface a non-ok outcome.
+  refreshMcpAuthStatus: (server: string, status: string, error?: string | null) => Promise<void>
   showHooks: () => Promise<void>
   reloadHooks: () => Promise<void>
   notifyHooks: (message: string) => Promise<void>
@@ -477,6 +519,7 @@ export const useStore = create<AppState>((set, get) => ({
   mcpServers: [],
   selectedMcpServer: null,
   mcpLoading: false,
+  authPending: null,
   hooks: [],
   hooksLoading: false,
   _activeUnsub: null,
@@ -852,8 +895,13 @@ export const useStore = create<AppState>((set, get) => ({
       ss.modelId = entry?.id || modelId
       ss.reasoningEffort = meta?.reasoning_effort != null ? meta.reasoning_effort : defaultReasoningValue(entry)
     }
+    // A pending OAuth flow belongs to the bridge of the session it was started
+    // in — switching sessions must drop it (the push would never be applied to
+    // this session anyway) and disarm its watchdog.
+    clearAuthPendingTimer()
     set({
       activeSessionId: id,
+      authPending: null,
       activeModelId: ss.modelId,
       activeReasoningEffort: ss.reasoningEffort,
       workingDir: meta?.cwd || get().workingDir,
@@ -2187,6 +2235,14 @@ export const useStore = create<AppState>((set, get) => ({
 
   showMcp: async () => {
     set({ mainView: 'mcp', mcpLoading: true })
+    await get().fetchMcpServers()
+  },
+
+  // The fetch half of showMcp, without the view switch. Kept separate so the
+  // OAuth completion / logout paths can refresh the list in place: the user may
+  // have navigated to another view while the browser flow ran, and a forced
+  // `mainView: 'mcp'` would yank them back (and re-trigger the loading race).
+  fetchMcpServers: async () => {
     const sid = get().activeSessionId
     if (!sid) {
       set({ mcpServers: [], mcpLoading: false })
@@ -2255,6 +2311,89 @@ export const useStore = create<AppState>((set, get) => ({
         ),
         error: tGlobal('error.toggleMcpFailed', { msg: e?.message }),
       })
+    }
+  },
+
+  // Kick off the interactive OAuth flow. `mcp/auth/start` returns as soon as the
+  // Python background thread is up, so on 'started' we KEEP the spinner: the
+  // user may spend a minute in the browser and the real outcome only arrives as
+  // a mcp/auth/completed push. Anything else is an immediate refusal (unknown
+  // server, local transport, OAuth disabled, already running).
+  startMcpAuth: async (name) => {
+    const sid = get().activeSessionId
+    if (!sid) return
+    // Arm (or re-arm) the watchdog for THIS flow. Must be called in the same
+    // tick as `set({ authPending: name })`: the pending state may never exist
+    // without a live timer, because the start RPC below can hang forever if the
+    // bridge dies inside this window (kill() nulls responseHandlers, so the
+    // promise never settles and neither `catch` nor any completion push runs).
+    const armWatchdog = () => {
+      clearAuthPendingTimer()
+      authPendingTimer = setTimeout(() => {
+        authPendingTimer = null
+        // Only report if this flow is still the pending one — a newer login
+        // (or a logout / session switch) must not be clobbered by a stale timer.
+        if (get().authPending !== name) return
+        set({
+          authPending: null,
+          error: tGlobal('error.mcpAuthFailed', {
+            msg: `no completion received within ${MCP_AUTH_PENDING_TIMEOUT_MS / 60000} min`,
+          }),
+        })
+      }, MCP_AUTH_PENDING_TIMEOUT_MS)
+    }
+    // A new flow supersedes any previous waiting state — drop its watchdog.
+    clearAuthPendingTimer()
+    set({ authPending: name })
+    armWatchdog()
+    try {
+      const res = await window.electronAPI.startMcpAuth(sid, name)
+      if (res.status !== 'started') {
+        clearAuthPendingTimer()
+        set({ error: res.error || `Cannot start authorization (${res.status})`, authPending: null })
+      } else {
+        // On 'started' the spinner stays until MCP_AUTH_COMPLETED arrives — the
+        // user may spend a minute in the browser. Re-arm so the bound measures
+        // from the moment Python's own wait begins (discovery + registration
+        // happen first): the push is not guaranteed (a dead/reaped bridge drops
+        // it without a trace) and a timer must stay live throughout.
+        armWatchdog()
+      }
+    } catch (e: any) {
+      clearAuthPendingTimer()
+      set({ authPending: null, error: tGlobal('error.mcpAuthFailed', { msg: e?.message }) })
+    }
+  },
+
+  // Drop the stored tokens + hot-swap the client back to unauthenticated.
+  logoutMcp: async (name) => {
+    const sid = get().activeSessionId
+    if (!sid) return
+    // Logging out ends (or invalidates) any in-flight login for this server.
+    clearAuthPendingTimer()
+    set({ authPending: null })
+    try {
+      await window.electronAPI.logoutMcp(sid, name)
+      // Refresh in place — do NOT force the MCP view open (see fetchMcpServers).
+      await get().fetchMcpServers()
+    } catch (e: any) {
+      set({ error: tGlobal('error.mcpLogoutFailed', { msg: e?.message }) })
+    }
+  },
+
+  // The browser flow finished (or was cancelled / timed out). Clear the pending
+  // spinner first — the notification is the only thing that ends it.
+  refreshMcpAuthStatus: async (server, status, error) => {
+    clearAuthPendingTimer()
+    set({ authPending: null })
+    // A re-fetch IS correct here (unlike setMcpDisabled): the Python client was
+    // hot-swapped, so mcp/list now reports the new status.
+    await get().fetchMcpServers()
+    // `cancelled` is a deliberate user action (Python's cancel handler), not a
+    // failure — refresh only, no toast. Everything else (denied / timeout /
+    // failed) is reported, naming the server so the message is actionable.
+    if (status !== 'ok' && status !== 'cancelled') {
+      set({ error: tGlobal('error.mcpAuthFailed', { msg: `${server}: ${error || status}` }) })
     }
   },
 
@@ -2334,6 +2473,20 @@ window.electronAPI.onBridgeStatusChanged(({ sessionIds, running }) => {
   const bridgeStatuses = { ...useStore.getState().bridgeStatuses }
   for (const sid of sessionIds) bridgeStatuses[sid] = running ?? false
   useStore.setState({ bridgeStatuses })
+
+  // A dead bridge can never deliver mcp/auth/completed (kill() nulls the
+  // completion callback), so the 6-minute login watchdog would be the only
+  // recovery. Clear the pending state as soon as the ACTIVE session's bridge is
+  // reported down — the login button must not read "Waiting for browser…"
+  // when nothing can answer it. Only the active session's status matters: a
+  // background session going down must not cancel the visible flow.
+  if (running === false) {
+    const sid = useStore.getState().activeSessionId
+    if (sid && sessionIds.includes(sid)) {
+      clearAuthPendingTimer()
+      if (useStore.getState().authPending) useStore.setState({ authPending: null })
+    }
+  }
 })
 
 // Live branch-change push: the main-process .git watcher fires this the moment
@@ -2342,4 +2495,12 @@ window.electronAPI.onBridgeStatusChanged(({ sessionIds, running }) => {
 // working dir's git state.
 window.electronAPI.onGitChanged(({ cwd }) => {
   if (cwd === useStore.getState().workingDir) useStore.getState().refreshGitInfo()
+})
+
+// MCP OAuth finished (background thread in Python, so it can land at any time,
+// possibly long after the user clicked login and moved on). Clear the waiting
+// spinner and re-fetch: the Python side already hot-swapped the client, so the
+// list comes back with the NEW status — no session restart needed.
+window.electronAPI.onMcpAuthCompleted(({ server, status, error }) => {
+  useStore.getState().refreshMcpAuthStatus(server, status, error)
 })

@@ -559,6 +559,7 @@ export type McpTransport = 'local' | 'remote'
 // Python process via the mcp/list JSON-RPC method.
 export type McpServerStatus =
   | 'connected'      // handshake ok, tools loaded
+  | 'needs_auth'     // the server requires OAuth — the user must log in
   | 'failed'        // spawn or handshake failed; see `error`
   | 'disabled'      // config has disabled: true — skipped at load
   | 'disconnected'  // not yet loaded or after shutdown
@@ -570,6 +571,18 @@ export interface McpTool {
   input_schema: Record<string, unknown>
 }
 
+// Per-server OAuth state reported by mcp/list. Never carries a token value —
+// the Python side only exposes the non-secret record fields.
+export interface McpOAuthInfo {
+  enabled: boolean
+  authenticated: boolean
+  expires_at?: number | null
+  has_refresh?: boolean
+  // Set when the server ALSO has a static Authorization header: OAuth wins, and
+  // the UI should say so instead of letting the user wonder which one is used.
+  conflict?: 'static_header' | null
+}
+
 export interface McpServer {
   name: string
   transport: McpTransport
@@ -577,6 +590,8 @@ export interface McpServer {
   disabled: boolean
   // Populated when status is 'failed' — the handshake / spawn error message.
   error?: string | null
+  // Present only when the server has an `oauth` block in mcp.json.
+  oauth?: McpOAuthInfo | null
   tools: McpTool[]
 }
 
@@ -847,6 +862,17 @@ export interface ElectronAPI {
   // on the next `initialize` (next session or explicit reload) — the running
   // session's tool list is NOT hot-swapped.
   setMcpDisabled: (sessionId: string, name: string, disabled: boolean) => Promise<void>
+  // Begin the interactive OAuth flow for one server. Returns as soon as the
+  // background flow starts; the outcome arrives via onMcpAuthCompleted because
+  // the Python RPC thread must never block on a human in a browser.
+  startMcpAuth: (sessionId: string, name: string) => Promise<{ status: string; error?: string }>
+  // Forget the stored OAuth tokens for one server and hot-swap the client back
+  // to an unauthenticated connection (no session restart).
+  logoutMcp: (sessionId: string, name: string) => Promise<{ status: string; removed?: boolean }>
+  // Fires when a background authorization finishes (mcp/auth/completed). The
+  // Python side has already hot-swapped the client, so the listener re-fetches
+  // the list and sees the NEW status (unlike setMcpDisabled).
+  onMcpAuthCompleted: (cb: (payload: { server: string; status: string; error?: string | null }) => void) => () => void
 
   getVersion: () => Promise<string>
   getDefaultCwd: () => Promise<string>

@@ -465,6 +465,11 @@ async function ensureBridge(sid: string, cwd: string, modelId: string): Promise<
       win.webContents.send(IPC.BRIDGE_STATUS_CHANGED, { sessionIds: [sid], running: false })
     }
   }
+  b.onMcpAuthCompleted = (payload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC.MCP_AUTH_COMPLETED, payload)
+    }
+  }
   bridges.set(sid, b)
   const spawnPromise = b.spawn(cwd, modelId, sid).catch((e) => {
     console.error(`Agent spawn failed for ${sid} at ${cwd}:`, e?.message)
@@ -1137,6 +1142,34 @@ export function registerIpcHandlers() {
       fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2), 'utf-8')
     }
   )
+
+  // Start the interactive OAuth flow for one server. Returns immediately —
+  // the Python side runs the flow (browser + loopback callback) on a background
+  // thread and reports back through MCP_AUTH_COMPLETED, because the RPC dispatch
+  // thread is the single stdin reader and must never block on a human.
+  ipcMain.handle(IPC.MCP_AUTH_START, async (_, sid: string, name: string) => {
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error('Invalid MCP server name')
+    const meta = sessionStore.getSession(sid)
+    if (!meta) throw new Error('Session not found')
+    let bridge = bridges.get(sid)
+    if (!bridge || !bridge.isRunning) {
+      bridge = await ensureBridge(sid, meta.cwd, resolveModelId(meta.model_id))
+    }
+    if (!bridge || !bridge.isRunning) {
+      throw new Error('MCP backend process failed to start (Python agent not ready)')
+    }
+    return bridge.startMcpAuth(name)
+  })
+
+  // Forget the stored OAuth tokens and hot-swap the client, so mcp/list reports
+  // the unauthenticated state immediately. Requires a RUNNING bridge: unlike
+  // start, there is nothing to do without it (no interactive browser step).
+  ipcMain.handle(IPC.MCP_AUTH_LOGOUT, async (_, sid: string, name: string) => {
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error('Invalid MCP server name')
+    const bridge = bridges.get(sid)
+    if (!bridge || !bridge.isRunning) throw new Error('MCP backend is not running')
+    return bridge.logoutMcp(name)
+  })
 
   // Git branch display/switch for the working-dir bar. Runs git directly in the
   // main process (see git-service.ts), independent of the per-session Python
