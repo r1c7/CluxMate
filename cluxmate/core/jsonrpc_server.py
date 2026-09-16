@@ -29,6 +29,9 @@ from cluxmate.core.read_denies import ReadDenyStore
 from cluxmate.core.hooks import HookManager
 from cluxmate.core.permissions import PermissionPolicy
 from cluxmate.core.subagents import SubagentRegistry
+from cluxmate.core.trust import (
+    DENIED, TRUSTED, TrustDecision, TrustStore, resolve_trust,
+)
 from cluxmate.core.session_log import (
     SessionHeader,
     SessionLog,
@@ -507,6 +510,12 @@ class JsonRpcServer:
         self._agent: AgentLoop | None = None
         self._builder: AgentBuilder | None = None
         self._cwd = os.getcwd()
+        # Project trust registry (~/.cluxmate/trust.json) + this run's overrides.
+        # One store per process: a trust/set or an initialize {trust} override is
+        # visible to every later re-initialize.
+        self._trust_store = TrustStore()
+        # The decision the CURRENT cwd was initialized with (None until initialize).
+        self._trust: TrustDecision | None = None
         self._session_id = ""
         # SessionStart hook feedback — prepended to the FIRST turn's injections
         # (one-shot, cleared by _handle_chat_send). Empty when none / not blocked.
@@ -672,6 +681,12 @@ class JsonRpcServer:
                          "result": self._cancel_mcp_auth(str(params.get("server", "")))})
         elif method in ("permissions/get", "permissions:get"):
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._policy.snapshot()})
+        elif method in ("trust/get", "trust:get"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._trust_get(params)})
+        elif method in ("trust/set", "trust:set"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._trust_set(params)})
+        elif method in ("trust/remove", "trust:remove"):
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "result": self._trust_remove(params)})
         elif method in ("hooks/get", "hooks:get"):
             hooks = self._builder._hooks_manager() if self._builder else None
             _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {
@@ -827,10 +842,17 @@ class JsonRpcServer:
         self._shutdown_lsp()
         self._shutdown_egress()
         self._cwd = params.get("cwd", os.getcwd())
+        # Project trust: an explicit initialize {trust} is this run's override
+        # (the desktop re-sends it after a bridge respawn for a session-only
+        # decision). Resolved BEFORE any project config is constructed below.
+        override = params.get("trust")
+        if override in (TRUSTED, DENIED):
+            self._trust_store.set_session(self._cwd, override)
+        self._trust = resolve_trust(self._cwd, self._trust_store)
         self._session_id = new_sid
         # Rebind the approval policy to this workspace's permissions.json so a
         # re-initialize onto a different cwd loads that project's policy.
-        self._policy = PermissionPolicy(self._cwd)
+        self._policy = PermissionPolicy(self._cwd, trusted=self._trust.trusted)
         # Writable-folder grants are user-global (~/.cluxmate/sandbox-grants.json)
         # and survive re-init; load once and share with the builder.
         if getattr(self, "_grants", None) is None:
@@ -875,6 +897,7 @@ class JsonRpcServer:
         self._init_gen += 1
         gen = self._init_gen
         builder = AgentBuilder(self._cwd, provider)
+        builder.with_trust(self._trust)
         builder.with_default_tools()
         builder.with_grants(self._grants)
         builder.with_read_denies(self._read_denies)
@@ -884,7 +907,7 @@ class JsonRpcServer:
         # Lifecycle hooks (settings.json). One manager per session so the payload
         # carries the session id; the builder caches it and children inherit it.
         # The observer streams hook_start/hook_result events to the desktop.
-        hooks = HookManager(self._cwd)
+        hooks = HookManager(self._cwd, trusted=self._trust.trusted)
         hooks.session_id = self._session_id
         hooks.set_observer(self._hook_observer)
         builder.with_hooks(hooks)
@@ -932,7 +955,9 @@ class JsonRpcServer:
             "tools": [t.definition() for t in builder._get_tools()],
             "checkpoints_enabled": checkpoints_ok,
             "permissions": self._policy.snapshot(),
+            "trust": self._trust_get({"cwd": self._cwd}),
         }})
+        self._announce_trust(self._trust)
         # Now warm MCP off the critical path. The desktop already has its
         # response; MCP tools become usable from the next turn after load done.
         # Fresh (unset) event for THIS generation's load — a turn that starts
@@ -1047,6 +1072,17 @@ class JsonRpcServer:
     def _handle_chat_send(self, req_id: Any, params: dict[str, Any]):
         if self._agent is None:
             _write_dict({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": "Agent not initialized"}})
+            return
+
+        # The trust gate is enforced here, in the engine — not in the front-ends.
+        # A turn must not run against a working directory whose owner has not
+        # answered yet, however the UI raced.
+        if self._trust is not None and self._trust.pending:
+            _write_dict({"jsonrpc": "2.0", "id": req_id, "error": {
+                "code": -32000,
+                "message": "[trust decision required] answer the project trust "
+                           "prompt (trust/set) before sending a message",
+            }})
             return
 
         self._cancel_chat()
@@ -1574,6 +1610,47 @@ class JsonRpcServer:
         cfg = getattr(self, "_egress_config", None)
         return cfg.snapshot() if cfg is not None else {"mode": "shared"}
 
+    # ── project trust ─────────────────────────────────────────
+
+    def _trust_cwd(self, params: dict[str, Any]) -> str:
+        """The directory a trust call is about — the session's cwd, not the
+        process cwd: the desktop spawns one bridge per session and passes the
+        session's working directory."""
+        return str(params.get("cwd") or self._cwd or os.getcwd())
+
+    def _trust_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        cwd = self._trust_cwd(params)
+        decision = resolve_trust(cwd, self._trust_store)
+        payload = decision.as_dict()
+        payload["store"] = self._trust_store.entries()
+        return payload
+
+    def _trust_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        cwd = self._trust_cwd(params)
+        status = str(params.get("status", ""))
+        if status not in (TRUSTED, DENIED):
+            return {"error": f"invalid status: {status!r}"}
+        if params.get("persist", True):
+            self._trust_store.set(cwd, status)
+        else:
+            self._trust_store.set_session(cwd, status)
+        return self._trust_get({"cwd": cwd})
+
+    def _trust_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        cwd = self._trust_cwd(params)
+        self._trust_store.remove(cwd)
+        return self._trust_get({"cwd": cwd})
+
+    def _announce_trust(self, decision: TrustDecision) -> None:
+        """Push trust/required so a front-end can ask (same mechanism as
+        mcp/auth/completed). Only an UNDECIDED directory with something to
+        decide about is worth a prompt."""
+        if not decision.pending:
+            return
+        payload = decision.as_dict()
+        payload["store"] = self._trust_store.entries()
+        _write_dict({"jsonrpc": "2.0", "method": "trust/required", "params": payload})
+
     def _agents_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
         """Subagent type catalog (builtin + user definitions).
 
@@ -1581,7 +1658,9 @@ class JsonRpcServer:
         desktop can render a `task` approval card before initialize.
         """
         cwd = str(params.get("cwd") or self._cwd or os.getcwd())
-        return SubagentRegistry(cwd).snapshot()
+        return SubagentRegistry(
+            cwd, trusted=resolve_trust(cwd, self._trust_store).trusted
+        ).snapshot()
 
     def _set_egress_config(self, params: dict[str, Any]) -> dict[str, Any]:
         """Replace the egress mode and rebuild the agent (the mode is baked

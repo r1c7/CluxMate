@@ -50,7 +50,10 @@ def _server(tmp_path, monkeypatch, mcp_url: str) -> JsonRpcServer:
         __import__("cluxmate.core.session_log", fromlist=["SessionLog"])
         .SessionLog.create(__import__("cluxmate.core.session_log", fromlist=["SessionHeader"])
                            .SessionHeader(id=sid, createdAt=0)), True))
-    s._handle_initialize(1, {"session_id": "s1", "cwd": str(cwd)})
+    # These tests are about the auth surface, not the trust gate: an undecided
+    # directory would withhold the project's mcp.json and leave nothing to log
+    # into. Trust the fixture (the same override the desktop sends).
+    s._handle_initialize(1, {"session_id": "s1", "cwd": str(cwd), "trust": "trusted"})
     # The deferred MCP load runs on a background thread; wait for it.
     assert s._mcp_ready.wait(timeout=10)
     return s
