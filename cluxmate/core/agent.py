@@ -18,7 +18,7 @@ from cluxmate.core.providers.base import (
     ToolCall,
     ToolResultMessage,
 )
-from cluxmate.core.context import compact, estimate_tokens
+from cluxmate.core.context import compact, estimate_tokens, prune_text
 from cluxmate.core.session_log import (
     APPEND,
     STAGE_APPROVAL,
@@ -51,6 +51,15 @@ COMPACT_THRESHOLD = 0.8
 # stale; recomputing is cheap next to committing an edit that would desync the
 # logged surface from the request actually sent (see AgentLoop._compact_step).
 MAX_COMPACTION_RECOMPUTES = 1
+
+# Minimum age (in turns) of a tool result before its middle may be pruned when
+# the context is over budget. This turn's results are the working set the model
+# is reasoning about right now, and last turn's are usually still the subject of
+# the work, so both are left intact: MiMo-Code prunes what is older than two
+# user turns, and DSH has no age rule at all (it prunes every oversized result,
+# including the one just produced). Erring toward keeping fresh results costs a
+# little context and cannot make the model miss the thing it just asked for.
+PRUNE_MIN_TURN_AGE = 2
 
 # Friendly fallback shown when the provider call fails for anything other than
 # quota exhaustion: network unreachable, model unavailable, request timeouts,
@@ -241,6 +250,18 @@ class AgentCallbacks:
         self, call_id: str, result: "ToolResult"
     ) -> None:
         """Called after tool execution with the result."""
+        pass
+
+    async def on_context_pruned(self, entries: list[dict[str, Any]]) -> None:
+        """Called after stale tool results were rewritten to fit the window.
+
+        ``entries`` has one dict per rewritten result — ``{"call_id", "output",
+        "is_error"}``, ``output`` being the text the model now sees. It is NOT a
+        second :meth:`on_tool_end`: the tool ran once and nothing was re-run, so
+        a front-end that renders tool cards should patch the existing card in
+        place (a new card would duplicate the call). Front-ends whose history is
+        scrollback only can ignore this.
+        """
         pass
 
     async def on_todo_update(self, todos: list[dict[str, Any]]) -> None:
@@ -580,10 +601,75 @@ class AgentLoop:
             return messages
         return [messages[0], *self.session_log.derive_messages()]
 
-    async def _compact_step(
+    def _prune_step(
         self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Drop the middle of stale tool results. Returns ``(messages, entries)``.
+
+        The model-free tier of context relief, run before the summarizer: it
+        cannot misread a tool's output, it costs no provider call, and the text
+        it removes is recoverable (the full result stays in the append-only log,
+        and a spilled result also carries its spill path). Each rewrite is
+        logged as a single-node ``tool/result`` replace that preserves every
+        other field of the original event — ``turn``/``step``/``callId``/
+        ``error`` and the audit metadata survive, so replay and the audit trail
+        are unchanged and only ``message.content`` shrinks.
+
+        The rewrite is by POSITION (``messages[i + 1]`` for surface node ``i``,
+        since ``messages[0]`` is the system prompt), so it is applied only when
+        the working list is exactly the surface plus that system message; on any
+        drift the step does nothing at all. Otherwise a rewrite computed against
+        the log could land on an unrelated message — and a request is the one
+        thing this function must never change except where it was told to.
+
+        Idempotent by construction: a pruned result is head+marker+tail, which
+        is below :data:`PRUNE_THRESHOLD_CHARS`, so a second pass leaves it be.
+        Returns ``entries`` for :meth:`AgentCallbacks.on_context_pruned`.
+        """
+        log = self.session_log
+        if log is None or not messages:
+            return messages, []
+        if messages[1:] != log.derive_messages():
+            return messages, []
+        entries: list[dict[str, Any]] = []
+        for index, event in enumerate(log.surface):
+            if event.type != "tool/result":
+                continue
+            logged_turn = event.data.get("turn")
+            age = self._log_turn - logged_turn if isinstance(logged_turn, int) else 0
+            if age < PRUNE_MIN_TURN_AGE:
+                continue
+            message = event.data.get("message")
+            if not isinstance(message, dict):
+                continue
+            pruned = prune_text(message.get("content"))
+            if pruned is None:
+                continue
+            log.append(
+                "tool/result",
+                {**event.data, "message": {**message, "content": pruned}},
+                surface_op=ReplaceOp(start=index, end=index),
+                source_event_seqs=[event.seq],
+            )
+            messages[index + 1] = {**message, "content": pruned}
+            entries.append({
+                "call_id": event.data.get("callId"),
+                "output": pruned,
+                "is_error": bool(event.data.get("error")),
+            })
+        return messages, entries
+
+    async def _compact_step(
+        self,
+        messages: list[dict[str, Any]],
+        callbacks: "AgentCallbacks | None" = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Compact ``messages`` if over budget. Returns ``(messages, did_compact)``.
+        """Shrink ``messages`` if over budget. Returns ``(messages, changed)``.
+
+        Two tiers, cheapest first: prune stale tool results (model-free), then
+        summarize the middle region if the context is *still* over budget.
+        Because the estimate is recomputed between them, a prune that already
+        clears the pressure never pays for a summarizer call.
 
         Generation guard (P0-4): ``compact`` awaits the summarizer, and the edit
         it returns is expressed as indices into the surface it measured. If that
@@ -596,8 +682,17 @@ class AgentLoop:
         at most :data:`MAX_COMPACTION_RECOMPUTES` times. A surface that keeps
         moving leaves this step uncompacted (the next step retries) rather than
         committing an edit it cannot vouch for.
+
+        ``changed`` means the request list changed at all (prune or summary) —
+        the caller must re-estimate the context. Only a real summarization sets
+        ``compacted_this_turn``: a prune folds no injections away, so it must not
+        invalidate them or claim a compaction to the UIs.
         """
         log = self.session_log
+        messages, pruned = self._prune_step(messages)
+        if pruned and callbacks is not None:
+            await callbacks.on_context_pruned(pruned)
+        changed = bool(pruned)
         for _attempt in range(MAX_COMPACTION_RECOMPUTES + 1):
             generation = log.surface_generation if log is not None else None
             sources = [None] + log.message_sources() if log is not None else None
@@ -606,13 +701,14 @@ class AgentLoop:
                 threshold=COMPACT_THRESHOLD, sources=sources,
             )
             if not did:
-                return messages, False
+                return messages, changed
             if log is None or log.surface_generation == generation:
                 self._log_compaction(edit)
+                self.compacted_this_turn = True
                 return new_messages, True
             self._compaction_stale_retries += 1
             messages = self._conversation_from_log(messages)
-        return messages, False
+        return messages, changed
 
     def _last_turn_end(self) -> tuple[int, dict[str, Any]] | None:
         """``(turn, reason)`` of the most recent ``turn/end`` event, if any."""
@@ -1030,9 +1126,11 @@ class AgentLoop:
                         )
                     skip_compact = hr.blocked
                 if not skip_compact:
-                    messages, did = await self._compact_step(messages)
-                    if did:
-                        self.compacted_this_turn = True
+                    messages, changed = await self._compact_step(messages, callbacks)
+                    if changed:
+                        # Pruning counts: without this the estimate stays at its
+                        # pre-prune value, so every later step re-enters this
+                        # branch and re-runs the PreCompact hook for nothing.
                         ctx_tokens = estimate_tokens(messages)
 
             # Emit step/start, then a request/header snapshot only when the

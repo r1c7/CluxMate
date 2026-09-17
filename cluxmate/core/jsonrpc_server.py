@@ -333,6 +333,18 @@ class JsonRpcCallbacks(AgentCallbacks):
             },
         })
 
+    async def on_context_pruned(self, entries: list[dict[str, Any]]) -> None:
+        """Stale tool results were rewritten to fit the window.
+
+        The desktop patches the matching tool cards in place (``call_id``), so
+        the transcript it persists matches the transcript the model sees — the
+        cards are written from this stream, not re-derived from the log.
+        """
+        _write_dict({
+            "jsonrpc": "2.0", "method": "chat/stream",
+            "params": {"type": "context_pruned", "entries": entries},
+        })
+
     async def on_todo_update(self, todos: list[dict[str, Any]]) -> None:
         """Forward the canonical task list as a dedicated stream event.
 
@@ -489,6 +501,15 @@ class ScopedCallbacks(AgentCallbacks):
             "params": {
                 "type": "tool_result", "call_id": call_id,
                 "output": result.content, "is_error": result.is_error,
+                "agent_id": self._agent_id,
+            },
+        })
+
+    async def on_context_pruned(self, entries: list[dict[str, Any]]) -> None:
+        _write_dict({
+            "jsonrpc": "2.0", "method": "chat/stream",
+            "params": {
+                "type": "context_pruned", "entries": entries,
                 "agent_id": self._agent_id,
             },
         })

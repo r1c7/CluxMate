@@ -117,6 +117,23 @@ function patchTool(msg: ChatMessage, callId: string, patch: Partial<ToolCallEntr
   }
 }
 
+// Patch a tool card wherever it lives. A card whose call happened in an earlier
+// turn is NOT in the message now streaming, so `mapAgentMsg` (current message
+// only) would miss it and the transcript this persists would keep a text the
+// model no longer has. Cross-turn patches therefore scan every message, the
+// same way approve/deny do. Both helpers no-op on a message without the call id
+// (or, for a subagent, without that node), so scanning is safe.
+function patchToolEverywhere(
+  msgs: ChatMessage[], callId: string, patch: Partial<ToolCallEntry>, agentId?: string
+): ChatMessage[] {
+  return msgs.map((m) => {
+    if (m.role !== 'agent') return m
+    return agentId
+      ? updateNode(m, agentId, (n) => nodePatchTool(n, callId, patch))
+      : patchTool(m, callId, patch)
+  })
+}
+
 function blocksToText(blocks: MessageBlock[] | undefined): string {
   return (blocks || []).filter((b): b is Extract<MessageBlock, { type: 'text' }> => b.type === 'text')
     .map((b) => b.text).join('')
@@ -1249,6 +1266,22 @@ export const useStore = create<AppState>((set, get) => ({
         // flows back via answerQuestion and the tool_result resolves both.
         css.pendingQuestion = { call_id: event.call_id, questions: event.questions }
         commit(css, s2)
+      } else if (event.type === 'context_pruned') {
+        // Stale tool results were rewritten to fit the model's window. Patch each
+        // card IN PLACE (never append: the tool ran once, so a new card would
+        // duplicate the call) with the text the model now sees, so the transcript
+        // this persists stays in step with the model's context. Status is left
+        // alone — pruning is not a re-run and must not flip error -> done. The
+        // scan is over EVERY message, because a pruned result is always at least
+        // two turns old — its card is not in the reply now streaming.
+        for (const entry of event.entries) {
+          // No call id → nothing to patch (a card is keyed by it).
+          if (!entry.call_id) continue
+          css.messages = patchToolEverywhere(
+            css.messages, entry.call_id, { result: entry.output }, isSub ? aid! : undefined,
+          )
+        }
+        commit(css, s2)
       } else if (event.type === 'tool_result') {
         const patch = { status: event.is_error ? ('error' as const) : ('done' as const), result: event.output }
         css.messages = mapAgentMsg(css.messages, agentMsgId, (m) =>
@@ -2073,6 +2106,17 @@ export const useStore = create<AppState>((set, get) => ({
         // QuestionCard. The tool block (tool_start) already renders; the answer
         // flows back via answerQuestion and the tool_result resolves both.
         css.pendingQuestion = { call_id: event.call_id, questions: event.questions }
+        commit(css, s2)
+      } else if (event.type === 'context_pruned') {
+        // Same in-place patch as the other stream handler: a pruned result must
+        // not become a second card, and the status must not flip.
+        for (const entry of event.entries) {
+          // No call id → nothing to patch (a card is keyed by it).
+          if (!entry.call_id) continue
+          css.messages = patchToolEverywhere(
+            css.messages, entry.call_id, { result: entry.output }, isSub ? aid! : undefined,
+          )
+        }
         commit(css, s2)
       } else if (event.type === 'tool_result') {
         const patch = { status: event.is_error ? ('error' as const) : ('done' as const), result: event.output }

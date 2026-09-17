@@ -115,6 +115,19 @@ export interface ToolResultEvent {
   agent_id?: string
 }
 
+// Emitted when stale tool results were rewritten to fit the context window
+// (the model-free prune that runs before compaction). One entry per rewritten
+// result; the card is PATCHED by call_id, never appended — the tool ran once,
+// so a second card would duplicate the call. `output` is the text the model
+// now sees, so the persisted transcript matches the model's context.
+export interface ContextPrunedEvent {
+  type: 'context_pruned'
+  // call_id is null only if the log event carried no callId (never, for a
+  // rewrite the agent loop wrote) — no card matches, so the patch is a no-op.
+  entries: { call_id: string | null; output: string; is_error?: boolean }[]
+  agent_id?: string
+}
+
 export interface TextDeltaEvent {
   type: 'text_delta'
   content: string
@@ -323,7 +336,7 @@ export interface TodoUpdateEvent {
 export type StreamEvent =
   | ToolStartEvent | ToolResultEvent | TextDeltaEvent | ThinkingEvent
   | AgentStartEvent | AgentEndEvent | TurnDiffEvent | TurnStartEvent | SkillUsedEvent
-  | TitleSuggestedEvent | QuestionEvent
+  | TitleSuggestedEvent | QuestionEvent | ContextPrunedEvent
   | HookStartEvent | HookResultEvent | TextRestartEvent | TodoUpdateEvent
   | UsageEvent
 

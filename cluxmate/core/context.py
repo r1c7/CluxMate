@@ -23,12 +23,28 @@ failed summarize falls back to a truncation note so a turn never hard-fails.
 
 Token counts are char/4 estimates (no tokenizer dependency); the agent loop
 calibrates against the provider's real usage where available.
+
+Before any of that, an over-budget context gets one **model-free** pass:
+:func:`prune_text` drops the middle of a stale tool result, keeping its head and
+tail and marking the cut explicitly (DSH ``compaction-tool-result-pruner``).
+That is far cheaper than summarization and, unlike a summary, cannot misread
+what the tool returned — it only removes text the model can re-fetch. Which
+results count as "stale" is the agent loop's call (it owns the log's turn
+numbers); this module only rewrites text.
 """
 
 import json
 from typing import Any
 
 CHARS_PER_TOKEN = 4
+
+# Tier-0 pruning budgets, in CHARACTERS (not tokens — the agent loop's own
+# estimate decides whether the saving was enough). A result larger than the
+# threshold keeps `head` + `tail`; everything between them becomes a marker.
+# Sizes are DSH's defaults, which are tuned for coding-agent tool output.
+PRUNE_THRESHOLD_CHARS = 8192
+PRUNE_HEAD_CHARS = 4096
+PRUNE_TAIL_CHARS = 1024
 
 # ``user/message`` sources that are environment injections (memory/memory-recall/
 # skills/mode/compaction/interruption/hook), not human turns. ``_split_head`` skips them when
@@ -84,6 +100,37 @@ def _message_chars(msg: dict[str, Any]) -> int:
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
     """Rough token estimate for a message list (char/4 heuristic)."""
     return sum(_message_chars(m) for m in messages) // CHARS_PER_TOKEN
+
+
+def prune_text(
+    text: Any,
+    *,
+    threshold: int = PRUNE_THRESHOLD_CHARS,
+    head: int = PRUNE_HEAD_CHARS,
+    tail: int = PRUNE_TAIL_CHARS,
+) -> str | None:
+    """Head + marker + tail for an oversized result, or None to leave it alone.
+
+    Returns None when there is nothing to gain: a non-string content (a shape
+    this module does not own), text within ``threshold``, or budgets so large
+    the rewrite would not be smaller. The marker names the number of dropped
+    characters so the model knows data is missing and can re-run the tool
+    instead of reasoning as if the visible text were the whole result. The cut
+    is by character, so a caller must never rely on the result being a valid
+    line prefix (DSH does the same; grapheme clusters are not respected).
+    """
+    if not isinstance(text, str) or len(text) <= threshold:
+        return None
+    head = max(0, head)
+    tail = max(0, tail)
+    omitted = len(text) - head - tail
+    if omitted <= 0:
+        return None
+    marker = f"\n\n[... {omitted} characters pruned from the middle of this result ...]\n\n"
+    pruned = text[:head] + marker + (text[len(text) - tail:] if tail else "")
+    if len(pruned) >= len(text):
+        return None
+    return pruned
 
 
 def _is_tool_result(msg: dict[str, Any]) -> bool:

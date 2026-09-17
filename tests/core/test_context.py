@@ -3,8 +3,12 @@
 import pytest
 
 from cluxmate.core.context import (
+    PRUNE_HEAD_CHARS,
+    PRUNE_TAIL_CHARS,
+    PRUNE_THRESHOLD_CHARS,
     compact,
     estimate_tokens,
+    prune_text,
     _balance_prefix,
     _is_tool_result,
     _pairing_cut,
@@ -30,6 +34,46 @@ class SummarizeProvider:
 
 def _big(n: int) -> str:
     return "x" * n
+
+
+# ── prune_text (tier-0 tool-result pruning) ────────────────
+
+
+def test_prune_text_leaves_a_result_within_the_threshold_alone():
+    text = _big(PRUNE_THRESHOLD_CHARS)
+    assert prune_text(text) is None
+    assert prune_text("short") is None
+    assert prune_text("") is None
+
+
+def test_prune_text_keeps_head_and_tail_and_names_the_omitted_count():
+    text = "H" * PRUNE_HEAD_CHARS + "M" * 50_000 + "T" * PRUNE_TAIL_CHARS
+    out = prune_text(text)
+    assert out is not None
+    assert out.startswith("H" * PRUNE_HEAD_CHARS)
+    assert out.endswith("T" * PRUNE_TAIL_CHARS)
+    omitted = len(text) - PRUNE_HEAD_CHARS - PRUNE_TAIL_CHARS
+    assert f"[... {omitted} characters pruned from the middle of this result ...]" in out
+    # Strictly smaller, and small enough that a second pass has nothing to do —
+    # the idempotence the agent loop relies on to avoid re-pruning every step.
+    assert len(out) < len(text)
+    assert prune_text(out) is None
+    assert "M" not in out
+
+
+def test_prune_text_ignores_content_it_does_not_own():
+    """A non-string content (the Anthropic block shape, a null) is left alone."""
+    assert prune_text(None) is None
+    assert prune_text({"type": "text", "text": _big(50_000)}) is None
+    assert prune_text([{"type": "text", "text": _big(50_000)}]) is None
+
+
+def test_prune_text_refuses_a_rewrite_that_would_not_shrink():
+    """Budgets that leave no middle (head + tail >= len) must not produce a
+    longer string than the original."""
+    text = _big(PRUNE_THRESHOLD_CHARS + 10)
+    out = prune_text(text, head=len(text) - 5, tail=5)
+    assert out is None
 
 
 # ── estimate_tokens ────────────────────────────────────────
