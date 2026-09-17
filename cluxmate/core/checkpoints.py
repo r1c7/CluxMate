@@ -166,12 +166,17 @@ class CheckpointManager:
             self._run("config", "core.logAllRefUpdates", "false")
 
         # Always ensure our exclude patterns are present:
-        # - `.git/`       without it `git add -A` sucks the user's real repo
-        #                 history into every snapshot.
-        # - `.cluxmate/` CluxMate's own per-project state (permissions.json,
-        #                 mcp.json, skills) is written by UI toggles/housekeeping,
-        #                 not the agent's turn. Snapshotting it would pollute the
-        #                 turn diff and let undo revert a permission/MCP change.
+        # - `.git/`        without it `git add -A` sucks the user's real repo
+        #                  history into every snapshot.
+        # - `.cluxmate/`   CluxMate's own per-project state (permissions.json,
+        #                  mcp.json, skills) is written by UI toggles/housekeeping,
+        #                  not the agent's turn. Snapshotting it would pollute the
+        #                  turn diff and let undo revert a permission/MCP change.
+        # - `.worktrees/`  other sessions' linked checkouts. Git would record
+        #                  each as an embedded repository (gitlink, 160000), so
+        #                  every main-tree snapshot would carry their pointers
+        #                  into the turn diff — and restore cannot remove a
+        #                  directory (its delete branch calls unlink()).
         # Append any missing pattern (idempotent — upgrades an existing shadow
         # repo that only had `.git/`).
         info_dir = git_dir / "info"
@@ -182,7 +187,9 @@ class CheckpointManager:
         except OSError:
             existing = ""
         lines = existing.splitlines()
-        additions = [p for p in (".git/", ".cluxmate/") if p not in lines]
+        additions = [
+            p for p in (".git/", ".cluxmate/", ".worktrees/") if p not in lines
+        ]
         if additions:
             prefix = existing if existing.endswith("\n") or existing == "" else existing + "\n"
             exclude.write_text(prefix + "\n".join(additions) + "\n", encoding="utf-8")

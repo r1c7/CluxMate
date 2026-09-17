@@ -380,3 +380,23 @@ def test_delete_shadow_repo_for_cwd(tmp_path):
     assert not repo.exists()
     # A second call finds nothing and reports False.
     assert ckpt.delete_shadow_repo_for_cwd(str(work), checkpoints_root=root) is False
+
+
+def test_worktrees_never_enter_a_snapshot(tmp_path):
+    """`.worktrees/` holds other sessions' checkouts.
+
+    Without an exclude entry git records each one as an embedded repository
+    (gitlink, mode 160000), which then shows up in every turn diff of the main
+    tree — and `restore` cannot undo it (its delete branch uses unlink()).
+    """
+    repo = tmp_path / "repo"
+    (repo / ".worktrees" / "wt").mkdir(parents=True)
+    (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
+    (repo / ".worktrees" / "wt" / "README.md").write_text("x\n", encoding="utf-8")
+    mgr = CheckpointManager(str(repo))
+    if not mgr.available():
+        pytest.skip("git not on PATH")
+    sha = mgr.snapshot("s1", "turn1")
+    paths = {row["path"] for row in mgr.summary(sha)}
+    assert not [p for p in paths if p.startswith(".worktrees")]
+    assert "keep.txt" in paths
