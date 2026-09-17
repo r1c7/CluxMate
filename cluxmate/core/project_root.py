@@ -85,13 +85,21 @@ def clear_cache() -> None:
 def resolve(cwd: str, *, use_cache: bool = True) -> ProjectRoot:
     try:
         key = str(Path(cwd).resolve())
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError: a path with an embedded NUL cannot be `stat`ed on Windows
+        # (and `subprocess` rejects it too) — the raw string is all we have.
         key = str(cwd)
     if use_cache:
         cached = _CACHE.get(key)
         if cached is not None:
             return cached
-    info = _probe(key)
+    try:
+        info = _probe(key)
+    except (OSError, ValueError):
+        # Same unresolvable path: git can be neither run nor probed from it, so
+        # degrade to the cwd exactly like "no git / not a repo" above. This
+        # function is documented never to raise.
+        info = ProjectRoot(key, key, False, None)
     if use_cache:
         _CACHE[key] = info
     return info

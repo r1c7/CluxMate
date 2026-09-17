@@ -109,6 +109,21 @@ def test_git_missing_degrades_to_cwd(tmp_path, monkeypatch):
     assert info.is_worktree is False
 
 
+def test_unstatable_cwd_degrades_to_cwd(tmp_path):
+    """Embedded NUL: `Path.resolve` raises ValueError *and* git cannot run there.
+
+    Both halves are needed for "never raises" — catching ValueError around the
+    key alone would just move the crash into `_probe` (subprocess rejects a NUL
+    argument with the same ValueError).
+    """
+    bad = str(tmp_path / "repo") + "\x00sub"
+    info = project_root.resolve(bad)
+    assert info.cwd == bad
+    assert info.root == bad
+    assert info.is_worktree is False
+    assert info.config_root == bad
+
+
 def test_relative_git_common_dir_fallback(tmp_path, monkeypatch):
     """`--path-format=absolute` 不可用（git < 2.31）时走第二种调用形式。"""
     repo = _repo(tmp_path)

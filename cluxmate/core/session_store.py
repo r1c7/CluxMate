@@ -32,10 +32,20 @@ from cluxmate.core.session_log_store import (
 def _resolve_root(cwd: str) -> str:
     from cluxmate.core.project_root import resolve
 
-    # config_root (NOT .root): only a LINKED worktree is redirected to the main
-    # worktree, so a session in a SUBDIRECTORY of an ordinary repo still forms
-    # its own project exactly as it does today.
-    return resolve(cwd).config_root if cwd else ""
+    if not cwd:
+        return ""
+    try:
+        # config_root (NOT .root): only a LINKED worktree is redirected to the main
+        # worktree, so a session in a SUBDIRECTORY of an ordinary repo still forms
+        # its own project exactly as it does today.
+        return resolve(cwd).config_root
+    except Exception:
+        # Binding constraint: resolving the project root NEVER raises and degrades
+        # to the session cwd, so an unusable path can never abort `create`.
+        # `project_root.resolve` promises the same and now catches ValueError too,
+        # but keep the guard local: a group key of None would drop the session out
+        # of every project, and the fallback must stay the cwd, not an empty group.
+        return cwd
 
 
 def _same_cwd(a: str, b: str) -> bool:

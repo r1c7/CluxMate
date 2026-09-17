@@ -313,6 +313,78 @@ class TestProjectRoot:
         assert store.load(sid)["project_root"] == str(sub)
         assert [g["name"] for g in store.list_groups()] == ["pkg"]
 
+    @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+    def test_a_linked_worktree_session_resolves_its_root_on_its_own(self, tmp_path):
+        """The PRODUCTION path: `create` resolves the project root itself.
+
+        Every other test here either uses a PLAIN directory or passes
+        ``project_root=`` explicitly, so all of them would still pass if the
+        group key were the session cwd. This one builds a REAL linked worktree
+        with git and tells `create` nothing but the worktree path.
+        """
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git("init", cwd=repo)
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        _git("add", "-A", cwd=repo)
+        _git("commit", "-m", "init", cwd=repo)
+        wt = repo / ".worktrees" / "me"
+        _git("worktree", "add", "-b", "me/x", str(wt), cwd=repo)
+        store = SessionStore(root_dir=tmp_path / "state")
+
+        main_id = store.create("main", "p", "m", str(repo))
+        wt_id = store.create("wt", "p", "m", str(wt))
+
+        # The worktree session stores the MAIN repo root, not its own tree.
+        assert store.load(wt_id)["project_root"] == str(repo)
+        assert store.load(main_id)["project_root"] == str(repo)
+        # ... and therefore lands in ONE auto group with the repo session.
+        auto = [g for g in store.list_groups() if g["is_auto"]]
+        assert len(auto) == 1
+        assert Path(auto[0]["path"]).resolve() == repo.resolve()
+        assert store.load(wt_id)["group_id"] == store.load(main_id)["group_id"]
+
+    def test_an_unresolvable_cwd_still_creates_a_usable_group(self, tmp_path):
+        """A cwd that cannot be RESOLVED must not abort session creation.
+
+        ``project_root.resolve`` (like ``Path.resolve``) raises ``ValueError`` on
+        a path with an embedded NUL instead of degrading. The store's contract is
+        "never raise, degrade to the session cwd", so `create` must still return
+        a session whose project root (and so its group key) is that cwd.
+        """
+        bad_cwd = str(tmp_path / "repo") + "\x00sub"
+        store = SessionStore(root_dir=tmp_path / "state")
+
+        sid = store.create("s", "p", "m", bad_cwd)
+
+        meta = store.load(sid)
+        assert meta["working_dir"] == bad_cwd
+        assert meta["project_root"] == bad_cwd  # degraded to the session cwd
+        assert meta["group_id"] is not None  # still a usable group key
+        assert [g["name"] for g in store.list_groups()]
+
+    def test_creation_survives_a_resolver_that_raises(self, tmp_path, monkeypatch):
+        """The STORE's own guard, isolated from `project_root`'s behaviour.
+
+        `project_root.resolve` is documented never to raise, but the binding
+        constraint belongs to the store: whatever that helper does, `create` must
+        still build a session grouped under its own cwd.
+        """
+
+        def boom(cwd, **kwargs):
+            raise ValueError("resolver blew up")
+
+        monkeypatch.setattr("cluxmate.core.project_root.resolve", boom)
+        cwd = str(tmp_path / "repo")
+        store = SessionStore(root_dir=tmp_path / "state")
+
+        sid = store.create("s", "p", "m", cwd)
+
+        meta = store.load(sid)
+        assert meta["project_root"] == cwd
+        assert meta["group_id"] is not None
+        assert [g["name"] for g in store.list_groups()] == ["repo"]
+
 
 class TestMigration:
     def test_an_existing_db_gains_the_column_additively(self, tmp_path):
