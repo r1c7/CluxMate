@@ -11,10 +11,14 @@ by a **shadow git repository** that is completely independent of the user's own
 - All git invocations set ``GIT_DIR`` / ``GIT_WORK_TREE`` via the environment
   and disable global/system config, so the user's real repository history and
   index are never touched.
-- The shadow repo's ``info/exclude`` lists ``.git/`` (the user's real repo) and
+- The shadow repo's ``info/exclude`` lists ``.git/`` (the user's real repo),
   ``.cluxmate/`` (CluxMate's own per-project state — permissions.json,
   mcp.json, skills — written by UI toggles/housekeeping, not the agent's turn)
-  so neither is ever sucked into a snapshot or reverted by undo.
+  and ``.worktrees/`` (other sessions' linked checkouts, which git would
+  otherwise record as embedded-repository gitlinks in every snapshot). None of
+  the three is ever sucked into a snapshot or reverted by undo; entries a
+  pre-existing shadow repo already tracked are dropped from its index once, on
+  init (see ``_ensure_init_inner``).
 
 If git is not on PATH the whole feature degrades to a no-op: ``available()``
 returns False and every method returns an empty/neutral result so the agent
@@ -173,12 +177,14 @@ class CheckpointManager:
         #                  not the agent's turn. Snapshotting it would pollute the
         #                  turn diff and let undo revert a permission/MCP change.
         # - `.worktrees/`  other sessions' linked checkouts. Git would record
-        #                  each as an embedded repository (gitlink, 160000), so
-        #                  every main-tree snapshot would carry their pointers
-        #                  into the turn diff — and restore cannot remove a
-        #                  directory (its delete branch calls unlink()).
+        #                  each as an embedded repository (gitlink, 160000), and
+        #                  that pointer line then lands in the turn diff — on the
+        #                  snapshot that first records it and, thereafter, on
+        #                  each one where the nested checkout's HEAD moved. It
+        #                  also cannot be undone by restore (whose delete branch
+        #                  calls unlink(), not rmtree).
         # Append any missing pattern (idempotent — upgrades an existing shadow
-        # repo that only had `.git/`).
+        # repo that predates any of these three entries).
         info_dir = git_dir / "info"
         info_dir.mkdir(parents=True, exist_ok=True)
         exclude = info_dir / "exclude"
@@ -193,6 +199,29 @@ class CheckpointManager:
         if additions:
             prefix = existing if existing.endswith("\n") or existing == "" else existing + "\n"
             exclude.write_text(prefix + "\n".join(additions) + "\n", encoding="utf-8")
+
+        # An exclude entry only binds paths git has not ALREADY tracked: a shadow
+        # repo created before `.worktrees/` was excluded still carries each
+        # checkout as a gitlink, and `add -A` then keeps re-recording that
+        # pointer whenever the nested checkout's HEAD moves — so the line would
+        # go on appearing in later turn diffs. Drop any such entry from the
+        # index; the next snapshot's add+commit is what records the removal
+        # (nothing is committed here, and nothing on disk is touched).
+        # With no `.worktrees` entry this costs a single `ls-files`, and a git
+        # failure must never disable checkpoints — hence the return-code guard
+        # and the swallowed exception.
+        try:
+            tracked = self._run("ls-files", "-z", "--", ".worktrees")
+            if tracked.returncode == 0 and tracked.stdout:
+                # -f: an already-refreshed gitlink is staged differently from
+                # HEAD, which plain `rm --cached` refuses; --cached keeps the
+                # nested checkout on disk untouched.
+                self._run(
+                    "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
+                    ".worktrees",
+                )
+        except Exception:
+            pass
 
         self._initialized = True
         return True

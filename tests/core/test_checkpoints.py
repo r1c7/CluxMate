@@ -1,7 +1,9 @@
 """Tests for CheckpointManager (shadow-git workspace snapshots)."""
 
 import hashlib
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,28 @@ def _mk(tmp_path: Path) -> CheckpointManager:
     mgr = CheckpointManager(str(work))
     mgr._shadow_dir = str(tmp_path / "shadow.git")
     return mgr, work
+
+
+def _nested_checkout(path: Path) -> None:
+    """Make `path` a real (committed) git repo, so that a parent repo recording
+    it stores a gitlink — mode 160000, the embedded-repository case here."""
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    path.mkdir(parents=True, exist_ok=True)
+
+    def run(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=str(path), env=env, check=True,
+            capture_output=True, text=True, timeout=30,
+        )
+
+    run("init", "-q")
+    run("config", "user.name", "Test")
+    run("config", "user.email", "test@example.invalid")
+    (path / "README.md").write_text("x\n", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-q", "-m", "init")
 
 
 def test_available_and_init(tmp_path):
@@ -399,8 +423,10 @@ def test_worktrees_never_enter_a_snapshot(tmp_path):
     """`.worktrees/` holds other sessions' checkouts.
 
     Without an exclude entry git records each one as an embedded repository
-    (gitlink, mode 160000), which then shows up in every turn diff of the main
-    tree — and `restore` cannot undo it (its delete branch uses unlink()).
+    (gitlink, mode 160000), whose pointer line then enters the main tree's turn
+    diff — on the snapshot that first records it and thereafter on each one
+    where the nested repo's HEAD moves — and `restore` cannot undo it (its
+    delete branch uses unlink()).
     """
     repo = tmp_path / "repo"
     (repo / ".worktrees" / "wt").mkdir(parents=True)
@@ -417,3 +443,49 @@ def test_worktrees_never_enter_a_snapshot(tmp_path):
     paths = {row["path"] for row in mgr.summary(sha)}
     assert not [p for p in paths if p.startswith(".worktrees")]
     assert "keep.txt" in paths
+
+
+def test_ensure_init_purges_already_tracked_worktrees(tmp_path):
+    """`info/exclude` only binds paths git has not ALREADY tracked.
+
+    A shadow repo that predates the `.worktrees/` exclude entry keeps its
+    gitlink, and `add -A` goes on refreshing that pointer whenever the nested
+    checkout's HEAD moves — so the line never leaves the turn diff on its own.
+    `ensure_init()` must drop the tracked entry once, from the index only.
+    """
+    mgr, work = _mk(tmp_path)
+    assert mgr.ensure_init() is True
+    # Build the legacy index state: a real nested checkout at `.worktrees/wt`,
+    # force-added past the (now present) exclude entry exactly as a shadow repo
+    # created before that entry existed would have recorded it.
+    _nested_checkout(work / ".worktrees" / "wt")
+    forced = mgr._run("add", "-f", "-A")
+    assert forced.returncode == 0, forced.stderr
+    assert mgr._run("commit", "-m", "legacy").returncode == 0
+    assert mgr._run("ls-files", "-s", "--", ".worktrees").stdout.startswith(
+        "160000"
+    )
+
+    # A fresh manager over the same work tree and the same shadow repo — i.e.
+    # the one-time init path running again (`_initialized` back to False).
+    fresh = CheckpointManager(str(work))
+    fresh._shadow_dir = str(tmp_path / "shadow.git")
+    assert fresh._initialized is False
+    assert fresh.ensure_init() is True
+
+    assert fresh._run("ls-files", "-z", "--", ".worktrees").stdout == ""
+    # The purge is index-only: the nested checkout stays on disk.
+    assert (work / ".worktrees" / "wt" / "README.md").exists()
+
+    # The symptom stays gone: the next snapshot records the removal...
+    purge = fresh.snapshot("s1", "turn1")
+    assert purge
+    assert ".worktrees/wt" in {row["path"] for row in fresh.diff(purge)}
+    # ...and no later turn diff carries a `.worktrees` line again.
+    later = fresh.snapshot("s1", "turn2")
+    assert later
+    assert not [
+        row["path"]
+        for row in fresh.diff(later)
+        if row["path"].startswith(".worktrees")
+    ]
