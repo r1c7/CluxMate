@@ -28,11 +28,24 @@ def test_available_and_init(tmp_path):
     assert mgr.available() is True
     assert mgr.ensure_init() is True
     assert Path(mgr._shadow_dir).exists()
-    # .git/ and .cluxmate/ must be excluded so neither the user's real repo nor
-    # CluxMate's own per-project state is captured.
+    # .git/, .cluxmate/ and .worktrees/ must be excluded so neither the user's
+    # real repo, CluxMate's own per-project state, nor another session's linked
+    # checkout is captured.
     exclude = (Path(mgr._shadow_dir) / "info" / "exclude").read_text("utf-8")
     assert ".git/" in exclude
     assert ".cluxmate/" in exclude
+    assert ".worktrees/" in exclude
+
+    # ensure_init() is idempotent: a second call, and a forced re-run of the
+    # exclude logic (the in-place upgrade path), must not duplicate a pattern.
+    exclude_path = Path(mgr._shadow_dir) / "info" / "exclude"
+    assert mgr.ensure_init() is True
+    assert exclude_path.read_text("utf-8") == exclude
+    mgr._initialized = False
+    assert mgr.ensure_init() is True
+    again = exclude_path.read_text("utf-8")
+    assert again == exclude
+    assert again.count(".worktrees/") == 1
 
 
 def test_snapshot_and_list(tmp_path):
@@ -394,6 +407,10 @@ def test_worktrees_never_enter_a_snapshot(tmp_path):
     (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
     (repo / ".worktrees" / "wt" / "README.md").write_text("x\n", encoding="utf-8")
     mgr = CheckpointManager(str(repo))
+    # Keep the shadow repo under tmp_path instead of the default
+    # ~/.cluxmate/checkpoints/<sha1(cwd)>.git, as _mk() does — otherwise every
+    # run of this test leaves a stray shadow repo in the user's real home.
+    mgr._shadow_dir = str(tmp_path / "shadow.git")
     if not mgr.available():
         pytest.skip("git not on PATH")
     sha = mgr.snapshot("s1", "turn1")
