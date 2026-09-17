@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../stores'
-import type { TurnCompaction, TurnContext, TurnStep } from '../../shared/types'
+import type { PrunedInfo, TurnCompaction, TurnContext, TurnStep } from '../../shared/types'
 import { useT } from '../useI18n'
 
 // Convert the header's canonical (Anthropic-style) tool schema into the exact
@@ -171,6 +171,10 @@ function CompactionBubble({ summaryText, meta, currentTurn }: { summaryText: str
                 const role = (m.role as string) || '?'
                 const text = messageText(m as Record<string, unknown>)
                 const calls = messageToolCalls(m as Record<string, unknown>)
+                // A shadowed message that had itself been pruned before this
+                // compaction absorbed it: its original would be unreachable
+                // otherwise (the node that carried it is gone).
+                const pruned = meta.shadowed_pruned?.[j] ?? null
                 return (
                   <div key={j} className="rounded border border-surface-border bg-surface px-2 py-1 opacity-75">
                     <span className="text-[9px] font-semibold uppercase tracking-wide text-ink-faint">{role}</span>
@@ -182,6 +186,7 @@ function CompactionBubble({ summaryText, meta, currentTurn }: { summaryText: str
                         {calls.map((c) => c.name).join(', ')}
                       </span>
                     )}
+                    {pruned && <PrunedNote info={pruned} />}
                   </div>
                 )
               })}
@@ -190,6 +195,40 @@ function CompactionBubble({ summaryText, meta, currentTurn }: { summaryText: str
         </div>
       )}
     </Bubble>
+  )
+}
+
+// A pruned tool result: the bubble above shows the text the MODEL saw; the
+// original the tool produced is one click away, and is labeled as NOT part of
+// the model's context so it can never be mistaken for the real request content
+// (the "Raw" / "Copy raw" views are the model's truth and must stay that way).
+// Mirrors CompactionBubble's shadowed-content reveal.
+function PrunedNote({ info }: { info: PrunedInfo }) {
+  const t = useT()
+  const [showOriginal, setShowOriginal] = useState(false)
+  const original = info.original ? messageText(info.original) : ''
+  if (original.trim() === '') return null
+  return (
+    <div className="mt-1">
+      <button
+        onClick={() => setShowOriginal((v) => !v)}
+        className="text-[10px] hover:underline"
+        style={{ color: 'rgb(var(--role-toolresult))' }}
+      >
+        {showOriginal
+          ? t('context.hidePruned')
+          : t('context.showPruned', { count: info.original_chars })}
+      </button>
+      {showOriginal && (
+        <div className="mt-1.5 border-t border-surface-border pt-1.5">
+          <p className="text-[10px] text-ink-faint italic">{t('context.prunedAway')}</p>
+          <CollapsibleText
+            text={original}
+            className="text-[10px] leading-relaxed whitespace-pre-wrap break-words text-ink-faint mt-0.5"
+          />
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -539,13 +578,29 @@ export default function ContextViewer() {
 
                       if (role === 'tool') {
                         const cid = toolResultId(m as Record<string, unknown>)
+                        // A pruned result: `text` above is what the model saw.
+                        const pruned = currentStep.pruned?.find((p) => p.index === i)
                         return (
-                          <Bubble key={keyBase} style={ROLE_STYLE.toolResult} meta={cid ? <span className="text-[10px] font-mono text-ink-faint truncate min-w-0 ml-1">{cid}</span> : undefined}>
+                          <Bubble key={keyBase} style={ROLE_STYLE.toolResult} meta={
+                            <span className="flex items-center gap-1.5 min-w-0 ml-1">
+                              {pruned && (
+                                <span
+                                  className="text-[9px] font-semibold uppercase tracking-wide px-1 rounded border"
+                                  style={{ color: 'rgb(var(--role-toolresult))', borderColor: 'rgb(var(--role-toolresult) / 0.4)' }}
+                                  title={t('context.prunedTitle')}
+                                >
+                                  {t('context.pruned')}
+                                </span>
+                              )}
+                              {cid && <span className="text-[10px] font-mono text-ink-faint truncate min-w-0">{cid}</span>}
+                            </span>
+                          }>
                             {text.trim() !== '' ? (
                               <CollapsibleText text={text} className="text-[11px] leading-relaxed whitespace-pre-wrap break-words text-ink-soft mt-1" />
                             ) : (
                               <span className="text-[11px] text-ink-faint mt-1 block">{t('context.empty')}</span>
                             )}
+                            {pruned && <PrunedNote info={pruned} />}
                           </Bubble>
                         )
                       }

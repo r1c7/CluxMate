@@ -29,6 +29,7 @@ from .session_log import (
     SessionEvent,
     SessionHeader,
     SessionLog,
+    message_text,
     event_from_dict,
     event_to_dict,
 )
@@ -521,25 +522,6 @@ class IncrementalPersister:
         self._dispose()
 
 
-def _message_text(message: dict[str, Any]) -> str:
-    """Extract the plain-text payload from a provider-native message.
-
-    CluxMate is OpenAI-compatible only, so ``content`` is a string, a list of
-    text blocks, or absent. Returns "" for tool_use messages (no text) and
-    anything unparseable.
-    """
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-        return "".join(parts)
-    return ""
-
-
 def _blocks_from_events(events: list[SessionEvent]) -> list[dict[str, Any]]:
     """Reconstruct a subagent's ordered text/tool blocks from its raw log.
 
@@ -551,7 +533,7 @@ def _blocks_from_events(events: list[SessionEvent]) -> list[dict[str, Any]]:
     tool_index: dict[str, int] = {}
     for event in events:
         if event.type == "assistant/message":
-            text = _message_text(event.data.get("message") or {})
+            text = message_text(event.data.get("message") or {})
             if text:
                 blocks.append({"type": "text", "text": text})
         elif event.type == "tool/call":
@@ -574,7 +556,7 @@ def _blocks_from_events(events: list[SessionEvent]) -> list[dict[str, Any]]:
             if idx is not None:
                 tool = blocks[idx]["tool"]
                 tool["status"] = "error" if event.data.get("error") else "done"
-                tool["result"] = _message_text(event.data.get("message") or {})
+                tool["result"] = message_text(event.data.get("message") or {})
     return blocks
 
 
@@ -599,12 +581,12 @@ def _replay_node(
     prompt = ""
     for event in events:
         if event.type == "user/message" and event.data.get("source") == "human":
-            prompt = _message_text(event.data.get("message") or {})
+            prompt = message_text(event.data.get("message") or {})
             break
     result = ""
     for event in reversed(events):
         if event.type == "assistant/message":
-            result = _message_text(event.data.get("message") or {})
+            result = message_text(event.data.get("message") or {})
             break
     reason_kind = "interrupted"  # no turn/end => crashed mid-turn
     for event in events:

@@ -333,6 +333,28 @@ def fold_todos(
     return state
 
 
+def message_text(message: Any) -> str:
+    """Plain-text payload of a provider message ("" for anything unparseable).
+
+    CluxMate is OpenAI-compatible only, so ``content`` is a string, a list of
+    text blocks, or absent. Returns "" for a text-less message (a tool-call
+    carrier) as well as anything unparseable. Also used by the subagent replay
+    projection, and to measure how much a pruning rewrite saved.
+    """
+    if not isinstance(message, Mapping):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            b["text"]
+            for b in content
+            if isinstance(b, Mapping) and isinstance(b.get("text"), str)
+        )
+    return ""
+
+
 def reconstruct_turn_contexts(events: list[SessionEvent]) -> list[dict[str, Any]]:
     """Reconstruct the exact per-step request context of every turn from a raw log.
 
@@ -348,7 +370,7 @@ def reconstruct_turn_contexts(events: list[SessionEvent]) -> list[dict[str, Any]
     ``{"turn", "system", "tools", "config", "steps"}`` where ``system``/``tools``/
     ``config`` are the turn's (constant) request envelope and ``steps`` is one
     entry per LLM call:
-    ``{"step", "messages", "sources", "compactions", "tokens_estimate"}``.
+    ``{"step", "messages", "sources", "compactions", "pruned", "tokens_estimate"}``.
     ``sources`` is parallel to ``messages`` and marks each message's origin
     ("human" | "memory" | "skill" | "mode" | "compaction" | "interruption", or
     None for assistant/tool). ``compactions`` lists each compaction summary
@@ -356,12 +378,28 @@ def reconstruct_turn_contexts(events: list[SessionEvent]) -> list[dict[str, Any]
     where ``index`` is its position in ``messages``, ``turn``/``step`` identify
     which step performed the compaction, and ``shadowed`` are the messages that
     were replaced (still in the raw log but no longer model-visible).
+
+    ``pruned`` is the same idea for the model-free tool-result pruning pass: one
+    entry ``{"index", "call_id", "chars", "original_chars", "original"}`` per
+    ``tool/result`` this session rewrote — ``index`` is its position in
+    ``messages`` (which holds the PRUNED text, i.e. what the model saw),
+    ``original`` is the text before the rewrite (kept only in the append-only
+    log, never sent to anyone), and the two char counts let a reader show the
+    saving without re-measuring. A rewrite is recognized structurally: a
+    ``tool/result`` event appended with a single-node :class:`ReplaceOp` — the
+    exact shape ``AgentLoop._prune_step`` writes, and the only producer of it.
+    A pruned result that a compaction later absorbed is NOT in this list (its
+    node is gone); its metadata moves into that compaction entry's
+    ``shadowed_pruned``, index-aligned with ``shadowed``.
     """
     # seq -> message for resolving a compaction's shadowed source_event_seqs.
     seq_to_message: dict[int, dict[str, Any]] = {}
     for event in events:
         if event.type in SURFACE_EVENT_TYPES:
             seq_to_message[event.seq] = event.data["message"]
+    # seq of a pruning replacement -> what it rewrote, so a later compaction can
+    # carry that metadata instead of dropping it with the node it absorbs.
+    pruned_by_seq: dict[int, dict[str, Any]] = {}
 
     # Each surface entry carries its message, source, and (for compaction
     # summaries) the compaction metadata so a snapshot can project all three.
@@ -395,19 +433,53 @@ def reconstruct_turn_contexts(events: list[SessionEvent]) -> list[dict[str, Any]
                 pending_step["header"] = header
         elif event.type in SURFACE_EVENT_TYPES:
             source = event.data.get("source") if event.type == "user/message" else None
-            entry: dict[str, Any] = {"message": event.data["message"], "source": source, "compaction": None}
+            entry: dict[str, Any] = {
+                "message": event.data["message"],
+                "source": source,
+                "compaction": None,
+                "pruned": None,
+            }
             if event.surfaceOp == APPEND:
                 surface.append(entry)
             elif isinstance(event.surfaceOp, ReplaceOp):
                 op = event.surfaceOp
                 if source == "compaction":
-                    shadowed = [
-                        seq_to_message[s]
-                        for s in (event.sourceEventSeqs or ())
-                        if s in seq_to_message
-                    ]
-                    entry["compaction"] = {"turn": turn, "step": None, "shadowed": shadowed}
+                    # A compaction summary absorbs the nodes it replaced, so any
+                    # prune metadata they carried must be carried with it or the
+                    # original text becomes unreachable in the UI. `shadowed` and
+                    # `shadowed_pruned` stay index-aligned (both skip a seq that
+                    # has no message). One level only, like `shadowed` itself: a
+                    # later compaction of this summary drops both.
+                    shadowed: list[dict[str, Any]] = []
+                    shadowed_pruned: list[dict[str, Any] | None] = []
+                    for s in event.sourceEventSeqs or ():
+                        msg = seq_to_message.get(s)
+                        if msg is None:
+                            continue
+                        shadowed.append(msg)
+                        shadowed_pruned.append(pruned_by_seq.get(s))
+                    entry["compaction"] = {
+                        "turn": turn,
+                        "step": None,
+                        "shadowed": shadowed,
+                        "shadowed_pruned": shadowed_pruned,
+                    }
                     pending_compaction = entry["compaction"]
+                elif event.type == "tool/result" and op.start == op.end:
+                    # A one-node rewrite of a tool result: the pruning pass writes
+                    # exactly this shape and nothing else does (see _prune_step).
+                    # The node it shadowed holds the text the model saw before.
+                    original_seq = next(iter(event.sourceEventSeqs or ()), None)
+                    original = seq_to_message.get(original_seq)
+                    entry["pruned"] = {
+                        "call_id": event.data.get("callId"),
+                        "chars": len(message_text(event.data["message"])),
+                        "original_chars": len(message_text(original)),
+                        "original": original,
+                    }
+                    # Keyed by THIS event's seq: a later compaction shadows the
+                    # replacement, not the node it replaced.
+                    pruned_by_seq[event.seq] = entry["pruned"]
                 surface[op.start : op.end + 1] = [entry]
 
     # Group step snapshots by turn, projecting each surface into messages/sources.
@@ -428,6 +500,7 @@ def reconstruct_turn_contexts(events: list[SessionEvent]) -> list[dict[str, Any]
         messages: list[dict[str, Any]] = []
         sources: list[str | None] = []
         compactions: list[dict[str, Any]] = []
+        pruned: list[dict[str, Any]] = []
         for i, entry in enumerate(snap["surface"]):
             messages.append(entry["message"])
             sources.append(entry["source"])
@@ -437,12 +510,16 @@ def reconstruct_turn_contexts(events: list[SessionEvent]) -> list[dict[str, Any]
                     "turn": entry["compaction"]["turn"],
                     "step": entry["compaction"]["step"],
                     "shadowed": entry["compaction"]["shadowed"],
+                    "shadowed_pruned": entry["compaction"]["shadowed_pruned"],
                 })
+            if entry["pruned"] is not None:
+                pruned.append({"index": i, **entry["pruned"]})
         turn_entry["steps"].append({
             "step": snap["step"],
             "messages": messages,
             "sources": sources,
             "compactions": compactions,
+            "pruned": pruned,
             "tokens_estimate": estimate_tokens(messages),
         })
 
@@ -804,6 +881,7 @@ __all__ = [
     "diff_headers",
     "fold_request_header",
     "fold_todos",
+    "message_text",
     "reconstruct_turn_contexts",
     "event_to_dict",
     "event_from_dict",

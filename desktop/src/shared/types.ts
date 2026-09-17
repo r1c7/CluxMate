@@ -678,6 +678,28 @@ export interface TurnCompaction {
   turn: number
   step: number | null
   shadowed: Record<string, unknown>[]
+  // Index-aligned with `shadowed`: for a shadowed message that had itself been
+  // pruned before the compaction absorbed it, its rewrite metadata — otherwise
+  // null. Without this the original would be unreachable once compacted.
+  shadowed_pruned?: (PrunedInfo | null)[]
+}
+
+// What a pruning rewrite cost: the char counts of the model-visible text and of
+// the original, plus the original message itself. `original` survives only in the
+// append-only log, is never sent to anyone, and must be presented as "not part of
+// the model's context" rather than as the raw request.
+export interface PrunedInfo {
+  call_id: string | null
+  chars: number
+  original_chars: number
+  original: Record<string, unknown> | null
+}
+
+// A tool result still IN the step's messages that the model-free pruning pass
+// rewrote. `index` is its position in `TurnStep.messages`, which holds the PRUNED
+// text — i.e. exactly what the model saw.
+export interface TurnPruned extends PrunedInfo {
+  index: number
 }
 
 // One LLM call's exact input within a turn (a turn can have multiple steps when
@@ -689,6 +711,9 @@ export interface TurnStep {
   // "skill" | "mode" | "compaction" | "interruption"), or null for assistant/tool.
   sources: (string | null)[]
   compactions: TurnCompaction[]
+  // Tool results in THIS step that were pruned (`messages` already holds the
+  // pruned text). Missing on a log written before the pass existed.
+  pruned?: TurnPruned[]
   tokens_estimate: number
 }
 

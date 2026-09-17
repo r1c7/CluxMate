@@ -353,3 +353,78 @@ async def test_prune_does_not_claim_a_compaction_to_the_frontends():
     agent2 = _agent(log2, RecordingProvider(), window=2_000)
     await agent2.run("third", history=log2.derive_messages())
     assert agent2.compacted_this_turn is False
+
+
+# ── the ContextViewer projection ───────────────────────────
+# The desktop's context panel is rendered from `reconstruct_turn_contexts`, so
+# anything it shows about a prune — and anything it must NOT show — is pinned
+# here rather than in a renderer test (the desktop suite renders no components).
+
+
+@pytest.mark.asyncio
+async def test_the_context_viewer_is_told_which_results_were_pruned_and_what_they_were():
+    """`reconstruct_turn_contexts` is what the desktop's context panel renders, and
+    its Raw / Copy-raw view must stay the model's truth. So the step must keep
+    showing the PRUNED text (not the original) and expose the original beside it
+    as explicit metadata — never as the request content."""
+    from cluxmate.core.session_log import reconstruct_turn_contexts
+
+    log = _seed_log()
+    await _run(log, RecordingProvider(), window=2_000)
+
+    turns = {t["turn"]: t for t in reconstruct_turn_contexts(log.events)}
+    # Only the turn that actually ran has step snapshots (the seeded turns have
+    # no step/start), and it is the one that pruned.
+    assert list(turns) == [3]
+    step = turns[3]["steps"][0]
+    assert len(step["pruned"]) == 1
+    info = step["pruned"][0]
+    assert info["call_id"] == "c0"
+    # The message the panel (and the raw request) shows is the PRUNED one…
+    assert "M" not in step["messages"][info["index"]]["content"]
+    assert PRUNED_MARKER in step["messages"][info["index"]]["content"]
+    # …and the original is available, measured, and kept out of `messages`.
+    assert info["original"]["content"] == _big_result(20_000)
+    assert info["original_chars"] == 20_000
+    assert info["chars"] == len(step["messages"][info["index"]]["content"])
+    assert info["chars"] < info["original_chars"]
+    # The step's token estimate is the pruned one, so it still agrees with the
+    # request the model actually got.
+    assert step["tokens_estimate"] < 20_000 // 4
+
+    # A step the pass never touched reports nothing, so the panel shows no badge.
+    log2 = _seed_log()
+    await _run(log2, RecordingProvider(), window=100_000)
+    for turn in reconstruct_turn_contexts(log2.events):
+        assert all(s["pruned"] == [] for s in turn["steps"])
+
+
+@pytest.mark.asyncio
+async def test_an_original_stays_reachable_after_a_compaction_absorbs_its_result():
+    """A prune that does not clear the budget is followed by a summary in the same
+    step, and the summary replaces the pruned nodes — so the originals would be
+    lost from the panel unless the compaction carries them. `shadowed_pruned` is
+    index-aligned with `shadowed` for exactly that reason."""
+    from cluxmate.core.session_log import reconstruct_turn_contexts
+
+    log = _seed_log(results=3)
+    await _run(log, RecordingProvider(), window=3_000)
+
+    assert len(_replace_events(log)) == 3          # the pass ran on all three
+    step = reconstruct_turn_contexts(log.events)[-1]["steps"][0]
+    # The compaction absorbed some pruned nodes and kept others in its preserved
+    # tail, so both paths are visible at once — and every result is reachable
+    # exactly once, whichever side of the cut it landed on.
+    assert len(step["compactions"]) == 1
+    aligned = step["compactions"][0]["shadowed_pruned"]
+    assert len(aligned) == len(step["compactions"][0]["shadowed"])
+    absorbed = [p for p in aligned if p is not None]
+    assert absorbed and step["pruned"], "expected both a folded and a surviving prune"
+    reachable = step["pruned"] + absorbed
+    assert sorted(p["call_id"] for p in reachable) == ["c0", "c1", "c2"]
+    for info in reachable:
+        assert info["original"]["content"] == _big_result(20_000)
+        assert info["original_chars"] == 20_000
+        assert info["chars"] < info["original_chars"]
+    # A shadowed message that was never pruned aligns to null rather than shifting.
+    assert None in aligned
