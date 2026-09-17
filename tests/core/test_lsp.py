@@ -339,6 +339,88 @@ def test_run_install_runs_command_and_detects_binary(tmp_path, monkeypatch):
         mgr.shutdown()
 
 
+def test_run_install_detaches_stdin(tmp_path, monkeypatch):
+    # The installer must NEVER inherit our stdin: under `agent stdio` that is
+    # the JSON-RPC pipe, and an installer that reads it (a confirm prompt, or
+    # an MSYS2 launcher like npm/node starting up) blocks until it closes —
+    # i.e. forever, hanging the tool call and the whole turn with it.
+    import subprocess
+
+    from cluxmate.core import lsp as lsp_mod
+
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured.update(kwargs)
+
+        def communicate(self, timeout=None):
+            captured["timeout"] = timeout
+            return "installed nothing", ""
+
+    monkeypatch.setattr(lsp_mod.subprocess, "Popen", _FakeProc)
+    spec = _ServerSpec(command="cluxmate-not-a-real-lsp", install_cmd=["npm", "-g", "x"])
+    mgr = LSPManager(str(tmp_path), specs={"python": spec})
+    try:
+        installed, _ = mgr._run_install(spec)
+        assert installed is False
+    finally:
+        mgr.shutdown()
+
+    assert captured["stdin"] is subprocess.DEVNULL
+    # The timeout is ours to enforce, not subprocess.run's (see the next test).
+    assert captured["timeout"] == lsp_mod._INSTALL_TIMEOUT_SECONDS
+
+
+def test_run_install_timeout_does_not_recommunicate(tmp_path, monkeypatch):
+    # On a Windows timeout CPython kills the child and then calls communicate()
+    # AGAIN with no timeout (subprocess.py:553-559); that join is unbounded, so
+    # a slow installer holding its pipes open would hang the turn forever
+    # instead of reporting the timeout. We kill, reap with a bound, and never
+    # re-communicate.
+    import subprocess
+
+    from cluxmate.core import lsp as lsp_mod
+
+    calls = {"communicate": 0, "kill": 0, "wait": []}
+
+    class _FakeProc:
+        returncode = None
+        stdout = None
+        stderr = None
+
+        def __init__(self, argv, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            calls["communicate"] += 1
+            raise subprocess.TimeoutExpired(["npm"], timeout)
+
+        def kill(self):
+            calls["kill"] += 1
+
+        def wait(self, timeout=None):
+            calls["wait"].append(timeout)
+            return 0
+
+    monkeypatch.setattr(lsp_mod.subprocess, "Popen", _FakeProc)
+    spec = _ServerSpec(command="cluxmate-not-a-real-lsp", install_cmd=["npm", "-g", "x"])
+    mgr = LSPManager(str(tmp_path), specs={"python": spec})
+    try:
+        installed, output = mgr._run_install(spec)
+    finally:
+        mgr.shutdown()
+
+    assert installed is False
+    assert "timed out" in output
+    assert calls["communicate"] == 1, "第二次 communicate() 就是那个无界 join"
+    assert calls["kill"] == 1
+    assert calls["wait"] and calls["wait"][0] is not None, "reap 必须有界"
+
+
 def test_resolve_without_install_cmd_surfaces_hint_only(tmp_path):
     # Download-prompt-only spec (no portable install command, e.g. java/cpp):
     # the tool message carries the manual hint and never tries to install.

@@ -731,6 +731,32 @@ _INSTALL_TIMEOUT_SECONDS = 300
 # How much install output to echo back into error messages.
 _INSTALL_OUTPUT_TAIL = 4000
 
+# Bound on the post-kill cleanup of an install that timed out (see _reap_proc).
+_REAP_TIMEOUT_SECONDS = 2
+
+
+def _reap_proc(proc: subprocess.Popen) -> None:
+    """Kill an install that outlived its timeout, then let go of its pipes.
+
+    NEVER calls ``communicate()`` again — see ``_run_install`` for why that is
+    the unbounded join. Both steps are bounded, so the cleanup cannot hang
+    where the install did.
+    """
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=_REAP_TIMEOUT_SECONDS)
+    except Exception:
+        pass
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
+
 
 def _locate_symbol(line_text: str, symbol: str, encoding: str) -> int:
     """Return the symbol's column (0-based) in `line_text` under the given
@@ -1011,27 +1037,55 @@ class LSPManager:
 
         Unsandboxed by design — installers need real global writes + network,
         and the command is user config gated behind an explicit opt-in
-        (lsp.json auto_install), never model output.
+        (lsp.json auto_install), never model output. Never blocks either: the
+        stdin detach and the self-enforced timeout below are why.
         """
         with self._install_lock:
             if shutil.which(spec.command) is not None:
                 return True, ""  # another caller already installed it
             cmd = list(spec.install_cmd)
+            # Two hazards, both of which hang the TOOL CALL (and with it the
+            # whole turn) instead of failing it, so this is not a plain
+            # ``subprocess.run``:
+            #
+            # * ``stdin`` MUST be detached. Under ``agent stdio`` this process's
+            #   stdin is the JSON-RPC pipe. An MSYS2 installer (npm/node on Git
+            #   for Windows) blocks at startup when it inherits it, and any
+            #   installer that reads stdin — pip's "proceed? [y/n]", a sudo
+            #   password prompt — blocks until that pipe closes, which for a
+            #   live desktop bridge is never. ``checkpoints._run``,
+            #   ``tools/bash.py`` and ``project_root._run_git`` all pass DEVNULL
+            #   for the same reason; a detached stdin turns a prompt into an
+            #   immediate EOF, which fails fast and visibly.
+            # * The timeout must be enforced by US. ``subprocess.run(timeout=…)``
+            #   on Windows kills the child and then calls ``communicate()``
+            #   AGAIN with no timeout (CPython ``subprocess.py``:553-559); that
+            #   second call joins the reader threads unbounded, so an installer
+            #   whose pipe write end is still held open (npm/rustup spawn
+            #   grandchildren) hangs forever rather than raising
+            #   ``TimeoutExpired``.
             try:
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     cmd,
                     cwd=self.ws_root,
-                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=_INSTALL_TIMEOUT_SECONDS,
                 )
-            except subprocess.TimeoutExpired:
-                return False, f"installation timed out after {_INSTALL_TIMEOUT_SECONDS}s"
             except OSError as e:
                 return False, f"failed to run install command: {e}"
-            output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            try:
+                out, err = proc.communicate(timeout=_INSTALL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                _reap_proc(proc)
+                return False, f"installation timed out after {_INSTALL_TIMEOUT_SECONDS}s"
+            except (OSError, ValueError) as e:
+                _reap_proc(proc)
+                return False, f"failed to run install command: {e}"
+            output = ((out or "") + "\n" + (err or "")).strip()
             tail = output[-_INSTALL_OUTPUT_TAIL:]
             if shutil.which(spec.command) is not None:
                 return True, tail
