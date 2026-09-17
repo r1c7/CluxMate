@@ -17,8 +17,9 @@ from cluxmate.core.memory import MemoryManager, MAX_MEMORY_CHARS
 class UpdateMemoryTool(BaseTool):
     """Record a durable memory entry to project or global AGENTS.md."""
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, project_root: str | None = None):
         self._cwd = cwd
+        self._project_root = project_root or cwd
 
     @property
     def name(self) -> str:
@@ -72,7 +73,9 @@ class UpdateMemoryTool(BaseTool):
             return "Error: content is empty — nothing to record."
         if scope not in ("project", "global"):
             scope = "project"
-        mgr = MemoryManager(self._cwd)
+        # Project scope targets the PROJECT's AGENTS.md — in a git worktree the
+        # session cwd is not the project root.
+        mgr = MemoryManager(self._project_root if scope == "project" else self._cwd)
         try:
             path = mgr.append(content, scope)
         except Exception as e:

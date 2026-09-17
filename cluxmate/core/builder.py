@@ -134,8 +134,13 @@ def _detect_shell() -> tuple[str, str]:
 class AgentBuilder:
     """Fluent builder for AgentLoop instances."""
 
-    def __init__(self, cwd: str, provider: LLMProvider):
+    def __init__(self, cwd: str, provider: LLMProvider,
+                 project_root: str | None = None):
         self._cwd = cwd
+        # Where the PROJECT's config state lives (git main worktree). Same as
+        # cwd everywhere except when the session runs in a git worktree; the
+        # writable tree, sandbox workspace, shadow repo and LSP stay on _cwd.
+        self._project_root = project_root or cwd
         self._provider = provider
         self._model = "claude-sonnet-4-6"
         # Whether the active model supports a 1M context window. Drives the
@@ -241,10 +246,18 @@ class AgentBuilder:
         """The session working directory this builder was constructed with."""
         return self._cwd
 
+    @property
+    def project_root(self) -> str:
+        return self._project_root
+
+    def with_project_root(self, root: str | None) -> "AgentBuilder":
+        self._project_root = root or self._cwd
+        return self
+
     def _agent_registry(self) -> SubagentRegistry:
         """Lazy registry of subagent types for this cwd."""
         if self._agents_registry is None:
-            self._agents_registry = SubagentRegistry(self._cwd, trusted=self.trusted)
+            self._agents_registry = SubagentRegistry(self.project_root, trusted=self.trusted)
         return self._agents_registry
 
     def agent_type(self, slug: str) -> AgentType | None:
@@ -347,14 +360,14 @@ class AgentBuilder:
             return None
         if self._retrieval is None:
             self._retrieval = RetrievalMemory(
-                self._cwd, self._retrieval_config, trusted=self.trusted
+                self.project_root, self._retrieval_config, trusted=self.trusted
             )
         return self._retrieval
 
     def _hooks_manager(self) -> "HookManager | None":
         """Current HookManager, lazily constructed from the cwd when unset."""
         if self._hooks is None:
-            self._hooks = HookManager(self._cwd, trusted=self.trusted)
+            self._hooks = HookManager(self.project_root, trusted=self.trusted)
         return self._hooks
 
     def reload_hooks(self) -> list[dict[str, Any]]:
@@ -569,7 +582,7 @@ class AgentBuilder:
                 return False
             if self._mcp is None:
                 self._mcp = MCPManager(
-                    self._cwd, sandbox=self._mcp_sandbox(),
+                    self.project_root, sandbox=self._mcp_sandbox(),
                     egress_mode=self._egress_mode(),
                     trusted=self.trusted,
                 )
@@ -639,6 +652,7 @@ class AgentBuilder:
                 self._cwd,
                 enabled=self._mode != "yolo",
                 grant_paths=self._grant_paths(),
+                project_root=self.project_root,
             )
             # Shell sandbox (phase 1): bash runs under an OS sandbox backend
             # (bwrap / low-IL). Same rule as the fence: off in yolo. When no
@@ -714,7 +728,8 @@ class AgentBuilder:
             # write durable memory (explore/subtasks would pollute it), matching
             # the SkillTool/MCP parent-only gate.
             if self._depth == 0:
-                tools.append(UpdateMemoryTool(cwd=self._cwd))
+                tools.append(UpdateMemoryTool(cwd=self._cwd,
+                                              project_root=self.project_root))
             # Retrieval-memory tools (remember/forget) — parent-only, opt-in
             # (enabled), write risk. Never in plan mode: plan returns earlier
             # with a read-only toolset, so this block is already non-plan.
@@ -738,7 +753,7 @@ class AgentBuilder:
             if self._depth == 0:
                 if self._mcp is None:
                     self._mcp = MCPManager(
-                        self._cwd, sandbox=self._mcp_sandbox(),
+                        self.project_root, sandbox=self._mcp_sandbox(),
                         egress_mode=self._egress_mode(),
                         trusted=self.trusted,
                     )
@@ -908,7 +923,7 @@ class AgentBuilder:
         them apart from human input.
         """
         parts: list[tuple[str, str]] = []
-        project_memory = MemoryManager(self._cwd).render()
+        project_memory = MemoryManager(self.project_root).render()
         if project_memory:
             parts.append(("memory", (
                 "[Project memory]\n"
@@ -916,7 +931,7 @@ class AgentBuilder:
                 "authoritative background — follow its conventions unless the current\n"
                 "request overrides them.\n\n" + project_memory
             )))
-        skills = SkillManager(self._cwd, trusted=self.trusted).discover_enabled()
+        skills = SkillManager(self.project_root, trusted=self.trusted).discover_enabled()
         if skills:
             skills_list = "\n".join(
                 f"- **{s.slug}**: {s.description or s.name}" for s in skills
@@ -1095,7 +1110,8 @@ class AgentBuilder:
         parent's allowlist through, `list` pins an explicit set (the built-in
         explore stays read-only-only), `none` means no `task` tool at all.
         """
-        child = AgentBuilder(self._cwd, self._provider)
+        child = AgentBuilder(self._cwd, self._provider,
+                             project_root=self.project_root)
         child._model = self._model
         child._context_1m = self._context_1m
         child._include_default_tools = self._include_default_tools
