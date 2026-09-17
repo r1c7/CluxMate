@@ -628,9 +628,10 @@ class AgentBuilder:
                     ) if t.name in readonly
                 ])
                 if self._depth == 0 and SkillManager(
-                    self._cwd, trusted=self.trusted
+                    self.project_root, trusted=self.trusted
                 ).discover_enabled():
-                    tools.append(SkillTool(cwd=self._cwd, builder=self))
+                    tools.append(SkillTool(project_root=self.project_root,
+                                           builder=self))
                 # ask_user_question is read-only, so it stays available in plan
                 # mode — clarifying questions are how plan mode disambiguates a
                 # spec without writing anything.
@@ -721,9 +722,10 @@ class AgentBuilder:
             # use_skill only for the parent (depth 0) and only when enabled skills exist.
             # Subagents don't get skills this round (avoids scope creep).
             if self._depth == 0 and SkillManager(
-                self._cwd, trusted=self.trusted
+                self.project_root, trusted=self.trusted
             ).discover_enabled():
-                tools.append(SkillTool(cwd=self._cwd, builder=self))
+                tools.append(SkillTool(project_root=self.project_root,
+                                       builder=self))
             # update_memory only for the parent (depth 0) — subagents shouldn't
             # write durable memory (explore/subtasks would pollute it), matching
             # the SkillTool/MCP parent-only gate.

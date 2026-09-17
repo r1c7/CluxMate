@@ -218,6 +218,78 @@ def test_write_fence_is_scoped_to_the_project_root(tmp_path, monkeypatch):
     assert fence.check(wt / "note.txt")
 
 
+# ── the skill path: advertised AND loadable from the same root ──────────────
+
+
+def _project_skill(root: Path, slug: str, body: str) -> None:
+    d = root / ".cluxmate" / "skills" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {slug}\ndescription: d\n---\n{body}", encoding="utf-8"
+    )
+
+
+def test_use_skill_loads_a_skill_the_worktree_session_was_advertised(
+    tmp_path, monkeypatch
+):
+    """The tool must read the root the injection lists from: a worktree session
+    is advertised the main repo's skills, so `use_skill` has to load them from
+    there rather than from the session cwd."""
+    _home(monkeypatch, tmp_path)
+    repo, wt = _repo_and_worktree(tmp_path)
+    _project_skill(repo, "demo", "MAIN BODY")
+    _project_skill(wt, "wt-only", "WT BODY")
+    b = (AgentBuilder(str(wt), _Provider())
+         .with_default_tools()
+         .with_project_root(str(repo)))
+
+    injections = dict(b.render_injections())
+    assert "demo" in injections["skill"]
+    assert "wt-only" not in injections["skill"]
+
+    tool = next(t for t in b._get_tools() if t.name == "use_skill")
+    result = asyncio.run(tool.execute(name="demo"))
+    assert "MAIN BODY" in result
+    # ... and the session's own tree is not a skill root any more: nothing may
+    # leak in from the worktree, not even as an "available" hint.
+    withheld = asyncio.run(tool.execute(name="wt-only"))
+    assert "no skill named 'wt-only'" in withheld
+    assert "WT BODY" not in withheld
+
+
+def test_plan_mode_use_skill_loads_from_the_project_root(tmp_path, monkeypatch):
+    """The plan-mode read-tools branch builds its own gate + SkillTool."""
+    _home(monkeypatch, tmp_path)
+    repo, wt = _repo_and_worktree(tmp_path)
+    _project_skill(repo, "demo", "MAIN BODY")
+    b = (AgentBuilder(str(wt), _Provider())
+         .with_default_tools()
+         .with_mode("plan")
+         .with_project_root(str(repo)))
+
+    tool = next(t for t in b._get_tools() if t.name == "use_skill")
+    assert "MAIN BODY" in asyncio.run(tool.execute(name="demo"))
+
+
+def test_skill_path_without_a_project_root_stays_on_the_cwd(tmp_path, monkeypatch):
+    """A branch built without a project root (the default) is unchanged: the
+    gate and the tool keep reading the session cwd, and no other tree leaks in."""
+    _home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    (repo / ".cluxmate").mkdir(parents=True)
+    _project_skill(repo, "demo", "MAIN BODY")
+    everything = AgentBuilder(str(repo), _Provider()).with_default_tools()
+    assert everything.project_root == str(repo)
+    tool = next(t for t in everything._get_tools() if t.name == "use_skill")
+    assert "MAIN BODY" in asyncio.run(tool.execute(name="demo"))
+
+    # A different session with no project root must not see repo's skills.
+    other = tmp_path / "other"
+    (other / ".cluxmate").mkdir(parents=True)
+    isolated = AgentBuilder(str(other), _Provider()).with_default_tools()
+    assert "use_skill" not in {t.name for t in isolated._get_tools()}
+
+
 def test_builder_wires_update_memory_to_the_project_root(tmp_path, monkeypatch):
     _home(monkeypatch, tmp_path)
     repo, wt = _repo_and_worktree(tmp_path)

@@ -26,8 +26,12 @@ if TYPE_CHECKING:
 class SkillTool(BaseTool):
     """Load an installed skill's instructions and follow them."""
 
-    def __init__(self, cwd: str, builder: "AgentBuilder"):
-        self._cwd = cwd
+    def __init__(self, project_root: str, builder: "AgentBuilder"):
+        # The PROJECT root, not the session cwd: in a git worktree the skills
+        # the injection advertises come from the main worktree (builder.py
+        # render_injections), so the loader must read the same root or the
+        # agent is offered a skill it cannot load.
+        self._project_root = project_root
         self._builder = builder
 
     @property
@@ -62,8 +66,9 @@ class SkillTool(BaseTool):
     async def execute(self, name: str = "") -> str:
         # The builder's decision, not the reader's default: `use_skill` is
         # reachable whenever ANY skill is enabled, so an untrusted directory
-        # could otherwise enumerate and load its own project skills.
-        mgr = SkillManager(self._cwd, trusted=self._builder.trusted)
+        # could otherwise enumerate and load its own project skills. Read the
+        # same root the injection lists from (the project root).
+        mgr = SkillManager(self._project_root, trusted=self._builder.trusted)
         skill = mgr.get(name)
         if skill is None:
             available = ", ".join(s.slug for s in mgr.discover_enabled()) or "(none installed)"

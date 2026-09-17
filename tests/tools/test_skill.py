@@ -39,7 +39,7 @@ async def test_execute_loads_and_signals(tmp_path, monkeypatch):
     _write_skill(home / ".cluxmate" / "skills", "deploy", "# Deploy\nrun it")
 
     tracker = _FakeTracker()
-    tool = SkillTool(cwd=str(tmp_path / "proj"), builder=_FakeBuilder(tracker))
+    tool = SkillTool(project_root=str(tmp_path / "proj"), builder=_FakeBuilder(tracker))
     result = await tool.execute(name="deploy")
 
     assert "run it" in result
@@ -53,7 +53,7 @@ async def test_execute_unknown_lists_available(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     _write_skill(home / ".cluxmate" / "skills", "deploy", "x")
 
-    tool = SkillTool(cwd=str(tmp_path / "proj"), builder=_FakeBuilder(None))
+    tool = SkillTool(project_root=str(tmp_path / "proj"), builder=_FakeBuilder(None))
     result = await tool.execute(name="missing")
     assert "no skill named 'missing'" in result
     assert "deploy" in result  # lists available slugs
@@ -61,7 +61,7 @@ async def test_execute_unknown_lists_available(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_risk_level_safe():
-    assert SkillTool(cwd=".", builder=_FakeBuilder()).risk_level == "safe"
+    assert SkillTool(project_root=".", builder=_FakeBuilder()).risk_level == "safe"
 
 
 def _write_skill_with(root: Path, slug: str, body: str):
@@ -80,7 +80,7 @@ async def test_project_copy_wins_and_says_what_it_shadowed(tmp_path, monkeypatch
     _write_skill_with(proj / ".cluxmate" / "skills", "deploy", "PROJECT BODY")
 
     tracker = _FakeTracker()
-    tool = SkillTool(cwd=str(proj), builder=_FakeBuilder(tracker))
+    tool = SkillTool(project_root=str(proj), builder=_FakeBuilder(tracker))
     result = await tool.execute(name="deploy")
 
     assert "PROJECT BODY" in result
@@ -98,7 +98,7 @@ async def test_no_shadow_note_when_the_slug_is_unique(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     _write_skill(home / ".cluxmate" / "skills", "deploy", "run it")
 
-    result = await SkillTool(cwd=str(tmp_path / "proj"), builder=_FakeBuilder()).execute(
+    result = await SkillTool(project_root=str(tmp_path / "proj"), builder=_FakeBuilder()).execute(
         name="deploy"
     )
     assert result.startswith("Skill 'Deploy' loaded.")
@@ -120,7 +120,7 @@ async def test_disabled_skill_is_refused(tmp_path, monkeypatch):
     )
 
     tracker = _FakeTracker()
-    tool = SkillTool(cwd=str(proj), builder=_FakeBuilder(tracker))
+    tool = SkillTool(project_root=str(proj), builder=_FakeBuilder(tracker))
     result = await tool.execute(name="deploy")
 
     assert result.startswith("Error: skill 'deploy' is disabled.")
@@ -144,7 +144,7 @@ async def test_disabling_one_copy_leaves_the_slug_loadable(tmp_path, monkeypatch
     )
 
     tracker = _FakeTracker()
-    tool = SkillTool(cwd=str(proj), builder=_FakeBuilder(tracker))
+    tool = SkillTool(project_root=str(proj), builder=_FakeBuilder(tracker))
     result = await tool.execute(name="deploy")
 
     assert "GLOBAL BODY" in result
