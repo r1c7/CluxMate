@@ -26,13 +26,16 @@ def _home(monkeypatch, tmp_path) -> Path:
     return home
 
 
-def _fake_mcp(monkeypatch, seen: list[str]) -> None:
-    """Record the cwd every MCPManager is built with (no subprocesses)."""
+def _fake_mcp(monkeypatch, seen: list[tuple[str, str | None]]) -> None:
+    """Record the (exec tree, config root) every MCPManager is built with.
+
+    No subprocesses: cwd is where servers spawn and results spill, config_root
+    is where mcp.json is read (core/mcp.py)."""
 
     class _FakeMCP:
         def __init__(self, cwd, sandbox=None, egress_mode="shared",
-                     trusted=True):
-            seen.append(cwd)
+                     trusted=True, *, config_root=None):
+            seen.append((cwd, config_root))
 
         def load(self):
             pass
@@ -160,29 +163,30 @@ def test_hooks_are_read_from_the_project_root(tmp_path, monkeypatch):
     assert hooks.has_event("PostToolUse") is False
 
 
-def test_mcp_manager_is_built_from_the_project_root(tmp_path, monkeypatch):
+def test_mcp_manager_reads_config_from_the_project_root(tmp_path, monkeypatch):
+    """Config is the main repo's; spawn/spill stay on the session tree."""
     _home(monkeypatch, tmp_path)
     repo, wt = _repo_and_worktree(tmp_path)
-    seen: list[str] = []
+    seen: list[tuple] = []
     _fake_mcp(monkeypatch, seen)
     b = (AgentBuilder(str(wt), _Provider())
          .with_default_tools()
          .with_project_root(str(repo)))
     b._get_tools()
-    assert seen == [str(repo)]
+    assert seen == [(str(wt), str(repo))]
 
 
-def test_deferred_mcp_load_uses_the_project_root(tmp_path, monkeypatch):
+def test_deferred_mcp_load_uses_the_project_root_for_config(tmp_path, monkeypatch):
     _home(monkeypatch, tmp_path)
     repo, wt = _repo_and_worktree(tmp_path)
-    seen: list[str] = []
+    seen: list[tuple] = []
     _fake_mcp(monkeypatch, seen)
     b = (AgentBuilder(str(wt), _Provider())
          .with_default_tools()
          .with_project_root(str(repo)))
     # No _get_tools() first: this exercises load_mcp's OWN construction site.
     b.load_mcp()
-    assert seen == [str(repo)]
+    assert seen == [(str(wt), str(repo))]
 
 
 def test_retrieval_memory_is_built_from_the_project_root(tmp_path, monkeypatch):

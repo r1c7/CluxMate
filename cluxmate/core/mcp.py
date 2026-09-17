@@ -136,15 +136,21 @@ def _derive_transport(entry: dict[str, Any]) -> str:
 
 
 class MCPConfigManager:
-    """Load and merge mcp.json from global and project roots.
+    """Load and merge mcp.json from global and project config roots.
 
     Global: ~/.cluxmate/mcp.json
-    Project: <cwd>/.cluxmate/mcp.json (deep-merges over global; project can
-    override per-server fields or add new servers).
+    Project: <config_root>/.cluxmate/mcp.json (deep-merges over global; project
+    can override per-server fields or add new servers).
+
+    ``config_root`` is where the PROJECT's config lives — the git main worktree
+    for a worktree session, i.e. NOT necessarily where the servers run (see
+    MCPManager, which keeps the session's cwd for spawn/spill).
     """
 
-    def __init__(self, cwd: str, *, trusted: bool = True):
-        self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+    def __init__(self, config_root: str, *, trusted: bool = True):
+        self._config_root = (
+            str(Path(config_root).resolve()) if config_root else str(Path.cwd())
+        )
         # Project trust gate (core/trust.py): an untrusted directory contributes
         # no servers, so load() never spawns a subprocess for it.
         self._trusted = trusted
@@ -152,7 +158,7 @@ class MCPConfigManager:
     def _roots(self) -> list[Path]:
         roots = [Path.home() / ".cluxmate" / "mcp.json"]
         if self._trusted:
-            roots.append(Path(self._cwd) / ".cluxmate" / "mcp.json")
+            roots.append(Path(self._config_root) / ".cluxmate" / "mcp.json")
         return roots
 
     def load(self) -> dict[str, MCPConfig]:
@@ -732,11 +738,18 @@ class MCPManager:
     per-server timeout. list_tools() returns wrapped tools for the agent.
     shutdown() kills everything — called from atexit and the mcp/shutdown
     JSON-RPC method.
+
+    ``cwd`` is the EXECUTION tree: every stdio server spawns there and an
+    oversized result spills into <cwd>/.cluxmate/tmp-spill/. ``config_root`` is
+    where mcp.json is read (the git main worktree for a worktree session); it
+    defaults to ``cwd``, so a non-worktree session is unaffected.
     """
 
     def __init__(self, cwd: str, sandbox=None, egress_mode: str = "shared",
-                 auth_store: MCPAuthStore | None = None, *, trusted: bool = True):
+                 auth_store: MCPAuthStore | None = None, *, trusted: bool = True,
+                 config_root: str | None = None):
         self._cwd = cwd
+        self._config_root = config_root or cwd
         self._trusted = trusted
         self._sandbox = sandbox  # ShellSandbox | None — passed to stdio clients
         self._egress_mode = egress_mode
@@ -763,7 +776,9 @@ class MCPManager:
         if self._loaded:
             return
         self._loaded = True
-        self._configs = MCPConfigManager(self._cwd, trusted=self._trusted).load()
+        self._configs = MCPConfigManager(
+            self._config_root, trusted=self._trusted
+        ).load()
 
         for cfg in self._configs.values():
             self._clients[cfg.name] = MCPClient(

@@ -123,8 +123,16 @@ class HookManager:
     I/O (a missing/corrupt settings.json yields an empty hook set, never raises).
     """
 
-    def __init__(self, cwd: str, *, trusted: bool = True):
+    def __init__(self, cwd: str, *, trusted: bool = True,
+                 config_root: str | None = None):
+        # `cwd` is the EXECUTION tree: hooks run in it and report it as the
+        # payload's "cwd". `config_root` is where the PROJECT settings.json is
+        # read — the git main worktree for a worktree session; it defaults to
+        # `cwd`, so a non-worktree session is unaffected.
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        self._config_root = (
+            str(Path(config_root).resolve()) if config_root else self._cwd
+        )
         # Project trust gate (core/trust.py). False ⇒ only the global
         # settings.json is read: opening a cloned repository must not run shell.
         self._trusted = trusted
@@ -156,7 +164,9 @@ class HookManager:
     def _roots(self) -> list[tuple[Path, str]]:
         roots = [(Path.home() / ".cluxmate" / "settings.json", "global")]
         if self._trusted:
-            roots.append((Path(self._cwd) / ".cluxmate" / "settings.json", "project"))
+            roots.append(
+                (Path(self._config_root) / ".cluxmate" / "settings.json", "project")
+            )
         return roots
 
     @staticmethod

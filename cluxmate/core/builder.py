@@ -365,9 +365,15 @@ class AgentBuilder:
         return self._retrieval
 
     def _hooks_manager(self) -> "HookManager | None":
-        """Current HookManager, lazily constructed from the cwd when unset."""
+        """Current HookManager, lazily constructed when unset.
+
+        The session cwd is the hook process cwd and the payload's "cwd"; the
+        settings.json comes from the project root (the same root every other
+        config reader in this builder uses)."""
         if self._hooks is None:
-            self._hooks = HookManager(self.project_root, trusted=self.trusted)
+            self._hooks = HookManager(
+                self._cwd, trusted=self.trusted, config_root=self.project_root
+            )
         return self._hooks
 
     def reload_hooks(self) -> list[dict[str, Any]]:
@@ -582,9 +588,9 @@ class AgentBuilder:
                 return False
             if self._mcp is None:
                 self._mcp = MCPManager(
-                    self.project_root, sandbox=self._mcp_sandbox(),
+                    self._cwd, sandbox=self._mcp_sandbox(),
                     egress_mode=self._egress_mode(),
-                    trusted=self.trusted,
+                    trusted=self.trusted, config_root=self.project_root,
                 )
             mcp = self._mcp
         # load() spawns subprocesses and blocks — run it OUTSIDE the lock so a
@@ -755,9 +761,9 @@ class AgentBuilder:
             if self._depth == 0:
                 if self._mcp is None:
                     self._mcp = MCPManager(
-                        self.project_root, sandbox=self._mcp_sandbox(),
+                        self._cwd, sandbox=self._mcp_sandbox(),
                         egress_mode=self._egress_mode(),
-                        trusted=self.trusted,
+                        trusted=self.trusted, config_root=self.project_root,
                     )
                     # Deferred mode: construct but don't load here (load spawns
                     # subprocesses and blocks). The caller loads it off the
