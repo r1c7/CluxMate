@@ -365,6 +365,23 @@ class JsonRpcCallbacks(AgentCallbacks):
             "params": {"type": "text_restart"},
         })
 
+    async def on_usage(self, usage: dict[str, Any]) -> None:
+        """Forward the turn's running token total as a dedicated stream event.
+
+        Fired after every LLM call of the ROOT agent (subagents report their
+        totals through agent_end instead). The desktop accumulates it onto the
+        live reply, so a turn whose ChatResult carries no usage — an interrupted
+        or aborted one, answered as ``{stop_reason, text, history}`` — is still
+        counted in the session's token footer instead of silently reading as
+        free. The payload keeps the agent loop's ``turn`` / ``step`` / ``time``
+        fields: a superseded turn's late event must be droppable rather than
+        applied to the reply that is now streaming.
+        """
+        _write_dict({
+            "jsonrpc": "2.0", "method": "chat/stream",
+            "params": {"type": "usage", "agent_id": "root", **usage},
+        })
+
     # ── subagent tracker interface ─────────────────────────────
     # TaskTool / SkillTool reach these via builder._tracker (set each turn by
     # _handle_chat_send). scoped() hands each subagent its own callbacks so the

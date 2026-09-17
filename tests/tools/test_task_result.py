@@ -1,5 +1,6 @@
 """Subagent result header: status normalization + telemetry formatting."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -191,3 +192,140 @@ async def test_backed_child_keeps_its_own_success():
     )
     assert out.startswith("[subagent: general-purpose | status=success")
     assert "note=" not in out
+
+
+# ------------------------------------------------- token accounting at the boundary
+
+
+class _UsageTracker:
+    """Stands in for the JSON-RPC tracker; records every agent_end report."""
+
+    def __init__(self):
+        self.ends: list[dict] = []
+
+    async def on_agent_start(self, *args, **kwargs):
+        pass
+
+    async def on_agent_end(self, agent_id, status, result, **kw):
+        self.ends.append({"agent_id": agent_id, "status": status, "result": result, **kw})
+
+    def scoped(self, agent_id, auto_approve=True):
+        return None
+
+
+def _tracked_builder(tracker, child):
+    builder = _StubBuilder(child)
+    builder._tracker = tracker
+    return builder
+
+
+class _RaisingChild:
+    """A child whose turn raised after its LLM calls were already billed."""
+
+    def __init__(self, usage: dict):
+        self.max_turns = 50
+        self.session_log = SessionLog.create(
+            SessionHeader(id="c1", createdAt=0, apiType="openai")
+        )
+        self.session_log.append("turn/end", {"turn": 1, "reason": {"kind": "error"}})
+        self.turn_usage = usage
+
+    async def run(self, prompt, history=None, callbacks=None):
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_failed_child_reports_the_tokens_it_spent_before_dying():
+    """A raised child has no AgentResult to report through, so agent_end used to
+    carry 0/0 — the live subagent tree then read LOWER than the tree the desktop
+    rebuilds from the same child JSONL (which folds every assistant/message)."""
+    tracker = _UsageTracker()
+    child = _RaisingChild({"input_tokens": 4321, "output_tokens": 210})
+    out = await TaskTool(_tracked_builder(tracker, child)).execute(
+        subagent_type="general-purpose", description="d", prompt="p",
+    )
+
+    assert out.startswith("[subagent: general-purpose | status=failed")
+    assert len(tracker.ends) == 1
+    end = tracker.ends[0]
+    assert end["agent_id"]
+    assert end["status"] == "error"
+    assert end["input_tokens"] == 4321
+    assert end["output_tokens"] == 210
+
+
+@pytest.mark.asyncio
+async def test_failed_child_without_a_usage_record_reports_zero():
+    """No fabricated numbers: a child that never reached the model (build
+    failure, no turn_usage) reports 0/0 instead of raising in the error path."""
+    tracker = _UsageTracker()
+    child = _RaisingChild({"input_tokens": 4321, "output_tokens": 210})
+    del child.turn_usage
+    out = await TaskTool(_tracked_builder(tracker, child)).execute(
+        subagent_type="general-purpose", description="d", prompt="p",
+    )
+
+    assert out.startswith("[subagent: general-purpose | status=failed")
+    assert tracker.ends[0]["input_tokens"] == 0
+    assert tracker.ends[0]["output_tokens"] == 0
+
+
+class _CancellingChild:
+    """A child cancelled mid-turn (Stop), i.e. raising a BaseException."""
+
+    def __init__(self, usage: dict):
+        self.max_turns = 50
+        self.session_log = SessionLog.create(
+            SessionHeader(id="c1", createdAt=0, apiType="openai")
+        )
+        self.session_log.append("turn/end", {"turn": 1, "reason": {"kind": "aborted"}})
+        self.turn_usage = usage
+
+    async def run(self, prompt, history=None, callbacks=None):
+        raise asyncio.CancelledError()
+
+
+class _ExplodingTracker(_UsageTracker):
+    """A tracker whose report itself fails (the turn is being torn down)."""
+
+    async def on_agent_end(self, agent_id, status, result, **kw):
+        self.ends.append({"agent_id": agent_id, "status": status, **kw})
+        raise RuntimeError("stdout already torn down")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_child_reports_its_spent_tokens_and_still_cancels():
+    """Stop mid-subagent: CancelledError is a BaseException, so the error branch
+    never ran and the node stayed "running" with 0 tokens while the child's own
+    JSONL already held them — the live tree read lower than the replay fold."""
+    tracker = _UsageTracker()
+    child = _CancellingChild({"input_tokens": 8888, "output_tokens": 77})
+
+    with pytest.raises(asyncio.CancelledError):
+        await TaskTool(_tracked_builder(tracker, child)).execute(
+            subagent_type="general-purpose", description="d", prompt="p",
+        )
+
+    assert len(tracker.ends) == 1
+    end = tracker.ends[0]
+    assert end["status"] == "error"       # matches the replay classification
+    assert end["input_tokens"] == 8888
+    assert end["output_tokens"] == 77
+    # The node's error text says WHY it stopped (the inspector renders this in
+    # place of "no activity" when the node has no blocks).
+    assert "cancelled" in end["result"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_cancellation_report_does_not_replace_the_cancel():
+    """Reporting is best-effort: if it blows up, the original CancelledError must
+    still be what the parent loop sees (never the reporting error)."""
+    tracker = _ExplodingTracker()
+    child = _CancellingChild({"input_tokens": 5, "output_tokens": 1})
+
+    with pytest.raises(asyncio.CancelledError):
+        await TaskTool(_tracked_builder(tracker, child)).execute(
+            subagent_type="general-purpose", description="d", prompt="p",
+        )
+
+    assert tracker.ends[0]["input_tokens"] == 5

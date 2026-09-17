@@ -184,6 +184,32 @@ export interface AgentEndEvent {
   output_tokens?: number
 }
 
+// Emitted after every LLM call of the ROOT agent with the turn's RUNNING totals
+// (input/output tokens + cache split + generation timing), so the UI can account
+// for a turn whose ChatResult carries no usage numbers — a cancelled or
+// timed-out turn answers with `{stop_reason, text, history}` only, i.e. the
+// tokens it really spent would otherwise be lost. Each event supersedes the
+// previous one for the same turn; subagents report theirs through agent_end
+// instead.
+export interface UsageEvent {
+  type: 'usage'
+  agent_id?: string
+  input_tokens: number
+  output_tokens: number
+  cache_read: number
+  cache_write: number
+  ttft_ms: number | null
+  gen_ms: number
+  // Which call published this total: the session turn number (null when the
+  // loop has no session log) and the step within that turn.
+  turn?: number | null
+  step?: number
+  // Emission time (epoch ms, the same clock the session log stamps with), so a
+  // superseded turn's late event can be dropped instead of applied to the reply
+  // that is now streaming.
+  time?: number
+}
+
 // One file changed during a turn — lightweight (no content), for the inline
 // "changed files" card. Content is fetched lazily via diffCheckpoint on click.
 export interface TurnFileChange {
@@ -299,6 +325,7 @@ export type StreamEvent =
   | AgentStartEvent | AgentEndEvent | TurnDiffEvent | TurnStartEvent | SkillUsedEvent
   | TitleSuggestedEvent | QuestionEvent
   | HookStartEvent | HookResultEvent | TextRestartEvent | TodoUpdateEvent
+  | UsageEvent
 
 export type SessionStreamEvent = StreamEvent & {
   sessionId: string

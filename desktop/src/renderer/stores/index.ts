@@ -136,6 +136,23 @@ function mapAgentMsg(msgs: ChatMessage[], id: string, fn: (m: ChatMessage) => Ch
   return msgs.map((m) => (m.id === id ? fn(m) : m))
 }
 
+// The running token total of a turn is published after EVERY LLM call, so an
+// event can outlive the turn it belongs to — a turn stopped and superseded by a
+// resend/retry still has its final event in flight — and would otherwise be
+// applied to the reply that is now streaming, inflating it with another turn's
+// numbers. `turn` / `time` on the event make that detectable: an event emitted
+// before this reply came into existence, or from a turn older than one already
+// applied to it, is stale. `currentTurn` is the per-turn closure's memory of
+// which turn it has already applied (null until a usable event arrives).
+function isStaleUsage(
+  event: { turn?: number | null; time?: number },
+  replyStartedAt: number,
+  currentTurn: number | null,
+): boolean {
+  if (event.time != null && event.time < replyStartedAt) return true
+  return event.turn != null && currentTurn != null && event.turn < currentTurn
+}
+
 // --- subagent node helpers -------------------------------------------------
 // A subagent node holds its own ordered block list, mirroring the root message.
 // These update one node inside a message's `subagents` map immutably.
@@ -1062,6 +1079,12 @@ export const useStore = create<AppState>((set, get) => ({
     // scheduleRender). Held across events so deltas coalesce into one render.
     let renderTimer: ReturnType<typeof setTimeout> | null = null
 
+    // This turn's attribution guards for the `usage` stream (see isStaleUsage):
+    // the instant this reply came into existence, and the newest turn already
+    // applied to it.
+    const turnSentAt = agentMsg.timestamp
+    let usageTurn: number | null = null
+
     const commit = (css: SessionState, s2: Map<string, SessionState>, extra?: Partial<AppState>) => {
       // Any explicit commit is a full flush — drop a pending throttled render so
       // it can't fire a redundant set() afterwards (this commit already carries
@@ -1288,6 +1311,31 @@ export const useStore = create<AppState>((set, get) => ({
           }
         })
         commit(css, s2)
+      } else if (event.type === 'usage') {
+        // The turn's running token total, emitted after every LLM call. A turn
+        // interrupted or aborted answers with no usage at all (the RPC returns
+        // {stop_reason, text, history} only), so this stream is the only record
+        // of what it spent — without it the session token footer counted those
+        // turns as free. The totals are cumulative for the turn (each event
+        // supersedes the last), so the finalize/error paths below must NOT clear
+        // them.
+        if (!isSub && !isStaleUsage(event, turnSentAt, usageTurn)) {
+          if (event.turn != null) usageTurn = event.turn
+          css.messages = mapAgentMsg(css.messages, agentMsgId, (m) => ({
+            ...m,
+            cacheUsage: {
+              input_tokens: event.input_tokens,
+              cache_read: event.cache_read,
+              cache_write: event.cache_write,
+            },
+            timing: {
+              ttft_ms: event.ttft_ms,
+              gen_ms: event.gen_ms,
+              out_tokens: event.output_tokens,
+            },
+          }))
+        }
+        commit(css, s2)
       } else if (event.type === 'hook_result') {
         // Annotate the turn with each completed hook run (faint, like skillsUsed).
         const run: HookRunEntry = {
@@ -1382,10 +1430,14 @@ export const useStore = create<AppState>((set, get) => ({
         const blocks = (m.blocks && m.blocks.length > 0)
           ? m.blocks
           : txt ? [{ type: 'text' as const, text: txt }] : m.blocks
+        // Keep what the live `usage` events already recorded when the result
+        // carries no numbers (an interrupted/aborted turn returns no usage, and
+        // it must not read as free). result.timing is complete on every path
+        // that returns a result at all, so it always wins when present.
         const cacheUsage = result.usage?.input_tokens
           ? { input_tokens: result.usage.input_tokens, cache_read: result.usage.cache_read || 0, cache_write: result.usage.cache_write || 0 }
-          : undefined
-        return { ...m, blocks, content: txt || (hasTools ? '' : '(no output)'), cacheUsage, timing: result.timing }
+          : m.cacheUsage
+        return { ...m, blocks, content: txt || (hasTools ? '' : '(no output)'), cacheUsage, timing: result.timing ?? m.timing }
       })
     } catch (e: any) {
       // A non-recoverable turn error (process crash / external kill) leaves a
@@ -1399,6 +1451,9 @@ export const useStore = create<AppState>((set, get) => ({
         sss.streamingContent = ''
       }
       set({ sessionStates: s3 })
+      // The discarded partial ANSWER must not survive, but its token cost is
+      // real: cacheUsage/timing recorded by the `usage` events stay on the
+      // message so the session footer still counts the killed turn.
       finalize((m) => ({
         ...m,
         blocks: [{ type: 'text', text: TURN_ERROR_TEXT() }],
@@ -1408,8 +1463,6 @@ export const useStore = create<AppState>((set, get) => ({
         turnDiff: undefined,
         skillsUsed: undefined,
         hooksUsed: undefined,
-        cacheUsage: undefined,
-        timing: undefined,
       }))
       set({ error: tGlobal('error.unexpected') })
     } finally {
@@ -1915,6 +1968,9 @@ export const useStore = create<AppState>((set, get) => ({
     // 4. Wire up the stream listener — same shape as sendMessage, but
     //    referencing the OLD user message for turn_start anchors and the
     //    NEW agent placeholder for everything else.
+    // This turn's attribution guards for the `usage` stream (see isStaleUsage).
+    const turnSentAt = agentPlaceholder.timestamp
+    let usageTurn: number | null = null
     // Persist the display transcript on a trailing throttle while the turn
     // streams (same crash-safety as sendMessage's schedulePersist).
     let persistTimer: ReturnType<typeof setTimeout> | null = null
@@ -2064,6 +2120,26 @@ export const useStore = create<AppState>((set, get) => ({
           return { ...m, skillsUsed: [...existing, { name: event.name, slug: event.slug, source: event.source, trigger: event.trigger }] }
         })
         commit(css, s2)
+      } else if (event.type === 'usage') {
+        // Same running-token record as sendMessage's handler (see the comment
+        // there): a retried turn that is interrupted must still be counted.
+        if (!isSub && !isStaleUsage(event, turnSentAt, usageTurn)) {
+          if (event.turn != null) usageTurn = event.turn
+          css.messages = mapAgentMsg(css.messages, agentMsgId, (m) => ({
+            ...m,
+            cacheUsage: {
+              input_tokens: event.input_tokens,
+              cache_read: event.cache_read,
+              cache_write: event.cache_write,
+            },
+            timing: {
+              ttft_ms: event.ttft_ms,
+              gen_ms: event.gen_ms,
+              out_tokens: event.output_tokens,
+            },
+          }))
+        }
+        commit(css, s2)
       } else if (event.type === 'hook_result') {
         const run: HookRunEntry = {
           event: event.event,
@@ -2110,8 +2186,8 @@ export const useStore = create<AppState>((set, get) => ({
             : txt ? [{ type: 'text' as const, text: txt }] : m.blocks
           const cacheUsage = result?.usage?.input_tokens
             ? { input_tokens: result.usage.input_tokens, cache_read: result.usage.cache_read || 0, cache_write: result.usage.cache_write || 0 }
-            : undefined
-          return { ...m, blocks, content: txt || (hasTools ? '' : '(no output)'), cacheUsage, timing: result?.timing, thinking: sss.thinkingContent || m.thinking }
+            : m.cacheUsage
+          return { ...m, blocks, content: txt || (hasTools ? '' : '(no output)'), cacheUsage, timing: result?.timing ?? m.timing, thinking: sss.thinkingContent || m.thinking }
         })
         sss.isStreaming = false
         sss.streamingContent = ''
@@ -2150,8 +2226,6 @@ export const useStore = create<AppState>((set, get) => ({
           turnDiff: undefined,
           skillsUsed: undefined,
           hooksUsed: undefined,
-          cacheUsage: undefined,
-          timing: undefined,
         }))
         sss.isStreaming = false
         sss.thinkingContent = ''

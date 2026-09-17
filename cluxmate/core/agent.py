@@ -189,6 +189,22 @@ def _dump_request(
     sys.stderr.flush()
 
 
+def _empty_turn_usage() -> dict[str, Any]:
+    """One turn's accumulated LLM token/timing totals.
+
+    Single source of truth for the numbers reported as ``AgentResult`` usage and
+    for the live ``on_usage`` stream (see ``AgentLoop.turn_usage``).
+    """
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ttft_ms": None,
+        "gen_ms": 0,
+    }
+
+
 @dataclass(frozen=True)
 class ToolDecision:
     """Outcome of a tool-approval prompt, recorded in the audit trail.
@@ -256,6 +272,23 @@ class AgentCallbacks:
         Stop hook blocked the reply). The UI should clear the previously-streamed
         text/thinking so the new stream starts fresh instead of appending to the
         rejected attempt.
+        """
+        pass
+
+    async def on_usage(self, usage: dict[str, Any]) -> None:
+        """Called after every LLM call with the turn's RUNNING totals.
+
+        ``usage`` is ``{input_tokens, output_tokens, cache_read, cache_write,
+        ttft_ms, gen_ms}`` accumulated over the calls made so far in this turn
+        (see ``AgentLoop.turn_usage``), plus the three fields that say WHICH call
+        published it: ``turn`` (session turn number, None when the loop has no
+        session log), ``step`` (step within that turn) and ``time`` (epoch ms, the
+        same clock the session log stamps its events with). Fired inside the turn,
+        so a front-end can account for a turn whose result carries no numbers — an
+        interrupted or aborted turn re-raises out of ``run()`` with no
+        ``AgentResult`` at all, and the RPC answers a cancelled or timed-out turn
+        with ``{stop_reason, text, history}`` only. turn/time let it drop a
+        superseded turn's late event instead of applying it to the next reply.
         """
         pass
 
@@ -411,6 +444,14 @@ class AgentLoop:
         # caller uses it to re-inject environment state (memory/skill/mode) on
         # the next turn (see AgentBuilder.invalidate_injections).
         self.compacted_this_turn = False
+        # This turn's accumulated LLM usage, reset at every _run_loop entry and
+        # updated as each response's token counts arrive. Every terminal path
+        # reads it — including the ones with no AgentResult to carry it (a turn
+        # that raised) — so a caller can always account for what a turn spent:
+        # the JSON-RPC usage stream and tools/task.py's subagent report read it
+        # directly. Keys: input_tokens / output_tokens / cache_read /
+        # cache_write / ttft_ms / gen_ms (see _empty_turn_usage).
+        self.turn_usage: dict[str, Any] = _empty_turn_usage()
         # Per-turn audit state (reset at each run()): the current interruption
         # stage and the disposition of every tool call this turn, so a turn that
         # aborts can self-close its orphaned tool calls with an honest result.
@@ -675,6 +716,21 @@ class AgentLoop:
             "if enough evidence has been gathered."
         )
 
+    def _turn_cache_usage(self) -> dict[str, int] | None:
+        """This turn's prompt-cache totals in ``AgentResult.cache_usage`` shape.
+
+        None when no response reported input tokens, mirroring what the loop has
+        always returned for a turn that never reached the model.
+        """
+        u = self.turn_usage
+        if not u["input_tokens"]:
+            return None
+        return {
+            "input_tokens": u["input_tokens"],
+            "cache_read": u["cache_read"],
+            "cache_write": u["cache_write"],
+        }
+
     def _fail_turn(
         self,
         messages: list[dict[str, Any]],
@@ -688,6 +744,10 @@ class AgentLoop:
         alternating (a failed turn otherwise leaves history ending on the user
         message, and two consecutive user messages 400 on Anthropic), and lets
         the model see what happened if the conversation continues.
+
+        The turn's usage so far rides along: the calls made before the failure
+        were really billed, so an errored turn must not look free to the caller's
+        token accounting.
         """
         if end_reason is not None:
             end_reason["kind"] = "error"
@@ -698,10 +758,15 @@ class AgentLoop:
         self._log_append(
             "step/end", {"turn": self._log_turn, "step": self._log_step}
         )
+        u = self.turn_usage
         return AgentResult(
             text=text,
             history=messages[1:],  # exclude system prompt
             tool_calls_made=tool_calls_made,
+            cache_usage=self._turn_cache_usage(),
+            ttft_ms=u["ttft_ms"],
+            gen_ms=u["gen_ms"],
+            out_tokens=u["output_tokens"],
         )
 
     async def run(
@@ -900,20 +965,19 @@ class AgentLoop:
         self._turn_write_paths = set()
         self._turn_any_bash = False
         self._turn_start_ts = time.time()
-        # Accumulate per-LLM-call cache token counts across all turns so the UI
-        # can show a single per-turn hit rate. Both may stay 0 when the provider
-        # omits usage details. input_tokens_total tracks the total prompt tokens
-        # across all LLM calls this turn so the hit rate denominator is correct
-        # even when tool_use loops cause multiple calls.
-        cache_read_total = 0
-        cache_write_total = 0
-        input_tokens_total = 0
-        # Timing accumulators across all LLM calls this turn. first-token latency
-        # is measured once (first call only); generation time and output tokens
-        # accumulate so the rate covers the whole turn's actual generation.
-        ttft_ms: int | None = None
-        gen_ms_total = 0
-        out_tokens_total = 0
+        # Accumulate per-LLM-call token counts across all turns so the UI can
+        # show a single per-turn hit rate AND so a turn whose result carries no
+        # numbers (interrupted / aborted: run() re-raises with no AgentResult, and
+        # the RPC answers those with no usage) can still be accounted for. The
+        # totals live on the instance (self.turn_usage), not in locals: every
+        # terminal path — including ones far from this loop — reports them.
+        # input_tokens is the total prompt tokens across all LLM calls this turn,
+        # so the hit-rate denominator is correct even when tool_use loops cause
+        # multiple calls. ttft_ms: first-token latency, captured once (first
+        # call only); gen_ms/output_tokens accumulate so the rate covers the
+        # whole turn's generation.
+        self.turn_usage = _empty_turn_usage()
+        turn_usage = self.turn_usage
         # Reasoning models (deepseek-v4-pro, R1, Qwen3, …) occasionally end a
         # turn having streamed only reasoning tokens and an EMPTY completion
         # (finish_reason=stop, no content, no tool calls). It's non-deterministic
@@ -1096,12 +1160,12 @@ class AgentLoop:
             # results appended below add to this via char estimate.
             if response.input_tokens is not None:
                 ctx_tokens = response.input_tokens + (response.output_tokens or 0)
-                input_tokens_total += response.input_tokens
+                turn_usage["input_tokens"] += response.input_tokens
             # Accumulate cache token counts for the per-turn hit rate.
             if response.cache_read_input_tokens is not None:
-                cache_read_total += response.cache_read_input_tokens
+                turn_usage["cache_read"] += response.cache_read_input_tokens
             if response.cache_creation_input_tokens is not None:
-                cache_write_total += response.cache_creation_input_tokens
+                turn_usage["cache_write"] += response.cache_creation_input_tokens
 
             # Fold this call's generation timing into the turn totals. First-token
             # latency is captured once (first call). For tool_use calls that emit
@@ -1109,14 +1173,31 @@ class AgentLoop:
             # the first/last token; the whole call duration IS generation time
             # (no tool execution happens inside an LLM call), so fall back to
             # call_start → now for those calls.
-            if ttft_ms is None and first_ts is not None:
-                ttft_ms = int((first_ts - call_start) * 1000)
+            if turn_usage["ttft_ms"] is None and first_ts is not None:
+                turn_usage["ttft_ms"] = int((first_ts - call_start) * 1000)
             if first_ts is not None and last_ts is not None:
-                gen_ms_total += int((last_ts - first_ts) * 1000)
+                turn_usage["gen_ms"] += int((last_ts - first_ts) * 1000)
             elif first_ts is None and (response.output_tokens or 0) > 0:
-                gen_ms_total += int((time.monotonic() - call_start) * 1000)
+                turn_usage["gen_ms"] += int((time.monotonic() - call_start) * 1000)
             if response.output_tokens is not None:
-                out_tokens_total += response.output_tokens
+                turn_usage["output_tokens"] += response.output_tokens
+
+            # Publish the running total to the front-end from INSIDE the turn:
+            # an interrupted or aborted turn returns no AgentResult at all
+            # (run() re-raises) and the RPC answers a cancelled/timed-out turn
+            # with no usage, so for those this stream is the only record of what
+            # it spent — the desktop's per-session token footer must count them.
+            # Self-describing: turn/step say which call this total belongs to and
+            # `time` (the session log's own epoch-ms clock) lets a front-end drop
+            # a superseded turn's late event instead of applying it to the next
+            # reply's running total.
+            if callbacks is not None:
+                await callbacks.on_usage({
+                    **turn_usage,
+                    "turn": self._log_turn,
+                    "step": step,
+                    "time": int(time.time() * 1000),
+                })
 
             # Assemble per-step log metadata: reasoning, token usage, generation
             # timing for THIS LLM call.
@@ -1262,21 +1343,14 @@ class AgentLoop:
                 )
                 # No on_text here: the streaming path already forwarded the full
                 # text via on_text_delta chunks. Re-emitting would duplicate it.
-                cache_usage = None
-                if input_tokens_total:
-                    cache_usage = {
-                        "input_tokens": input_tokens_total,
-                        "cache_read": cache_read_total,
-                        "cache_write": cache_write_total,
-                    }
                 return AgentResult(
                     text=text,
                     history=messages[1:],  # exclude system prompt
                     tool_calls_made=tool_calls_made,
-                    cache_usage=cache_usage,
-                    ttft_ms=ttft_ms,
-                    gen_ms=gen_ms_total,
-                    out_tokens=out_tokens_total,
+                    cache_usage=self._turn_cache_usage(),
+                    ttft_ms=turn_usage["ttft_ms"],
+                    gen_ms=turn_usage["gen_ms"],
+                    out_tokens=turn_usage["output_tokens"],
                 )
 
             if response.stop_reason == "tool_use":
@@ -1647,21 +1721,14 @@ class AgentLoop:
             self._log_append("step/end", {"turn": self._log_turn, "step": step})
             if end_reason is not None and response.stop_reason == "max_tokens":
                 end_reason["kind"] = "max-tokens"
-            cache_usage = None
-            if input_tokens_total:
-                cache_usage = {
-                    "input_tokens": input_tokens_total,
-                    "cache_read": cache_read_total,
-                    "cache_write": cache_write_total,
-                }
             return AgentResult(
                 text=text,
                 history=messages[1:],
                 tool_calls_made=tool_calls_made,
-                cache_usage=cache_usage,
-                ttft_ms=ttft_ms,
-                gen_ms=gen_ms_total,
-                out_tokens=out_tokens_total,
+                cache_usage=self._turn_cache_usage(),
+                ttft_ms=turn_usage["ttft_ms"],
+                gen_ms=turn_usage["gen_ms"],
+                out_tokens=turn_usage["output_tokens"],
             )
 
         if end_reason is not None:
@@ -1679,7 +1746,8 @@ class AgentLoop:
             text=text,
             history=messages[1:],
             tool_calls_made=tool_calls_made,
-            ttft_ms=ttft_ms,
-            gen_ms=gen_ms_total,
-            out_tokens=out_tokens_total,
+            cache_usage=self._turn_cache_usage(),
+            ttft_ms=turn_usage["ttft_ms"],
+            gen_ms=turn_usage["gen_ms"],
+            out_tokens=turn_usage["output_tokens"],
         )

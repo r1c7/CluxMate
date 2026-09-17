@@ -1,5 +1,6 @@
 """TaskTool — spawn subagents for independent work."""
 
+import asyncio
 import os
 import re
 import time
@@ -231,6 +232,9 @@ class TaskTool(BaseTool):
         parent_id = getattr(self._builder, "_agent_id", "root")
         depth = getattr(self._builder, "_depth", 0) + 1
         child_persister = None
+        # Held outside the try so the failure path below can still read what the
+        # child spent before it died (its own loop's running total).
+        child = None
         try:
             # Everything from here on runs inside the try so the finally below
             # frees the scheduler slot on EVERY path — success, tool error,
@@ -319,6 +323,15 @@ class TaskTool(BaseTool):
                     output_tokens=result.out_tokens,
                 )
             return text
+        except asyncio.CancelledError:
+            # A cancelled child (the turn's Stop reached it mid-run) is a
+            # BaseException, so the error branch below never sees it — without
+            # this the tree node stayed "running" with 0 tokens while the child's
+            # own JSONL already held the ones it burned, i.e. the live tree read
+            # lower than the replay fold of the same file. Report it, then let the
+            # cancellation propagate unchanged (the parent loop still owns it).
+            await self._report_cancelled_child(child_id, child, tracker)
+            raise
         except Exception as e:
             msg = f"Subagent failed: {e}"
             msg, _ = await self._run_subagent_stop_hook(
@@ -329,7 +342,19 @@ class TaskTool(BaseTool):
                 _result_header(subagent_type, "failed", note=str(e)) + "\n\n" + msg
             )
             if tracker is not None:
-                await tracker.on_agent_end(child_id, "error", msg)
+                # A child that raised has no AgentResult to report through, but
+                # the calls it made before dying were billed: read its own loop's
+                # running total so the desktop's per-session footer counts them
+                # (the reload path already folds the same child JSONL, so the
+                # live tree must not read lower than the reconstructed one).
+                died_usage = getattr(child, "turn_usage", None) or {}
+                await tracker.on_agent_end(
+                    child_id,
+                    "error",
+                    msg,
+                    input_tokens=died_usage.get("input_tokens", 0),
+                    output_tokens=died_usage.get("output_tokens", 0),
+                )
             return msg
         finally:
             # Free the scheduler slot on every path — success, tool error,
@@ -341,6 +366,42 @@ class TaskTool(BaseTool):
             if child_persister is not None:
                 child_persister.flush()
                 child_persister.dispose()
+
+    async def _report_cancelled_child(
+        self, child_id: str, child: Any, tracker: Any
+    ) -> None:
+        """Report a cancelled child's spent tokens, then let the cancel propagate.
+
+        A cancelled child never returns an AgentResult, and ``CancelledError`` is
+        a BaseException, so the ``except Exception`` branch in ``execute`` does not
+        run for it: without this the tree node stayed "running" with 0 tokens while
+        the child's own JSONL already recorded the calls it burned — the LIVE tree
+        reading lower than the replay fold of the same file. Status ``error``
+        matches what the replay path derives from that child's own
+        ``turn/end`` (anything but completed/max-tokens/max-turns is "error").
+
+        Best-effort by design: the turn is being torn down, so a second
+        cancellation must neither replace the original one nor be swallowed here —
+        the caller re-raises the original. SubagentStop hooks are deliberately NOT
+        run (they are not run on cancellation, see ``_run_subagent_stop_hook``).
+        """
+        if tracker is None:
+            return
+        usage = getattr(child, "turn_usage", None) or {}
+        try:
+            await tracker.on_agent_end(
+                child_id,
+                "error",
+                # Rendered as the node's error text in the desktop inspector —
+                # "no activity" would hide WHY the node stopped.
+                "[Subagent cancelled: the turn was stopped before it finished]",
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+            )
+        except BaseException:
+            # Never let the reporting path turn a cancellation into something
+            # else — the caller re-raises the original CancelledError.
+            pass
 
     async def _run_subagent_stop_hook(
         self,
@@ -358,9 +419,14 @@ class TaskTool(BaseTool):
         "block" cannot stop it — instead the block reason REPLACES the
         subagent's reply in the parent's tool result (the model is told the
         result was rejected). Feedback is appended to the reply as extra
-        context. Not run on cancellation: a cancelled subagent (turn cancelled)
-        propagates CancelledError, which is not caught by ``except Exception``
-        above.
+        context. A cancellation that arrives as ``asyncio.CancelledError`` (the
+        turn's Stop cancelling the task) is reported by the dedicated branch
+        above and does NOT run this hook — the turn is being torn down, so no
+        user hook is dispatched from there. A turn-level cancel that surfaces as
+        the JSON-RPC ``_CancelledError`` (a plain Exception that
+        ``ScopedCallbacks`` raises on a tool call) is NOT that branch: it takes
+        the ``except Exception`` path below and does run the hook, as it always
+        has.
         """
         hooks_manager = getattr(self._builder, "_hooks_manager", None)
         hooks = hooks_manager() if hooks_manager is not None else None
