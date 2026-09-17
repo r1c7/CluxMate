@@ -668,6 +668,21 @@ class WindowsLowILSandbox(ShellSandbox):
             and now - self._label_failed_at < _LABEL_RETRY_INTERVAL
         )
 
+        # The state subtree must read MEDIUM on EVERY call, independent of the
+        # workspace-drift branch below: `state.mkdir` above creates it inside a
+        # tree that may ALREADY be Low (a git worktree under a labeled repo),
+        # so it inherits Low — and the drift branch is gated on the WORKSPACE
+        # root's label, so it never runs again and nothing would ever raise it
+        # back. A Low-labeled `.cluxmate` hands the low-IL child write access to
+        # permissions.json / mcp.json, which is exactly what this subtree (and
+        # WriteFence.denyroots) exists to prevent.
+        if self._integrity_level(state) not in (None, "M") and not in_backoff:
+            subprocess.run(
+                ["icacls", str(state), "/setintegritylevel", "(OI)(CI)M",
+                 "/C", "/Q"],
+                capture_output=True, timeout=60,
+            )
+
         # Workspace drift: unlabeled == medium == drifted. Re-label the tree,
         # re-raise the deny subtree to medium, refresh the marker.
         if self._integrity_level(ws) != "L" and not in_backoff:

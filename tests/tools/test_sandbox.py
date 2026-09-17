@@ -10,6 +10,8 @@ construction is unit-tested everywhere.
 
 import os
 import platform
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -676,16 +678,22 @@ def test_lowil_setup_heals_drifted_scratch(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(not IS_WIN, reason="windows-only")
 def test_lowil_setup_noop_when_labels_healthy(monkeypatch, tmp_path):
-    """When workspace + scratch are already LOW, _setup must not relabel.
+    """When workspace + scratch are LOW and the state dir MEDIUM, no relabel.
 
-    Idempotence guard: no wasted icacls tree walk on every session start.
+    Idempotence guard: no wasted icacls tree walk on every session start. The
+    state subtree is deliberately MEDIUM here — that is the healthy label
+    _setup maintains, and a fake that reports it LOW would be describing the
+    very drift the state-dir check exists to heal.
     """
     sb = WindowsLowILSandbox(str(tmp_path))
 
     label_calls = []
     icacls_calls = []
 
-    monkeypatch.setattr(sb, "_integrity_level", lambda path: "L")
+    monkeypatch.setattr(
+        sb, "_integrity_level",
+        lambda path: "M" if Path(path).name == ".cluxmate" else "L",
+    )
     monkeypatch.setattr(
         sb, "_label_dirs_low",
         lambda root, skip_state=False: label_calls.append(str(root)),
@@ -719,8 +727,12 @@ def test_lowil_setup_reverifies_after_first_call(monkeypatch, tmp_path):
     )
     _fake_run_capture(monkeypatch, icacls_calls)
 
-    # First call: everything already low — a pure no-op.
-    monkeypatch.setattr(sb, "_integrity_level", lambda path: "L")
+    # First call: everything already healthy (workspace + scratch low, the
+    # state subtree the medium _setup keeps it at) — a pure no-op.
+    monkeypatch.setattr(
+        sb, "_integrity_level",
+        lambda path: "M" if Path(path).name == ".cluxmate" else "L",
+    )
     sb._setup()
     assert label_calls == []
     assert icacls_calls == []
@@ -807,3 +819,30 @@ def test_integrity_level_none_when_unlabeled(monkeypatch):
 
     monkeypatch.setattr(sb_mod.subprocess, "run", fake_run)
     assert WindowsLowILSandbox._integrity_level(Path("C:/x")) is None
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or shutil.which("icacls") is None,
+    reason="windows low-IL backend only",
+)
+def test_state_dir_under_an_already_low_workspace_is_raised_medium(tmp_path):
+    """A `.cluxmate` created INSIDE an already-Low tree inherits Low.
+
+    `_setup` used to raise the state dir back to medium only inside the
+    workspace-drift branch, which is gated on the workspace ROOT reading Low —
+    so on exactly the inheritance path (a git worktree under a labeled repo)
+    the raise never ran and the low-IL child could write permissions.json.
+    """
+    from cluxmate.tools._sandbox import WindowsLowILSandbox
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    # An inherited label: the root is already Low, the tree is untouched.
+    subprocess.run(
+        ["icacls", str(ws), "/setintegritylevel", "(OI)(CI)L", "/C", "/Q"],
+        capture_output=True, timeout=60,
+    )
+    sb = WindowsLowILSandbox(str(ws), grant_paths=[], egress_mode="shared")
+    sb._setup()
+    assert sb._integrity_level(ws) == "L"
+    assert sb._integrity_level(ws / ".cluxmate") == "M"
