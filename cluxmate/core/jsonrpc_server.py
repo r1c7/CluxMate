@@ -20,6 +20,7 @@ import time
 import traceback
 from typing import Any
 
+from cluxmate.core import project_root
 from cluxmate.core.agent import AgentCallbacks, AgentLoop, NETWORK_FALLBACK_TEXT, ToolDecision
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.checkpoints import CheckpointManager
@@ -548,6 +549,10 @@ class JsonRpcServer:
         self._agent: AgentLoop | None = None
         self._builder: AgentBuilder | None = None
         self._cwd = os.getcwd()
+        # The project root the session's CONFIG is read from. Placeholder until
+        # initialize resolves the real one (see _handle_initialize); mirroring
+        # _cwd keeps the attribute present for a not-yet-initialized server.
+        self._project_root = os.getcwd()
         # Project trust registry (~/.cluxmate/trust.json) + this run's overrides.
         # One store per process: a trust/set or an initialize {trust} override is
         # visible to every later re-initialize.
@@ -594,11 +599,12 @@ class JsonRpcServer:
         # browser is silently undone by the flow's own store.put().
         self._auth_epoch: dict[str, int] = {}
         self._auth_lock = threading.Lock()
-        # Per-project tool-approval policy. Bound to the default cwd here; rebuilt
-        # against the real workspace in initialize() once the desktop sends it, so
-        # "accept edits" is scoped to <cwd>/.cluxmate/permissions.json and does
-        # not follow the user to a different project.
-        self._policy = PermissionPolicy(self._cwd)
+        # Per-project tool-approval policy. Bound to the default project root
+        # here; rebuilt against the real project in initialize() once the desktop
+        # sends it, so "accept edits" is scoped to
+        # <project_root>/.cluxmate/permissions.json and does not follow the user
+        # to a different project.
+        self._policy = PermissionPolicy(self._project_root)
         # Writable-folder grants (sandbox-grants.json). Lazily constructed at
         # first use — a read-only home or a headless process shouldn't force it.
         self._grants: GrantStore | None = None
@@ -880,17 +886,24 @@ class JsonRpcServer:
         self._shutdown_lsp()
         self._shutdown_egress()
         self._cwd = params.get("cwd", os.getcwd())
+        # The project's config state (trust, permissions, hooks, agents, skills,
+        # mcp, memory) lives in the MAIN worktree; the session cwd stays the tree
+        # we may write (fence, sandbox, shadow repo, LSP). Resolved ONCE here and
+        # handed down — never re-derived per subsystem.
+        self._project_root = project_root.resolve(self._cwd).root
         # Project trust: an explicit initialize {trust} is this run's override
         # (the desktop re-sends it after a bridge respawn for a session-only
         # decision). Resolved BEFORE any project config is constructed below.
+        # The answer is about the PROJECT, so the override is filed under the
+        # project root too: the worktree's own spelling is not a project.
         override = params.get("trust")
         if override in (TRUSTED, DENIED):
-            self._trust_store.set_session(self._cwd, override)
-        self._trust = resolve_trust(self._cwd, self._trust_store)
+            self._trust_store.set_session(self._project_root, override)
+        self._trust = resolve_trust(self._project_root, self._trust_store)
         self._session_id = new_sid
-        # Rebind the approval policy to this workspace's permissions.json so a
-        # re-initialize onto a different cwd loads that project's policy.
-        self._policy = PermissionPolicy(self._cwd, trusted=self._trust.trusted)
+        # Rebind the approval policy to this PROJECT's permissions.json so a
+        # re-initialize onto a different project loads that project's policy.
+        self._policy = PermissionPolicy(self._project_root, trusted=self._trust.trusted)
         # Writable-folder grants are user-global (~/.cluxmate/sandbox-grants.json)
         # and survive re-init; load once and share with the builder.
         if getattr(self, "_grants", None) is None:
@@ -934,7 +947,7 @@ class JsonRpcServer:
         # Supersede any in-flight background MCP loader from a prior initialize.
         self._init_gen += 1
         gen = self._init_gen
-        builder = AgentBuilder(self._cwd, provider)
+        builder = AgentBuilder(self._cwd, provider).with_project_root(self._project_root)
         builder.with_trust(self._trust)
         builder.with_default_tools()
         builder.with_grants(self._grants)
@@ -945,7 +958,10 @@ class JsonRpcServer:
         # Lifecycle hooks (settings.json). One manager per session so the payload
         # carries the session id; the builder caches it and children inherit it.
         # The observer streams hook_start/hook_result events to the desktop.
-        hooks = HookManager(self._cwd, trusted=self._trust.trusted)
+        # The exec tree is the session cwd (hooks RUN there); settings.json is
+        # read from the project root.
+        hooks = HookManager(self._cwd, trusted=self._trust.trusted,
+                            config_root=self._project_root)
         hooks.session_id = self._session_id
         hooks.set_observer(self._hook_observer)
         builder.with_hooks(hooks)
@@ -1653,8 +1669,17 @@ class JsonRpcServer:
     def _trust_cwd(self, params: dict[str, Any]) -> str:
         """The directory a trust call is about — the session's cwd, not the
         process cwd: the desktop spawns one bridge per session and passes the
-        session's working directory."""
-        return str(params.get("cwd") or self._cwd or os.getcwd())
+        session's working directory.
+
+        Trust is the answer to "may CluxMate load THIS PROJECT's config?", so the
+        caller's directory is mapped to the project root first. A worktree is not
+        a project of its own (filing the answer under the worktree spelling would
+        also leave `trust/get` reading a key nobody ever wrote), and
+        `project_root.resolve` degrades to the same directory outside a repo, so
+        a non-git cwd is unaffected.
+        """
+        cwd = str(params.get("cwd") or self._cwd or os.getcwd())
+        return project_root.resolve(cwd).root
 
     def _trust_get(self, params: dict[str, Any]) -> dict[str, Any]:
         cwd = self._trust_cwd(params)
@@ -1698,11 +1723,14 @@ class JsonRpcServer:
         """Subagent type catalog (builtin + user definitions).
 
         Read-only and session-independent: it only reads two directories, so the
-        desktop can render a `task` approval card before initialize.
+        desktop can render a `task` approval card before initialize. The project
+        half of the catalog (and its trust gate) is the PROJECT's, not the
+        session tree's.
         """
         cwd = str(params.get("cwd") or self._cwd or os.getcwd())
+        root = project_root.resolve(cwd).root
         return SubagentRegistry(
-            cwd, trusted=resolve_trust(cwd, self._trust_store).trusted
+            root, trusted=resolve_trust(root, self._trust_store).trusted
         ).snapshot()
 
     def _set_egress_config(self, params: dict[str, Any]) -> dict[str, Any]:
