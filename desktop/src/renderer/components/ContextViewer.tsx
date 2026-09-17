@@ -205,6 +205,11 @@ export default function ContextViewer() {
   const contextTarget = useStore((s) => s.contextTarget)
   const backToAgentTree = useStore((s) => s.backToAgentTree)
 
+  // The id of the log this panel reconstructs: the active parent session when
+  // opened from the header (contextTarget null), or the subagent's agent id
+  // when drilled into from the Agent Tree.
+  const shownSessionId: string = contextTarget?.sessionId ?? activeSessionId ?? ''
+
   const [selected, setSelected] = useState(0)
   const [selectedStep, setSelectedStep] = useState(0)
   const [showRaw, setShowRaw] = useState(false)
@@ -254,30 +259,62 @@ export default function ContextViewer() {
 
   return (
     <div className="h-full flex flex-col bg-surface">
-      <div className="flex items-center gap-2 px-3 h-9 border-b border-surface-border flex-shrink-0">
-        <button
-          onClick={() => setShowRaw((v) => !v)}
-          disabled={!currentStep}
-          className={`text-[11px] px-2 py-0.5 rounded border transition-colors disabled:opacity-50 ${
-            showRaw ? 'border-accent/40 text-accent bg-accent/10' : 'border-surface-border text-ink-soft hover:bg-surface-raised hover:text-ink'
-          }`}
-        >
-          {t('context.raw')}
-        </button>
-        <div className="flex-1" />
-        <button
-          onClick={copyRaw}
-          disabled={!currentStep}
-          className="text-[11px] px-2 py-0.5 rounded border border-surface-border text-ink-soft hover:bg-surface-raised hover:text-ink disabled:opacity-50 transition-colors"
-          title={t('context.copyRawTitle')}
-        >
-          {copied ? t('context.copied') : t('context.copyRaw')}
-        </button>
-        <button
-          onClick={() => toggle(false)}
-          className="text-ink-faint hover:text-ink text-base px-1 transition-colors"
-          title={t('common.close')}
-        >×</button>
+      {/* ── Panel header ──
+          Row 1: session id (the ~/.cluxmate/sessions/<id>.jsonl this panel
+          reconstructs — clickable to copy, hover shows the full id) with the
+          close button on the far right.
+          Row 2: view controls (Raw toggle / Copy raw), left-aligned. The id
+          moves to its own row because at the panel's minimum width (~280px)
+          the three controls plus a 12-char mono id no longer fit on one line,
+          which previously pushed Copy raw against the close button. */}
+      <div className="flex-shrink-0 border-b border-surface-border">
+        <div className="flex items-center gap-2 px-3 h-8">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-faint flex-shrink-0">{t('context.sessionId')}</span>
+          <button
+            onClick={() => shownSessionId && window.electronAPI.writeClipboard(shownSessionId).catch(() => {})}
+            className={`min-w-0 flex items-center gap-1.5 text-left rounded px-1 -mx-1 transition-colors ${shownSessionId ? 'hover:bg-surface-raised cursor-pointer' : 'cursor-default'}`}
+            title={shownSessionId ? t('context.copySessionIdTitle') : undefined}
+            disabled={!shownSessionId}
+          >
+            <span
+              className="text-[10px] font-mono text-ink-soft truncate"
+              title={shownSessionId}
+            >
+              {shownSessionId || '—'}
+            </span>
+            {shownSessionId && (
+              <svg className="w-3 h-3 text-ink-faint flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+            )}
+          </button>
+          <div className="flex-1" />
+          <button
+            onClick={() => toggle(false)}
+            className="text-ink-faint hover:text-ink text-base px-1 transition-colors"
+            title={t('common.close')}
+          >×</button>
+        </div>
+        <div className="flex items-center gap-2 px-3 h-8">
+          <button
+            onClick={() => setShowRaw((v) => !v)}
+            disabled={!currentStep}
+            className={`text-[11px] px-2 py-0.5 rounded border transition-colors disabled:opacity-50 ${
+              showRaw ? 'border-accent/40 text-accent bg-accent/10' : 'border-surface-border text-ink-soft hover:bg-surface-raised hover:text-ink'
+            }`}
+          >
+            {t('context.raw')}
+          </button>
+          <button
+            onClick={copyRaw}
+            disabled={!currentStep}
+            className="text-[11px] px-2 py-0.5 rounded border border-surface-border text-ink-soft hover:bg-surface-raised hover:text-ink disabled:opacity-50 transition-colors"
+            title={t('context.copyRawTitle')}
+          >
+            {copied ? t('context.copied') : t('context.copyRaw')}
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
