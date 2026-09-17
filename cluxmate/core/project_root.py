@@ -4,8 +4,19 @@ CluxMate equates a project with a session's cwd everywhere. A git worktree
 breaks that equation: the session's tree is ``<repo>/.worktrees/<slug>`` while
 the project's config state (trust, permissions, skills, mcp, hooks, agents,
 AGENTS.md, retrieval facts) lives in the MAIN worktree. So config readers take
-the project root, while everything that means "the tree I may write" keeps the
-session cwd.
+the CONFIG ROOT (``ProjectRoot.config_root``), while everything that means "the
+tree I may write" keeps the session cwd.
+
+THE POLICY, stated once, in ``config_root``: the config root is the session cwd
+EXCEPT when the session runs inside a LINKED git worktree, where it is the main
+worktree root. That exception is the whole point of this module — only a linked
+worktree (working tree ``<repo>/.worktrees/<slug>``, own branch) is redirected to
+the main worktree's config. Everywhere else, including a SUBDIRECTORY of an
+ordinary repo (``<repo>/pkg``), the session keeps its own directory, so
+``<repo>/pkg/.cluxmate/`` is still what is read — identical to the behaviour
+before worktree support existed. ``root`` stays informative: it is the git main
+worktree root for ANY directory inside a repo, and callers that read project
+config must take ``config_root`` instead of it.
 
 The main worktree root is the PARENT of git's *common* dir. Do not use
 ``--show-toplevel``: inside a linked worktree it returns the worktree itself.
@@ -53,6 +64,17 @@ class ProjectRoot:
     root: str
     is_worktree: bool
     branch: str | None
+
+    @property
+    def config_root(self) -> str:
+        """THE directory project-config readers must take.
+
+        The session cwd, except inside a linked worktree where it is the main
+        worktree root (see the module docstring). A plain-repo subdirectory
+        session therefore keeps its own directory exactly as before this
+        module existed; only linked worktrees are redirected.
+        """
+        return self.root if self.is_worktree else self.cwd
 
 
 def clear_cache() -> None:

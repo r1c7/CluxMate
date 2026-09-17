@@ -549,9 +549,13 @@ class JsonRpcServer:
         self._agent: AgentLoop | None = None
         self._builder: AgentBuilder | None = None
         self._cwd = os.getcwd()
-        # The project root the session's CONFIG is read from. Placeholder until
-        # initialize resolves the real one (see _handle_initialize); mirroring
-        # _cwd keeps the attribute present for a not-yet-initialized server.
+        # The project's CONFIG root: where .cluxmate/ (trust, permissions,
+        # hooks, agents, skills, mcp) is read from. It is
+        # `ProjectRoot.config_root` — the session cwd, or the main worktree
+        # root when the session runs inside a linked worktree. Placeholder
+        # until initialize resolves the real one (see _handle_initialize);
+        # mirroring _cwd keeps the attribute present for a not-yet-initialized
+        # server.
         self._project_root = os.getcwd()
         # Project trust registry (~/.cluxmate/trust.json) + this run's overrides.
         # One store per process: a trust/set or an initialize {trust} override is
@@ -887,10 +891,15 @@ class JsonRpcServer:
         self._shutdown_egress()
         self._cwd = params.get("cwd", os.getcwd())
         # The project's config state (trust, permissions, hooks, agents, skills,
-        # mcp, memory) lives in the MAIN worktree; the session cwd stays the tree
-        # we may write (fence, sandbox, shadow repo, LSP). Resolved ONCE here and
-        # handed down — never re-derived per subsystem.
-        self._project_root = project_root.resolve(self._cwd).root
+        # mcp, memory) lives in the MAIN worktree OF A LINKED WORKTREE, and in
+        # the session's own directory everywhere else; the session cwd stays the
+        # tree we may write (fence, sandbox, shadow repo, LSP). `config_root`
+        # holds exactly that policy (see cluxmate/core/project_root.py) — do not
+        # take `.root` here: it is the git repo root for ANY directory inside a
+        # repo, which would redirect a plain-repo SUBDIRECTORY session to the
+        # repo root. Resolved ONCE here and handed down — never re-derived per
+        # subsystem.
+        self._project_root = project_root.resolve(self._cwd).config_root
         # Project trust: an explicit initialize {trust} is this run's override
         # (the desktop re-sends it after a bridge respawn for a session-only
         # decision). Resolved BEFORE any project config is constructed below.
@@ -959,7 +968,7 @@ class JsonRpcServer:
         # carries the session id; the builder caches it and children inherit it.
         # The observer streams hook_start/hook_result events to the desktop.
         # The exec tree is the session cwd (hooks RUN there); settings.json is
-        # read from the project root.
+        # read from the project's config root.
         hooks = HookManager(self._cwd, trusted=self._trust.trusted,
                             config_root=self._project_root)
         hooks.session_id = self._session_id
@@ -1672,14 +1681,15 @@ class JsonRpcServer:
         session's working directory.
 
         Trust is the answer to "may CluxMate load THIS PROJECT's config?", so the
-        caller's directory is mapped to the project root first. A worktree is not
-        a project of its own (filing the answer under the worktree spelling would
-        also leave `trust/get` reading a key nobody ever wrote), and
-        `project_root.resolve` degrades to the same directory outside a repo, so
-        a non-git cwd is unaffected.
+        caller's directory is mapped to the directory that config is read from
+        (`ProjectRoot.config_root`) first. A linked worktree is not a project of
+        its own (filing the answer under the worktree spelling would also leave
+        `trust/get` reading a key nobody ever wrote), while a plain repo
+        SUBDIRECTORY is its own project here — it keeps its own directory, as it
+        did before worktree support. A non-git cwd is unaffected either way.
         """
         cwd = str(params.get("cwd") or self._cwd or os.getcwd())
-        return project_root.resolve(cwd).root
+        return project_root.resolve(cwd).config_root
 
     def _trust_get(self, params: dict[str, Any]) -> dict[str, Any]:
         cwd = self._trust_cwd(params)
@@ -1728,9 +1738,10 @@ class JsonRpcServer:
         session tree's.
         """
         cwd = str(params.get("cwd") or self._cwd or os.getcwd())
-        root = project_root.resolve(cwd).root
+        config_root = project_root.resolve(cwd).config_root
         return SubagentRegistry(
-            root, trusted=resolve_trust(root, self._trust_store).trusted
+            config_root,
+            trusted=resolve_trust(config_root, self._trust_store).trusted,
         ).snapshot()
 
     def _set_egress_config(self, params: dict[str, Any]) -> dict[str, Any]:

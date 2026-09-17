@@ -136,6 +136,60 @@ def test_relative_fallback_normalises_a_dotdot_root(tmp_path, monkeypatch):
     assert info.is_worktree is False
 
 
+def test_config_root_of_a_non_git_dir_is_the_cwd(tmp_path):
+    """配置根策略：非 git 目录什么都不改写。"""
+    info = project_root.resolve(str(tmp_path))
+    assert info.config_root == str(tmp_path.resolve())
+
+
+def test_config_root_of_a_plain_repo_root_is_itself(tmp_path):
+    repo = _repo(tmp_path)
+    info = project_root.resolve(str(repo))
+    assert info.config_root == str(repo.resolve())
+
+
+def test_config_root_of_a_plain_repo_subdir_is_the_subdir(tmp_path):
+    """普通仓库的子目录不是 worktree：配置根留在子目录自己身上。
+
+    `root`（主工作树根）仍然是仓库根，但那是信息字段；读配置的调用方走
+    `config_root`，所以 `<repo>/pkg` 的会话读 `<repo>/pkg/.cluxmate`——与本
+    plan 之前逐字节一致。
+    """
+    repo = _repo(tmp_path)
+    sub = repo / "pkg"
+    sub.mkdir()
+    info = project_root.resolve(str(sub))
+    assert info.root == str(repo.resolve())
+    assert info.is_worktree is False
+    assert info.config_root == str(sub.resolve())
+
+
+def test_config_root_of_a_linked_worktree_is_the_main_root(tmp_path):
+    repo = _repo(tmp_path)
+    wt = repo / "wt"
+    _git("worktree", "add", "-b", "wt/w", str(wt), cwd=repo)
+    info = project_root.resolve(str(wt))
+    assert info.config_root == str(repo.resolve())
+
+
+def test_config_root_of_a_subdir_inside_a_linked_worktree_is_the_main_root(tmp_path):
+    repo = _repo(tmp_path)
+    wt = repo / "wt"
+    _git("worktree", "add", "-b", "wt/s", str(wt), cwd=repo)
+    sub = wt / "pkg"
+    sub.mkdir()
+    info = project_root.resolve(str(sub))
+    assert info.root == str(repo.resolve())
+    assert info.is_worktree is True
+    assert info.config_root == str(repo.resolve())
+
+
+def test_config_root_degrades_to_cwd_without_git(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    info = project_root.resolve(str(tmp_path))
+    assert info.config_root == str(tmp_path.resolve())
+
+
 def test_result_is_cached_until_cleared(tmp_path):
     repo = _repo(tmp_path)
     first = project_root.resolve(str(repo))
