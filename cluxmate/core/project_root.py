@@ -10,6 +10,11 @@ session cwd.
 The main worktree root is the PARENT of git's *common* dir. Do not use
 ``--show-toplevel``: inside a linked worktree it returns the worktree itself.
 
+``is_worktree`` is True iff the session cwd lives inside a LINKED worktree,
+i.e. git's dir for that cwd differs from git's *common* dir. So: a non-git dir,
+a plain repo and anything inside it are False (there git's dir *is* the common
+dir); the root of a linked worktree and anything inside it are True.
+
 Never raises: no git / not a repo / timeout all degrade to ``root == cwd``,
 which is exactly today's behaviour.
 """
@@ -29,6 +34,14 @@ _TIMEOUT_SECONDS = 5
 _COMMON_DIR_ARG_SETS: tuple[tuple[str, ...], ...] = (
     ("--path-format=absolute", "--git-common-dir"),
     ("--git-common-dir",),
+)
+
+# Same ordered fallback for the git dir *of the session cwd*: inside a linked
+# worktree it is ``<common>/worktrees/<slug>``, everywhere else it is the common
+# dir itself. Both forms print a cwd-relative path in the plain case.
+_GIT_DIR_ARG_SETS: tuple[tuple[str, ...], ...] = (
+    ("--path-format=absolute", "--git-dir"),
+    ("--git-dir",),
 )
 
 _CACHE: dict[str, "ProjectRoot"] = {}
@@ -85,16 +98,28 @@ def _run_git(git: str, cwd: str, *args: str) -> str | None:
     return r.stdout.decode("utf-8", errors="replace").strip()
 
 
-def _common_dir(git: str, cwd: str) -> str | None:
-    for args in _COMMON_DIR_ARG_SETS:
+def _rev_parse_path(git: str, cwd: str, arg_sets: tuple[tuple[str, ...], ...]) -> str | None:
+    """First ``rev-parse`` arg set that succeeds, as a clean absolute path."""
+    for args in arg_sets:
         out = _run_git(git, cwd, "rev-parse", *args)
         if not out:
             continue
         candidate = Path(out)
         if not candidate.is_absolute():
             candidate = Path(cwd) / candidate
-        return str(candidate)
+        # The plain form resolves against the cwd and can hand back paths like
+        # ``<repo>/pkg/../.git``; collapse the ``..`` so one location always
+        # yields one string (the parent of that string is the project root).
+        return os.path.normpath(str(candidate))
     return None
+
+
+def _common_dir(git: str, cwd: str) -> str | None:
+    return _rev_parse_path(git, cwd, _COMMON_DIR_ARG_SETS)
+
+
+def _git_dir(git: str, cwd: str) -> str | None:
+    return _rev_parse_path(git, cwd, _GIT_DIR_ARG_SETS)
 
 
 def _branch(git: str, cwd: str) -> str | None:
@@ -111,14 +136,12 @@ def _probe(cwd: str) -> ProjectRoot:
     common = _common_dir(git, cwd)
     if common is None:
         return ProjectRoot(cwd, cwd, False, None)
-    common_path = Path(common)
-    root = str(common_path.parent)
-    if (
-        # A bare repo passed as the cwd: the common dir *is* the cwd.
-        os.path.normcase(str(common_path)) == os.path.normcase(cwd)
-        # A plain repo: the common dir is ``<cwd>/.git``, so its parent is the
-        # cwd itself -- the cwd's own tree is the main worktree.
-        or os.path.normcase(root) == os.path.normcase(cwd)
-    ):
+    if os.path.normcase(common) == os.path.normcase(cwd):
+        # A bare repo passed as the cwd: it is its own root, not a worktree.
         return ProjectRoot(cwd, cwd, False, _branch(git, cwd))
-    return ProjectRoot(cwd, root, True, _branch(git, cwd))
+    # A linked worktree is exactly the case where git's dir for this cwd is not
+    # the common dir; in a plain repo (any depth) the two are the same path, and
+    # an unresolvable git dir stays False rather than guessing.
+    git_dir = _git_dir(git, cwd)
+    is_worktree = git_dir is not None and os.path.normcase(git_dir) != os.path.normcase(common)
+    return ProjectRoot(cwd, str(Path(common).parent), is_worktree, _branch(git, cwd))

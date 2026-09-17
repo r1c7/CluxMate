@@ -58,6 +58,17 @@ def test_subdir_of_a_repo_resolves_to_the_repo_root(tmp_path):
     assert project_root.resolve(str(sub)).root == str(repo.resolve())
 
 
+def test_subdir_of_a_plain_repo_is_not_a_worktree(tmp_path):
+    """普通仓库的子目录不是 linked worktree：git 的 dir 就是 common dir。"""
+    repo = _repo(tmp_path)
+    sub = repo / "pkg"
+    sub.mkdir()
+    info = project_root.resolve(str(sub))
+    assert info.root == str(repo.resolve())
+    assert info.is_worktree is False
+    assert info.branch == "main"
+
+
 def test_linked_worktree_resolves_to_the_main_root(tmp_path):
     repo = _repo(tmp_path)
     wt = repo / "wt"
@@ -66,6 +77,29 @@ def test_linked_worktree_resolves_to_the_main_root(tmp_path):
     assert info.root == str(repo.resolve())
     assert info.is_worktree is True
     assert info.branch == "wt/x"
+
+
+def test_subdir_inside_a_linked_worktree_is_a_worktree(tmp_path):
+    """linked worktree 内部的子目录同样是 worktree，root 仍是主仓库根。"""
+    repo = _repo(tmp_path)
+    wt = repo / "wt"
+    _git("worktree", "add", "-b", "wt/z", str(wt), cwd=repo)
+    sub = wt / "pkg"
+    sub.mkdir()
+    info = project_root.resolve(str(sub))
+    assert info.root == str(repo.resolve())
+    assert info.is_worktree is True
+    assert info.branch == "wt/z"
+
+
+def test_bare_repo_passed_as_cwd_is_its_own_root(tmp_path):
+    """common dir 就是 cwd 的裸仓库：自己是自己的 root，且不是 worktree。"""
+    bare = tmp_path / "bare.git"
+    bare.mkdir()
+    _git("init", "--bare", cwd=bare)
+    info = project_root.resolve(str(bare))
+    assert info.root == str(bare.resolve())
+    assert info.is_worktree is False
 
 
 def test_git_missing_degrades_to_cwd(tmp_path, monkeypatch):
@@ -82,7 +116,24 @@ def test_relative_git_common_dir_fallback(tmp_path, monkeypatch):
     _git("worktree", "add", "-b", "wt/y", str(wt), cwd=repo)
     monkeypatch.setattr(project_root, "_COMMON_DIR_ARG_SETS",
                         (("--git-common-dir",),))
-    assert project_root.resolve(str(wt)).root == str(repo.resolve())
+    info = project_root.resolve(str(wt))
+    assert info.root == str(repo.resolve())
+    # 相对形式会回来 `<wt>/../.git` 一类的路径，root 必须是折叠干净的绝对路径。
+    assert ".." not in info.root
+
+
+def test_relative_fallback_normalises_a_dotdot_root(tmp_path, monkeypatch):
+    """回退形式从仓库子目录回来的是 `<repo>/pkg/../.git`，root 必须折叠成 `<repo>`。"""
+    repo = _repo(tmp_path)
+    sub = repo / "pkg"
+    sub.mkdir()
+    monkeypatch.setattr(project_root, "_COMMON_DIR_ARG_SETS",
+                        (("--git-common-dir",),))
+    monkeypatch.setattr(project_root, "_GIT_DIR_ARG_SETS", (("--git-dir",),))
+    info = project_root.resolve(str(sub))
+    assert info.root == str(repo.resolve())
+    assert ".." not in info.root
+    assert info.is_worktree is False
 
 
 def test_result_is_cached_until_cleared(tmp_path):
