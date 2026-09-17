@@ -477,15 +477,55 @@ def test_ensure_init_purges_already_tracked_worktrees(tmp_path):
     # The purge is index-only: the nested checkout stays on disk.
     assert (work / ".worktrees" / "wt" / "README.md").exists()
 
-    # The symptom stays gone: the next snapshot records the removal...
-    purge = fresh.snapshot("s1", "turn1")
-    assert purge
-    assert ".worktrees/wt" in {row["path"] for row in fresh.diff(purge)}
-    # ...and no later turn diff carries a `.worktrees` line again.
-    later = fresh.snapshot("s1", "turn2")
+    # The symptom stays gone: the removal is recorded by the purge commit
+    # itself (see test_purge_deletions_belong_to_no_session), so no later
+    # snapshot and no later turn diff carries a `.worktrees` line again.
+    assert fresh._run("status", "--porcelain").stdout.strip() == ""
+    later = fresh.snapshot("s1", "turn1")
     assert later
     assert not [
         row["path"]
         for row in fresh.diff(later)
+        if row["path"].startswith(".worktrees")
+    ]
+
+
+def test_purge_deletions_belong_to_no_session(tmp_path):
+    """The purge must COMMIT its index drop under an owner no session can claim.
+
+    Uncommitted, the drop sits in the index and the next snapshot records the
+    removals as that session's own deletion — so `_session_touched_since` hands
+    `.worktrees/<name>` to a later `restore()`, which takes the "exists at
+    checkpoint" branch and re-tracks the very gitlink the purge exists to drop.
+    """
+    mgr, work = _mk(tmp_path)
+    assert mgr.ensure_init() is True
+    _nested_checkout(work / ".worktrees" / "wt")
+    assert mgr._run("add", "-f", "-A").returncode == 0
+    assert mgr._run("commit", "-m", "legacy").returncode == 0
+    legacy = mgr._run("rev-parse", "HEAD").stdout.strip()
+    assert mgr._run("ls-files", "-s", "--", ".worktrees").stdout.startswith("160000")
+
+    fresh = CheckpointManager(str(work))
+    fresh._shadow_dir = str(tmp_path / "shadow.git")
+    assert fresh.ensure_init() is True
+
+    # 1. The removal is already committed: the index is clean.
+    assert fresh._run("status", "--porcelain").stdout.strip() == ""
+    # 2. Its owner is a sentinel no real session id matches, so the deletions
+    #    can never be attributed to one.
+    assert fresh._commit_session("HEAD") not in ("s1", "sess1", "legacy")
+    assert not fresh._session_touched_since(legacy, "s1")
+    # 3. The real symptom: an undo of an older checkpoint touches NOTHING.
+    assert fresh.restore(legacy, "s1") == {"restored": [], "deleted": []}
+    assert fresh._run("ls-files", "-z", "--", ".worktrees").stdout == ""
+    # ...and the nested checkout is still on disk (the purge is index-only).
+    assert (work / ".worktrees" / "wt" / "README.md").exists()
+    # 4. A real session's own turn diff carries no `.worktrees` line either.
+    turn1 = fresh.snapshot("s1", "turn1")
+    assert turn1
+    assert not [
+        row["path"]
+        for row in fresh.diff(turn1)
         if row["path"].startswith(".worktrees")
     ]

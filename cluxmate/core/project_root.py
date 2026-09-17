@@ -40,6 +40,11 @@ from pathlib import Path
 
 _TIMEOUT_SECONDS = 5
 
+# Bound on the post-kill cleanup of a probe that timed out (see _reap). Kept
+# separate from _TIMEOUT_SECONDS: cleanup is not a second chance for the probe
+# to answer, it is how we let go of it without waiting on it again.
+_REAP_TIMEOUT_SECONDS = 1
+
 # Ordered fallbacks: the absolute form needs git >= 2.31; the plain form prints
 # a path relative to the process cwd, which we resolve against the session cwd.
 _COMMON_DIR_ARG_SETS: tuple[tuple[str, ...], ...] = (
@@ -107,6 +112,12 @@ def resolve(cwd: str, *, use_cache: bool = True) -> ProjectRoot:
 
 def _env() -> dict[str, str]:
     env = os.environ.copy()
+    # `git -C <cwd>` does NOT override these: the environment wins over
+    # repository discovery, so an inherited value would make `resolve()`
+    # describe a different repo — and trust/permissions/hooks are keyed on
+    # its answer. Only the CONFIG isolation is ours to set.
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
     # Isolate from the user's global/system git config, like checkpoints._env.
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
@@ -116,16 +127,70 @@ def _env() -> dict[str, str]:
 
 
 def _run_git(git: str, cwd: str, *args: str) -> str | None:
+    """Run ONE git probe, or None. Never raises — and never blocks.
+
+    Two Windows hazards, both of which STALL the JSON-RPC handshake rather
+    than fail it, which is why this is not a plain ``subprocess.run``:
+
+    * ``stdin`` MUST be detached. Under ``agent stdio`` this process's stdin is
+      the JSON-RPC pipe; an MSYS2 binary that inherits it blocks at startup
+      until the pipe closes — never, for a live desktop bridge. ``tools/bash.py``
+      detaches it for exactly this reason (Git Bash's ``bash.exe``), and
+      ``git.exe`` is the same runtime: with it attached ``initialize`` never
+      answers, so the desktop's ``ensureBridge`` promise never settles and a
+      sent message produces no result at all. ``checkpoints._run`` detaches it
+      too.
+    * The timeout must be enforced by US. ``subprocess.run(timeout=…)`` on
+      Windows kills the child and then calls ``communicate()`` AGAIN with no
+      timeout (CPython ``subprocess.py``:553-559); that second call joins the
+      reader threads unbounded, so a child whose pipe write end is still held
+      open hangs forever instead of raising ``TimeoutExpired``.
+
+    A probe that cannot answer degrades exactly like a missing git: ``None``,
+    and the caller falls back to ``root == cwd``.
+    """
     try:
-        r = subprocess.run(
-            [git, "-C", cwd, *args], capture_output=True,
-            timeout=_TIMEOUT_SECONDS, env=_env(),
+        proc = subprocess.Popen(
+            [git, "-C", cwd, *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            env=_env(),
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError):
         return None
-    if r.returncode != 0:
+    try:
+        stdout, _ = proc.communicate(timeout=_TIMEOUT_SECONDS)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        _reap(proc)
         return None
-    return r.stdout.decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        return None
+    return stdout.decode("utf-8", errors="replace").strip()
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """Best-effort disposal of a probe that outlived its timeout.
+
+    Deliberately does NOT ``communicate()`` again — that is the unbounded join
+    described in ``_run_git``. Closing our pipe ends is what releases the
+    orphaned reader threads, and both steps are bounded, so the cleanup cannot
+    become a second hang of its own.
+    """
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=_REAP_TIMEOUT_SECONDS)
+    except Exception:
+        pass
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
 
 
 def _rev_parse_path(git: str, cwd: str, arg_sets: tuple[tuple[str, ...], ...]) -> str | None:

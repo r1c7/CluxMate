@@ -587,15 +587,37 @@ def test_bashtool_no_hint_on_normal_failure():
 # Windows Low-IL: label-drift self-healing (unit level, icacls mocked)
 # ---------------------------------------------------------------------------
 
-def _fake_run_capture(monkeypatch, calls):
-    """Route subprocess.run through a recorder; icacls argv is logged."""
+def _fake_run_capture(monkeypatch, calls, root=None, delegate=False):
+    """Route subprocess.run through a recorder; icacls argv is logged.
+
+    The patch is on the stdlib ``subprocess.run``, i.e. process-global, so a
+    concurrent ``icacls`` from another test (a low-IL setup or a label-retry
+    thread still finishing its workspace sweep) would land in this test's
+    ``calls`` and read as "this test made that call" — the measured one-off
+    full-suite flake. Record ONLY calls whose argv mentions ``root`` (the
+    caller's own workspace), which is what every call site asserts about.
+
+    ``delegate=True`` runs the REAL command and returns its real result, so a
+    test that also asserts on a probe (``_integrity_level`` shells out to
+    ``icacls`` itself) does not stub out its own measurement: the stub below
+    answers every call with empty stdout, which reads back as "unlabeled"
+    (``None``) for any path. Default False keeps the stub, which is what the
+    pure label-drift unit tests want.
+    """
     import types
 
     import cluxmate.tools._sandbox as sb_mod
 
+    prefix = str(root) if root is not None else None
+    real_run = subprocess.run  # captured BEFORE the patch below re-points it
+
     def fake_run(argv, **kw):
         if argv and argv[0] == "icacls" and "/setintegritylevel" in argv:
-            calls.append(" ".join(argv))
+            args = [str(a) for a in argv]
+            if prefix is None or any(a.startswith(prefix) for a in args):
+                calls.append(" ".join(args))
+        if delegate:
+            return real_run(argv, **kw)
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(sb_mod.subprocess, "run", fake_run)
@@ -629,7 +651,7 @@ def test_lowil_setup_heals_drifted_workspace(monkeypatch, tmp_path):
         sb, "_label_dirs_low",
         lambda root, skip_state=False: label_calls.append((str(root), skip_state)),
     )
-    _fake_run_capture(monkeypatch, icacls_calls)
+    _fake_run_capture(monkeypatch, icacls_calls, root=tmp_path)
 
     sb._setup()
 
@@ -665,7 +687,7 @@ def test_lowil_setup_heals_drifted_scratch(monkeypatch, tmp_path):
         sb, "_label_dirs_low",
         lambda root, skip_state=False: label_calls.append(str(root)),
     )
-    _fake_run_capture(monkeypatch, icacls_calls)
+    _fake_run_capture(monkeypatch, icacls_calls, root=tmp_path)
 
     sb._setup()
 
@@ -698,7 +720,7 @@ def test_lowil_setup_noop_when_labels_healthy(monkeypatch, tmp_path):
         sb, "_label_dirs_low",
         lambda root, skip_state=False: label_calls.append(str(root)),
     )
-    _fake_run_capture(monkeypatch, icacls_calls)
+    _fake_run_capture(monkeypatch, icacls_calls, root=tmp_path)
 
     sb._setup()
 
@@ -725,7 +747,7 @@ def test_lowil_setup_reverifies_after_first_call(monkeypatch, tmp_path):
         sb, "_label_dirs_low",
         lambda root, skip_state=False: label_calls.append((str(root), skip_state)),
     )
-    _fake_run_capture(monkeypatch, icacls_calls)
+    _fake_run_capture(monkeypatch, icacls_calls, root=tmp_path)
 
     # First call: everything already healthy (workspace + scratch low, the
     # state subtree the medium _setup keeps it at) — a pure no-op.
@@ -767,7 +789,7 @@ def test_lowil_setup_backs_off_after_failed_heal(monkeypatch, tmp_path):
         sb, "_label_dirs_low",
         lambda root, skip_state=False: label_calls.append((str(root), skip_state)),
     )
-    _fake_run_capture(monkeypatch, icacls_calls)
+    _fake_run_capture(monkeypatch, icacls_calls, root=tmp_path)
 
     # Labels can never be set: every read reports medium (unlabeled).
     monkeypatch.setattr(sb, "_integrity_level", lambda path: None)
@@ -825,13 +847,16 @@ def test_integrity_level_none_when_unlabeled(monkeypatch):
     os.name != "nt" or shutil.which("icacls") is None,
     reason="windows low-IL backend only",
 )
-def test_state_dir_under_an_already_low_workspace_is_raised_medium(tmp_path):
+def test_state_dir_under_an_already_low_workspace_is_raised_medium(tmp_path, monkeypatch):
     """A `.cluxmate` created INSIDE an already-Low tree inherits Low.
 
     `_setup` used to raise the state dir back to medium only inside the
     workspace-drift branch, which is gated on the workspace ROOT reading Low —
     so on exactly the inheritance path (a git worktree under a labeled repo)
     the raise never ran and the low-IL child could write permissions.json.
+
+    The acceptance item has two halves: the state dir ends MEDIUM, and a healthy
+    workspace is not re-labeled (no full-tree icacls on every session start).
     """
     from cluxmate.tools._sandbox import WindowsLowILSandbox
 
@@ -842,7 +867,44 @@ def test_state_dir_under_an_already_low_workspace_is_raised_medium(tmp_path):
         ["icacls", str(ws), "/setintegritylevel", "(OI)(CI)L", "/C", "/Q"],
         capture_output=True, timeout=60,
     )
+    # icacls exits 0 even when it refuses (only the label tells the truth), so
+    # verify the label took: without a Low workspace the state dir cannot
+    # inherit Low and the scenario below is un-runnable. That is an environment
+    # limitation of the session running the suite (icacls denied), not a
+    # product failure — and the only condition under which this test skips.
+    if WindowsLowILSandbox._integrity_level(ws) != "L":
+        pytest.skip("this session cannot set integrity labels (icacls denied)")
+
     sb = WindowsLowILSandbox(str(ws), grant_paths=[], egress_mode="shared")
+    label_calls = []
+    icacls_calls = []
+    monkeypatch.setattr(
+        sb, "_label_dirs_low",
+        lambda root, skip_state=False: label_calls.append(str(root)),
+    )
+    # delegate=True: the assertions below read the REAL labels, and
+    # _integrity_level reads them by shelling out to icacls — the stub would
+    # answer its own probe with empty stdout (None) and the labels could never
+    # be observed. The recorder still logs every /setintegritylevel call.
+    _fake_run_capture(monkeypatch, icacls_calls, root=tmp_path, delegate=True)
+
     sb._setup()
+
     assert sb._integrity_level(ws) == "L"
     assert sb._integrity_level(ws / ".cluxmate") == "M"
+    assert label_calls == []      # the healthy LOW workspace was NOT re-walked
+    # icacls is MEASURED here (delegate=True), so this is what really ran. Two
+    # narrow calls are legitimate on this path, both inside the state subtree:
+    # raising `<ws>/.cluxmate` back to medium — the acceptance item itself, and
+    # a call the stub used to swallow — and relabeling the `tmp-low` scratch
+    # `_setup` creates, which inherits that medium label. A tree walk would
+    # show up as an `(OI)(CI)L` call on the workspace ROOT, or on any other
+    # directory outside the state subtree; `label_calls` above already proves
+    # the walk never ran, this pins every call that could bypass it.
+    state = str(ws / ".cluxmate")
+    scratch = str(ws / ".cluxmate" / "tmp-low")
+    for call in icacls_calls:
+        assert call.startswith(f"icacls {state}"), call   # never the ws root
+        wanted = ("(OI)(CI)L" if call.startswith(f"icacls {scratch} ")
+                  else "(OI)(CI)M")
+        assert wanted in call, call

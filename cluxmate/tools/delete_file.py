@@ -20,6 +20,9 @@ class DeleteFileTool(BaseTool):
 
     def __init__(self, workdir: str | None = None, fence: WriteFence | None = None):
         self._workdir = workdir
+        # Fallback only (no production caller: builder.py always passes fence=).
+        # A fence built here has no project root, so its deny subtree covers the
+        # session tree alone.
         self._fence = fence or WriteFence(workdir)
 
     @property

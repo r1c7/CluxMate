@@ -16,9 +16,10 @@ by a **shadow git repository** that is completely independent of the user's own
   mcp.json, skills — written by UI toggles/housekeeping, not the agent's turn)
   and ``.worktrees/`` (other sessions' linked checkouts, which git would
   otherwise record as embedded-repository gitlinks in every snapshot). None of
-  the three is ever sucked into a snapshot or reverted by undo; entries a
-  pre-existing shadow repo already tracked are dropped from its index once, on
-  init (see ``_ensure_init_inner``).
+  the three is ever sucked into a snapshot or reverted by undo; an entry a
+  pre-existing shadow repo already tracked as a gitlink is dropped from its
+  index once, on init, and that drop is committed under a sentinel session id
+  no real session can claim (see ``_ensure_init_inner``).
 
 If git is not on PATH the whole feature degrades to a no-op: ``available()``
 returns False and every method returns an empty/neutral result so the agent
@@ -57,6 +58,13 @@ _MAX_COMMITS = 100
 
 # Shadow repos whose latest snapshot is older than this many days are evicted.
 _RETENTION_DAYS = 30
+
+# Session id the one-time `.worktrees` index purge commits under. A commit
+# subject is ``<session_id>\t<label>\t<iso_ts>``, so a FOURTH tab field marks
+# this commit as belonging to no session at all: `_session_touched_since` can
+# then never attribute the purge's deletions to a real session (which would make
+# a later restore() re-adopt them, see `_ensure_init_inner`).
+_PURGE_SESSION_ID = "<worktrees-purge>\tno-session"
 
 
 class CheckpointManager:
@@ -205,8 +213,13 @@ class CheckpointManager:
         # checkout as a gitlink, and `add -A` then keeps re-recording that
         # pointer whenever the nested checkout's HEAD moves — so the line would
         # go on appearing in later turn diffs. Drop any such entry from the
-        # index; the next snapshot's add+commit is what records the removal
-        # (nothing is committed here, and nothing on disk is touched).
+        # index and COMMIT the drop under a sentinel session id: left
+        # uncommitted, the next snapshot would record the removals as one real
+        # session's own deletion, `_session_touched_since` would then hand those
+        # paths to a later restore(), and `git checkout <ckpt> -- .worktrees/<n>`
+        # would re-track exactly the gitlink this purge exists to drop (for this
+        # process the purge never runs again — `ensure_init` short-circuits).
+        # The sentinel keeps the one-time behaviour and an unreachable owner.
         # With no `.worktrees` entry this costs a single `ls-files`, and a git
         # failure must never disable checkpoints — hence the return-code guard
         # and the swallowed exception.
@@ -216,10 +229,15 @@ class CheckpointManager:
                 # -f: an already-refreshed gitlink is staged differently from
                 # HEAD, which plain `rm --cached` refuses; --cached keeps the
                 # nested checkout on disk untouched.
-                self._run(
+                dropped = self._run(
                     "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
                     ".worktrees",
                 )
+                if dropped.returncode == 0:
+                    self._run(
+                        "commit", "--allow-empty", "-m",
+                        self._subject(_PURGE_SESSION_ID, "drop .worktrees"),
+                    )
         except Exception:
             pass
 
