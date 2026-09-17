@@ -1,7 +1,10 @@
 """SessionStore — SQLite metadata + JSONL event-log persistence.
 
-Session *metadata* (id, title, provider, model, cwd, group, pin, message_count)
-stays in SQLite at ``<root>/cluxmate.db`` — the desktop and TUI share this schema.
+Session *metadata* (id, title, provider, model, cwd, project_root, group, pin,
+message_count) stays in SQLite at ``<root>/cluxmate.db`` — the desktop and TUI
+share this schema. ``cwd`` is the session's own tree; ``project_root`` is the
+config root it groups under (see :mod:`cluxmate.core.project_root`), so a
+worktree session sits in its repository's auto group.
 Conversation *history* is now an append-only JSONL event log at
 ``<root>/sessions/<id>.jsonl`` (see :class:`~cluxmate.core.session_log_store.SessionLogStore`),
 replacing the legacy ``<id>.json`` message-file format (D6: no migration).
@@ -24,6 +27,15 @@ from cluxmate.core.session_log_store import (
     SessionNotFoundError,
     subagent_session_ids,
 )
+
+
+def _resolve_root(cwd: str) -> str:
+    from cluxmate.core.project_root import resolve
+
+    # config_root (NOT .root): only a LINKED worktree is redirected to the main
+    # worktree, so a session in a SUBDIRECTORY of an ordinary repo still forms
+    # its own project exactly as it does today.
+    return resolve(cwd).config_root if cwd else ""
 
 
 def _same_cwd(a: str, b: str) -> bool:
@@ -85,6 +97,7 @@ class SessionStore:
                 api_type      TEXT,
                 reasoning_effort TEXT,
                 cwd           TEXT NOT NULL,
+                project_root  TEXT,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT NOT NULL,
                 message_count INTEGER DEFAULT 0,
@@ -106,6 +119,13 @@ class SessionStore:
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(groups)").fetchall()}
         if "path" not in cols:
             self.conn.execute("ALTER TABLE groups ADD COLUMN path TEXT")
+        # v7: auto groups key on the session's PROJECT root so a worktree session
+        # stays in its repository's group. The CREATE TABLE above covers fresh
+        # DBs; ALTER here covers an existing table. Null for pre-existing rows,
+        # which keeps them grouped by their own cwd — today's behaviour.
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "project_root" not in cols:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN project_root TEXT")
         # Backfill `path` for pre-existing auto groups from their first session's
         # cwd. Idempotent: only rows still lacking a path are touched.
         for row in self.conn.execute(
@@ -125,6 +145,7 @@ class SessionStore:
     # ── group helpers (mirrors desktop session-store.ts) ────────────
 
     def _ensure_group_for_cwd(self, cwd: str) -> str | None:
+        """Return the auto group for a group KEY (a project root, not a session cwd)."""
         resolved = os.path.realpath(cwd) if cwd else ""
         name = os.path.basename(resolved)
         if not name:
@@ -174,17 +195,22 @@ class SessionStore:
         model_id: str = "",
         api_type: str = "",
         reasoning_effort: str | None = None,
+        project_root: str | None = None,
     ) -> str:
         sid = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
-        group_id = self._ensure_group_for_cwd(working_dir) if working_dir else None
+        # Auto groups key on the PROJECT root so a worktree session stays in its
+        # repository's group instead of becoming a second project in the sidebar.
+        # `cwd` itself stays the tree identity (shadow repo, fence, log header).
+        root = project_root or _resolve_root(working_dir)
+        group_id = self._ensure_group_for_cwd(root) if root else None
         self.conn.execute(
             """INSERT INTO sessions
                (id, title, provider, model, model_id, api_type, reasoning_effort,
-                cwd, created_at, updated_at, message_count, group_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+                cwd, project_root, created_at, updated_at, message_count, group_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
             (sid, title or "New Session", provider, model, model_id, api_type,
-             reasoning_effort, working_dir, now, now, group_id),
+             reasoning_effort, working_dir, root, now, now, group_id),
         )
         self.conn.commit()
         # Materialize the JSONL event log header (D6: no legacy <id>.json).
@@ -319,16 +345,23 @@ class SessionStore:
             for r in rows
         ]
 
-    def update_cwd(self, session_id: str, cwd: str):
+    def update_cwd(self, session_id: str, cwd: str, project_root: str | None = None):
+        """Move a session to another tree, re-grouping it by its project root.
+
+        ``cwd`` stays the tree identity; only the auto-group key follows the
+        project root (mirrors ``create``).
+        """
         old = self.conn.execute(
             "SELECT group_id FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
         old_group_id = old["group_id"] if old else None
-        new_group_id = self._ensure_group_for_cwd(cwd) if cwd else None
+        root = project_root or _resolve_root(cwd)
+        new_group_id = self._ensure_group_for_cwd(root) if root else None
 
         self.conn.execute(
-            "UPDATE sessions SET cwd = ?, group_id = ?, updated_at = ? WHERE id = ?",
-            (cwd, new_group_id, datetime.now(timezone.utc).isoformat(), session_id),
+            "UPDATE sessions SET cwd = ?, project_root = ?, group_id = ?, "
+            "updated_at = ? WHERE id = ?",
+            (cwd, root, new_group_id, datetime.now(timezone.utc).isoformat(), session_id),
         )
         self.conn.commit()
 

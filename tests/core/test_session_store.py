@@ -1,6 +1,10 @@
 """Tests for the SQLite-metadata + JSONL-event-log SessionStore."""
 
+import shutil
+import sqlite3
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +30,52 @@ def _append_turn(log: SessionLog, turn: int, user_text: str, assistant_text: str
         surface_op=APPEND,
     )
     log.append("turn/end", {"turn": turn, "reason": {"kind": "completed"}})
+
+
+def _git(*args, cwd=None):
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+         "-c", "init.defaultBranch=main", *args],
+        cwd=cwd, check=True, capture_output=True,
+    )
+
+
+def _legacy_db(db_path: Path) -> None:
+    """A pre-``project_root`` sessions table, i.e. what an existing user has."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id            TEXT PRIMARY KEY,
+            title         TEXT NOT NULL DEFAULT 'New Session',
+            provider      TEXT NOT NULL,
+            model         TEXT NOT NULL,
+            model_id      TEXT,
+            api_type      TEXT,
+            reasoning_effort TEXT,
+            cwd           TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            group_id      TEXT,
+            is_pinned     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE groups (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_auto    INTEGER NOT NULL DEFAULT 0,
+            path       TEXT
+        );
+        INSERT INTO sessions
+            (id, title, provider, model, cwd, created_at, updated_at)
+            VALUES ('old1', 'old', 'p', 'm', '/home/projects/legacy', '2020', '2020');
+        """
+    )
+    conn.commit()
+    conn.close()
 
 
 class TestCreateAndLoad:
@@ -180,3 +230,108 @@ class TestRenamePinCwd:
         sid = store.create("C", "P", "M", "/old")
         store.update_cwd(sid, "/new")
         assert store.load(sid)["working_dir"] == "/new"
+
+
+class TestProjectRoot:
+    def test_worktree_session_shares_the_project_group(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        wt = repo / ".worktrees" / "me"
+        wt.mkdir(parents=True)
+        store = SessionStore(root_dir=tmp_path / "state")
+        main_id = store.create("main", "p", "m", str(repo))
+        wt_id = store.create("wt", "p", "m", str(wt), project_root=str(repo))
+        auto = [r for r in store.list_groups() if r["is_auto"]]
+        assert len(auto) == 1
+        assert Path(auto[0]["path"]).resolve() == repo.resolve()
+        assert store.load(main_id)["group_id"] == store.load(wt_id)["group_id"]
+        assert store.load(wt_id)["project_root"] == str(repo)
+        assert store.load(main_id)["project_root"] == str(repo)
+
+    def test_deleting_a_worktree_session_keeps_the_main_shadow_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        wt = repo / ".worktrees" / "me"
+        wt.mkdir(parents=True)
+        store = SessionStore(root_dir=tmp_path / "state")
+        store.create("main", "p", "m", str(repo))
+        wt_id = store.create("wt", "p", "m", str(wt), project_root=str(repo))
+        store.delete(wt_id)  # 只应清掉 worktree 自己的影子库
+        # list_all() exposes the session cwd as `working_dir` (TUI contract).
+        remaining = [r["working_dir"] for r in store.list_all()]
+        assert remaining == [str(repo)]
+
+    def test_deleting_a_worktree_session_purges_only_its_own_shadow_repo(
+        self, tmp_path, monkeypatch
+    ):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "cluxmate.core.session_store.delete_shadow_repo_for_cwd",
+            lambda cwd: calls.append(cwd),
+        )
+        repo = tmp_path / "repo"
+        wt = repo / ".worktrees" / "me"
+        wt.mkdir(parents=True)
+        store = SessionStore(root_dir=tmp_path / "state")
+        store.create("main", "p", "m", str(repo))
+        wt_id = store.create("wt", "p", "m", str(wt), project_root=str(repo))
+        store.delete(wt_id)
+        # The shadow repo is per TREE, so only the worktree's own dir is purged —
+        # the main worktree still has a session and keeps its shadow repo.
+        assert calls == [str(wt)]
+
+    def test_update_cwd_re_groups_a_session_by_its_project_root(self, tmp_path):
+        repo = tmp_path / "repo"
+        wt = repo / ".worktrees" / "me"
+        wt.mkdir(parents=True)
+        store = SessionStore(root_dir=tmp_path / "state")
+        main_id = store.create("main", "p", "m", str(repo))
+        sid = store.create("moved", "p", "m", str(tmp_path / "elsewhere"))
+
+        store.update_cwd(sid, str(wt), project_root=str(repo))
+
+        meta = store.load(sid)
+        assert meta["working_dir"] == str(wt)  # the tree is still the session's
+        assert meta["project_root"] == str(repo)
+        assert meta["group_id"] == store.load(main_id)["group_id"]
+        # The now-empty auto group of the abandoned directory is gone.
+        assert [g["name"] for g in store.list_groups()] == ["repo"]
+
+    @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+    def test_plain_repo_subdirectory_session_keeps_its_own_group(self, tmp_path):
+        """Only a LINKED worktree is grouped with its repo.
+
+        A session in a subdirectory of an ordinary repo keeps its own directory
+        (and so its own auto group), exactly as it did before worktree support.
+        """
+        repo = tmp_path / "repo"
+        sub = repo / "pkg"
+        sub.mkdir(parents=True)
+        _git("init", cwd=repo)
+        store = SessionStore(root_dir=tmp_path / "state")
+
+        sid = store.create("s", "p", "m", str(sub))
+
+        assert store.load(sid)["project_root"] == str(sub)
+        assert [g["name"] for g in store.list_groups()] == ["pkg"]
+
+
+class TestMigration:
+    def test_an_existing_db_gains_the_column_additively(self, tmp_path):
+        root = tmp_path / "state"
+        _legacy_db(root / "cluxmate.db")
+
+        store = SessionStore(root_dir=root)
+
+        cols = {r[1] for r in store.conn.execute("PRAGMA table_info(sessions)")}
+        assert "project_root" in cols
+        # A pre-existing row keeps loading, with no project root recorded.
+        assert store.load("old1")["project_root"] is None
+        assert store.load("old1")["working_dir"] == "/home/projects/legacy"
+        # Re-opening re-runs the migration: idempotent, not an error.
+        again = SessionStore(root_dir=root)
+        assert "project_root" in {
+            r[1] for r in again.conn.execute("PRAGMA table_info(sessions)")
+        }
+        # A session created now still groups by its own directory (no worktree).
+        sid = store.create("new", "p", "m", "/home/projects/legacy")
+        assert store.load(sid)["group_id"] is not None
+        assert [g["name"] for g in store.list_groups()] == ["legacy"]
