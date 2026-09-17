@@ -76,7 +76,7 @@ def test_headless_warns_about_an_untrusted_directory(tmp_path, monkeypatch, caps
     cwd = _project(tmp_path)
     decision = cli._trust_decision(str(cwd))
     assert decision.gated is True
-    cli._warn_untrusted(str(cwd), decision)
+    cli._warn_untrusted(decision)
     err = capsys.readouterr().err
     assert "not trusted" in err and "cluxmate trust add" in err
 
@@ -85,7 +85,7 @@ def test_headless_is_silent_for_an_empty_directory(tmp_path, monkeypatch, capsys
     _home(tmp_path, monkeypatch)
     cwd = tmp_path / "plain"
     cwd.mkdir()
-    cli._warn_untrusted(str(cwd), cli._trust_decision(str(cwd)))
+    cli._warn_untrusted(cli._trust_decision(str(cwd)))
     assert capsys.readouterr().err == ""
 
 
@@ -220,8 +220,8 @@ class _RecordingBuilder(AgentBuilder):
 
     created: list["_RecordingBuilder"] = []
 
-    def __init__(self, cwd, provider):
-        super().__init__(cwd, provider)
+    def __init__(self, cwd, provider, project_root=None):
+        super().__init__(cwd, provider, project_root=project_root)
         self.trusts = []
         _RecordingBuilder.created.append(self)
 

@@ -86,8 +86,9 @@ class _StubBuilder:
 
     built: list = []
 
-    def __init__(self, cwd, llm_provider):
+    def __init__(self, cwd, llm_provider, project_root=None):
         self.cwd = cwd
+        self.project_root = project_root
         self.trust = None
         self.mcp = None
         _StubBuilder.built.append(self)
@@ -124,14 +125,15 @@ class _StubBuilder:
 
 
 class _StubMCP:
-    """Records the trust flag the controller passes to MCPManager.
+    """Records the trust flag + config root the controller passes to MCPManager.
 
     The real manager reads ``~/.cluxmate/mcp.json`` and spawns its servers, so
     a test must never let one near the developer's home directory.
     """
 
-    def __init__(self, cwd, *, trusted=True):
+    def __init__(self, cwd, *, trusted=True, config_root=None):
         self.cwd = cwd
+        self.config_root = config_root
         self._trusted = trusted
 
     def load(self):

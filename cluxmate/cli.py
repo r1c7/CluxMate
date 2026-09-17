@@ -5,6 +5,7 @@ import os
 import sys
 import time
 
+from cluxmate.core import project_root
 from cluxmate.core.agent import AgentCallbacks
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.session_log import SessionHeader, SessionLog
@@ -110,13 +111,13 @@ async def run_headless(
     eff = coerce_effort(reasoning_effort) if reasoning_effort is not None else default_for(entry)
     provider.set_reasoning_effort(eff)
 
-    builder = AgentBuilder(cwd, provider)
+    builder = AgentBuilder(cwd, provider, project_root=_config_root(cwd))
     builder.with_default_tools()
     builder.with_subagents()
     builder.with_model(entry.get("model_name", ""))
     builder.with_context_1m(entry.get("context_1m", False))
     decision = _trust_decision(cwd)
-    _warn_untrusted(cwd, decision)
+    _warn_untrusted(decision)
     builder.with_trust(decision)
 
     agent = builder.build(session_log=_make_log(entry))
@@ -159,13 +160,13 @@ async def run_repl(model_id: str | None = None, reasoning_effort: str | None = N
     eff = coerce_effort(reasoning_effort) if reasoning_effort is not None else default_for(entry)
     provider.set_reasoning_effort(eff)
 
-    builder = AgentBuilder(cwd, provider)
+    builder = AgentBuilder(cwd, provider, project_root=_config_root(cwd))
     builder.with_default_tools()
     builder.with_subagents()
     builder.with_model(entry.get("model_name", ""))
     builder.with_context_1m(entry.get("context_1m", False))
     decision = _trust_decision(cwd)
-    _prompt_trust(cwd, decision)
+    _prompt_trust(decision)
     # The answer just landed in the store, but `decision` is a frozen snapshot
     # taken before the prompt — re-resolve so the run that grants trust is the
     # run that gets it (and so the banner below reports what was actually used).
@@ -253,7 +254,7 @@ def _mcp_withheld(decision) -> bool:
     return not decision.trusted and any(f.kind == "mcp" for f in decision.findings)
 
 
-def _mcp_withheld_notice(cwd: str, decision) -> None:
+def _mcp_withheld_notice(decision) -> None:
     """Name the project mcp.json `mcp` is withholding, on stderr.
 
     Only when the directory is untrusted AND it actually ships one — otherwise
@@ -262,9 +263,9 @@ def _mcp_withheld_notice(cwd: str, decision) -> None:
     """
     if not _mcp_withheld(decision):
         return
-    withheld = os.path.join(cwd, ".cluxmate", "mcp.json")
+    withheld = os.path.join(decision.cwd, ".cluxmate", "mcp.json")
     print(
-        f"note: not loading {withheld} — {cwd} is not trusted; "
+        f"note: not loading {withheld} — {decision.cwd} is not trusted; "
         f"run `cluxmate trust add` in it to enable its MCP servers",
         file=sys.stderr,
     )
@@ -295,10 +296,13 @@ def run_mcp(args) -> int:
         print("error: specify a subcommand: auth, logout or status", file=sys.stderr)
         return 1
 
-    cwd = getattr(args, "cwd", None) or os.getcwd()
-    decision = _trust_decision(cwd)
-    _mcp_withheld_notice(cwd, decision)
-    configs = MCPConfigManager(cwd, trusted=decision.trusted).load()
+    # `--cwd` names a PROJECT: inside a linked worktree the project's config is
+    # the main worktree's, so every read (and every message) below is about the
+    # config root. A non-worktree directory is its own config root — unchanged.
+    config_root = _config_root(getattr(args, "cwd", None) or os.getcwd())
+    decision = _trust_decision(config_root)
+    _mcp_withheld_notice(decision)
+    configs = MCPConfigManager(config_root, trusted=decision.trusted).load()
     store = MCPAuthStore()
 
     if args.mcp_command == "logout":
@@ -334,8 +338,8 @@ def run_mcp(args) -> int:
             # from a typo, so name the gate as the cause and the way out.
             print(
                 f"error: unknown MCP server {args.name!r} — its project "
-                f".cluxmate/mcp.json was not loaded because {cwd} is not "
-                f"trusted; run `cluxmate trust add` in it to enable its MCP "
+                f".cluxmate/mcp.json was not loaded because {decision.cwd} is "
+                f"not trusted; run `cluxmate trust add` in it to enable its MCP "
                 f"servers",
                 file=sys.stderr,
             )
@@ -419,30 +423,53 @@ def _trust_store():
     return _TRUST_STORE
 
 
+def _config_root(cwd: str) -> str:
+    """The directory this project's CONFIG state is read from and keyed on.
+
+    The session's own directory everywhere except inside a LINKED git worktree,
+    where it is the main worktree (see cluxmate/core/project_root.py). Trust,
+    permissions and every project config file take this; the session's cwd stays
+    the tree the builder is handed as the writable/exec tree. The same rule the
+    JSON-RPC server applies once in `initialize` — the front ends must agree, or
+    a worktree session reads a different project than the desktop does.
+    """
+    return project_root.resolve(cwd).config_root
+
+
 def _trust_decision(cwd: str):
     from cluxmate.core.trust import resolve_trust
 
-    return resolve_trust(cwd, _trust_store())
+    # The answer is about the PROJECT, so it is resolved on the config root: a
+    # worktree is not a project of its own, a plain-repo subdirectory is.
+    return resolve_trust(_config_root(cwd), _trust_store())
 
 
-def _warn_untrusted(cwd: str, decision) -> None:
-    """Headless/REPL notice — there is no prompt outside a TTY."""
+def _warn_untrusted(decision) -> None:
+    """Headless/REPL notice — there is no prompt outside a TTY.
+
+    Names ``decision.cwd`` — the config root the decision was resolved on, i.e.
+    the directory whose `.cluxmate/` is being withheld (a worktree session's own
+    path would name a directory nothing is read from).
+    """
     if not decision.gated:
         return
     kinds = ", ".join(f.kind for f in decision.findings)
     print(
-        f"warning: {cwd} is not trusted — project config ({kinds}) was NOT "
-        f"loaded; run `cluxmate trust add` in it to enable hooks/MCP/etc.",
+        f"warning: {decision.cwd} is not trusted — project config ({kinds}) was "
+        f"NOT loaded; run `cluxmate trust add` in it to enable hooks/MCP/etc.",
         file=sys.stderr,
     )
 
 
-def _prompt_trust(cwd: str, decision) -> None:
+def _prompt_trust(decision) -> None:
     """Ask once, interactively (REPL only). No TTY ⇒ leave the registry alone."""
     if not decision.pending or not sys.stdin.isatty():
-        _warn_untrusted(cwd, decision)
+        _warn_untrusted(decision)
         return
-    print(f"\n{cwd} ships project config under .cluxmate/:")
+    # `decision.cwd` is the canonical config root this answer resolves on —
+    # asking about it and recording the answer under it keeps this write and the
+    # next read (a real session's lookup) on the same key.
+    print(f"\n{decision.cwd} ships project config under .cluxmate/:")
     for f in decision.findings:
         print(f"  - {f.label}  ({f.path})")
     print("Loading it lets this repository run hooks / MCP servers and pre-authorize tools.")
@@ -456,19 +483,23 @@ def _prompt_trust(cwd: str, decision) -> None:
             print()
             return
         if answer == "1":
-            _trust_store().set(cwd, TRUSTED)
+            _trust_store().set(decision.cwd, TRUSTED)
             return
         if answer == "2":
-            _trust_store().set_session(cwd, TRUSTED)
+            _trust_store().set_session(decision.cwd, TRUSTED)
             return
         if answer == "3":
-            _trust_store().set(cwd, DENIED)
+            _trust_store().set(decision.cwd, DENIED)
             return
 
 
 def run_trust(args) -> int:
     """`cluxmate trust [list|add|deny|remove|status] [path]`."""
     path = os.path.abspath(args.path) if getattr(args, "path", None) else os.getcwd()
+    # A worktree is not a project of its own: record (and report) the answer at
+    # the config root, where sessions and the desktop read it — otherwise
+    # `trust add` inside a worktree would file an entry nobody ever reads.
+    path = _config_root(path)
     action = getattr(args, "action", "list") or "list"
     store = _trust_store()
     if action == "list":

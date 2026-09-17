@@ -2,6 +2,7 @@
 
 import threading
 
+from cluxmate.core import project_root
 from cluxmate.core.agent import AgentCallbacks, AgentLoop, AgentResult, ToolDecision
 from cluxmate.core.builder import AgentBuilder
 from cluxmate.core.config import ConfigManager
@@ -18,6 +19,18 @@ from cluxmate.core.providers.base import LLMProvider
 def _create_provider(entry: dict) -> LLMProvider:
     from cluxmate.core.providers.factory import build_provider
     return build_provider(entry)
+
+
+def _config_root(cwd: str) -> str:
+    """The directory this project's CONFIG state is read from and keyed on.
+
+    The session's own directory everywhere except inside a LINKED git worktree,
+    where it is the main worktree (see cluxmate/core/project_root.py). Trust,
+    permissions, hooks, MCP and the builder's project readers all take this; the
+    builder is still handed the session's cwd as its writable/exec tree. Same
+    rule the JSON-RPC server applies once in `initialize`.
+    """
+    return project_root.resolve(cwd).config_root
 
 
 class TuiController:
@@ -210,16 +223,21 @@ class TuiController:
     # ── project trust ──────────────────────────────────────
 
     def trust_for(self, cwd: str):
-        """The trust decision for ``cwd`` (registry + this run's overrides)."""
-        return resolve_trust(cwd, self._trust_store)
+        """The trust decision for **cwd's PROJECT** (registry + this run's overrides).
+
+        Resolved on the config root: a linked worktree is not a project of its
+        own, so the answer recorded for the main worktree applies to it (and a
+        plain-repo subdirectory keeps its own, as before).
+        """
+        return resolve_trust(_config_root(cwd), self._trust_store)
 
     def set_trust(self, cwd: str, status: str) -> None:
         """Record a remembered answer — written to ~/.cluxmate/trust.json."""
-        self._trust_store.set(cwd, status)
+        self._trust_store.set(_config_root(cwd), status)
 
     def set_session_trust(self, cwd: str, status: str) -> None:
         """"This run only" — never written to ~/.cluxmate/trust.json."""
-        self._trust_store.set_session(cwd, status)
+        self._trust_store.set_session(_config_root(cwd), status)
 
     # ── agent lifecycle ────────────────────────────────────
 
@@ -254,14 +272,17 @@ class TuiController:
             # common case) instead of re-spawning MCP + re-rendering.
             return True
         self._build_key = key
-        # Policy is scoped to the working directory (always_allow lives in
-        # <cwd>/.cluxmate/permissions.json); a cwd change gets a fresh one.
-        # Mode is in-memory only, so re-apply the current mode.
-        self._policy = PermissionPolicy(cwd, trusted=decision.trusted)
+        # Project config is keyed on the config root (the git main worktree for a
+        # worktree session); `cwd` stays the writable tree handed to the builder.
+        config_root = _config_root(cwd)
+        # Policy is scoped to the project (always_allow lives in
+        # <config_root>/.cluxmate/permissions.json); a cwd change gets a fresh
+        # one. Mode is in-memory only, so re-apply the current mode.
+        self._policy = PermissionPolicy(config_root, trusted=decision.trusted)
         self._policy.set_mode(mode)
         llm_provider = _create_provider(entry)
         llm_provider.set_reasoning_effort(self._reasoning_effort)
-        builder = AgentBuilder(cwd, llm_provider)
+        builder = AgentBuilder(cwd, llm_provider, project_root=config_root)
         builder.with_trust(decision)
         builder.with_default_tools()
         builder.with_subagents()
@@ -284,12 +305,13 @@ class TuiController:
 
         The first build for a directory triggers an async load — building the
         agent proceeds immediately with MCP tools absent, and the agent is
-        rebuilt with them once the load thread finishes.
+        rebuilt with them once the load thread finishes. ``cwd`` is the tree the
+        servers run in; mcp.json is read from the project's config root.
         """
         key = (cwd, trusted)
         mcp = self._mcp_cache.get(key)
         if mcp is None:
-            mcp = MCPManager(cwd, trusted=trusted)
+            mcp = MCPManager(cwd, trusted=trusted, config_root=_config_root(cwd))
             self._mcp_cache[key] = mcp
             t = threading.Thread(
                 target=mcp.load, daemon=True, name=f"mcp-load-{cwd[:16]}",
