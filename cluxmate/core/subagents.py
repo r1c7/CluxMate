@@ -179,7 +179,10 @@ BUILTIN_AGENT_TYPES: dict[str, AgentType] = {
         tools=_READONLY_TOOLS + ("task",),
         subagents_mode="list",
         subagents=("explore",),
-        max_turns=DEFAULT_SUBAGENT_MAX_TURNS,
+        # Same ceiling rationale as the reviewer: exploration scope is unknown
+        # upfront, and a budget is a ceiling, not a target — running out of
+        # turns mid-investigation returns a half-answer worth nothing.
+        max_turns=MAX_AGENT_TURNS,
         builtin=True,
     ),
     "reviewer": AgentType(

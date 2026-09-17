@@ -236,6 +236,7 @@ def test_builtin_definitions_stay_intact():
     assert gp.readonly is False and gp.max_turns == 150
     assert "task" in ex.tools and ex.readonly is True
     assert ex.subagents_mode == "list" and ex.subagents == ("explore",)
+    assert ex.max_turns == MAX_AGENT_TURNS
 
 
 def test_builtin_reviewer_can_verify_but_never_edit():
