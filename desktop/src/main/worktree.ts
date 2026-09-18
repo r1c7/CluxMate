@@ -54,6 +54,15 @@ export interface WorktreeInfoResult {
   config_root: string
   is_worktree: boolean
   branch: string | null
+  /**
+   * The name of CluxMate's own container directory for this repository (today
+   * `.worktrees`). Extra key, like every other §A field the desktop parses by
+   * key: an older CLI omits it and this degrades to `''` = "nothing to filter"
+   * (see shared/worktree-container.ts), NOT to a `bad-output` failure.
+   */
+  container: string
+  /** Whether git currently IGNORES that container. `false` ⇒ keep its rows. */
+  container_ignored: boolean
 }
 
 export interface WorktreeCreateResult {
@@ -147,6 +156,11 @@ export async function worktreeInfo(cwd: string): Promise<WorktreeResult<Worktree
     config_root: text(parsed.config_root),
     is_worktree: parsed.is_worktree === true,
     branch: nullableText(parsed.branch),
+    // Deliberately NOT in `requireStrings`: these two are our newest keys, and a
+    // caller with an older CLI on PATH must keep working — it has no container
+    // filtering to do, which is exactly what `''` / `false` mean.
+    container: text(parsed.container),
+    container_ignored: parsed.container_ignored === true,
   }
 }
 

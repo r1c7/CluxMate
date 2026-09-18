@@ -19,6 +19,7 @@ import { SKILL_MAX_BYTES, isAllowedSkillPath, listSkills, setSkillDisabled } fro
 // branches on `ok` instead of wrapping the call.
 import { worktreeCreate, worktreeInfo, worktreeRemove } from './worktree'
 import type { WorktreeRemoveOptions, WorktreeRemovePayload, WorktreeResult } from './worktree'
+import { NO_CONTAINER } from '../shared/worktree-container.ts'
 // The containment test and the occupancy guard are PURE (no electron import), so
 // desktop/tests can exercise them directly with the Node runner — this file
 // cannot be loaded there. See the module header.
@@ -1657,9 +1658,21 @@ export function registerIpcHandlers() {
   // per changed file, with git's 2-char status + separator stripped. A git
   // failure is reported AS a failure, never as "clean" — the dialog must not
   // offer to create a tree while it cannot say what would be left behind.
+  //
+  // The container is subtracted from that list: `.worktrees/` is CluxMate's own
+  // directory, and on a repository where the ignore could not be written it
+  // would otherwise read as the user's change, refusing a create the user never
+  // dirtied. `worktreeInfo` never throws (missing python / timeout / not a
+  // repository all come back as `ok:false`), and an unusable answer filters
+  // nothing — i.e. exactly today's behaviour.
   ipcMain.handle(IPC.GIT_STATUS, async (_, params: { cwd: string }): Promise<{ ok: boolean; files: string[]; message?: string }> => {
     try {
-      return { ok: true, files: await gitService.statusLines(params?.cwd || '') }
+      const cwd = params?.cwd || ''
+      const info = await worktreeInfo(cwd)
+      const container = info.ok
+        ? { name: info.container, ignored: info.container_ignored }
+        : NO_CONTAINER
+      return { ok: true, files: await gitService.statusLines(cwd, container) }
     } catch (e: any) {
       return { ok: false, files: [], message: e?.message || 'git status failed' }
     }
@@ -1681,7 +1694,15 @@ export function registerIpcHandlers() {
 
   ipcMain.handle(IPC.GIT_COMMIT_WIP, async (_, params: { cwd: string }): Promise<{ ok: boolean; message?: string }> => {
     try {
-      await gitService.commitWip(await gitRepoRoot(params?.cwd || ''))
+      const root = await gitRepoRoot(params?.cwd || '')
+      // One `info` call for the container NAME (see GIT_STATUS above). The guard
+      // inside `commitWip` re-asks git, so this snapshot only has to name the
+      // directory — an unusable answer means "nothing known to protect".
+      const info = await worktreeInfo(params?.cwd || '')
+      await gitService.commitWip(
+        root,
+        info.ok ? { name: info.container, ignored: info.container_ignored } : NO_CONTAINER,
+      )
       return { ok: true }
     } catch (e: any) {
       return { ok: false, message: e?.message || 'git commit failed' }
