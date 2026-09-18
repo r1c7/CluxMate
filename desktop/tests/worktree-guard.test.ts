@@ -41,6 +41,15 @@ test('escaping the tree with `..` is outside it', () => {
   assert.equal(isInsideOrEqual(TREE, REPO), false)
 })
 
+test('a name that merely starts with `..` is an ordinary child of the tree', () => {
+  // Only a WHOLE `..` segment climbs out: `path.relative` answers `..hidden` for
+  // <tree>/..hidden — a child directory whose name begins with two dots, not an
+  // escape. The clause is therefore `!rel.startsWith('..' + path.sep)`, and this
+  // is the only case in the file that tells it apart from the looser (wrong)
+  // `!rel.startsWith('..')`, which passes every other assertion here.
+  assert.equal(isInsideOrEqual(TREE, path.join(TREE, '..hidden')), true)
+})
+
 test('a sibling tree is outside, and so is a longer name that merely shares a prefix', () => {
   assert.equal(isInsideOrEqual(TREE, path.join(REPO, '.worktrees', 'other')), false)
   // `<repo>/.worktrees/me-old/sub` starts with `<repo>/.worktrees/me` as a
@@ -51,14 +60,15 @@ test('a sibling tree is outside, and so is a longer name that merely shares a pr
 test('`/` and `\\` spellings of one tree agree', () => {
   // A path built with forward slashes (what the renderer hands over after
   // path.join-ing a user-typed folder) must land in the same tree as the native
-  // one. On Windows both separators are real; on POSIX path.resolve folds the
-  // backslash variant into a single segment, so that half is Windows-only —
-  // which is also the platform this guard ships on.
+  // one. On Windows both separators are real; on POSIX a backslash is an
+  // ordinary character, so `forward` IS `TREE` and every assertion below would be
+  // tautological — hence the whole test is Windows-only, which is also the
+  // platform this guard ships on.
+  if (path.sep !== '\\') return
   const forward = TREE.replace(/\\/g, '/')
   assert.equal(isInsideOrEqual(TREE, forward), true)
   assert.equal(isInsideOrEqual(forward, path.join(TREE, 'sub')), true)
   assert.equal(isInsideOrEqual(forward, path.join(forward, 'sub', 'deep')), true)
-  if (path.sep !== '\\') return
   // `<repo>\.worktrees\me` vs a candidate spelled with the other separator.
   const child = path.join(TREE, 'sub')
   assert.equal(isInsideOrEqual(TREE, child.replace(/\\/g, '/')), true)

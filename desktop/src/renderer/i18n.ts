@@ -639,7 +639,9 @@ const en = {
   'error.trustRemoveFailed': 'Failed to revoke the trust decision: {msg}',
   'error.removeWorktreeFailed': 'Failed to remove the worktree: {msg}',
   // Deliberate refusals (not-a-worktree / worktree-in-use): nothing was deleted.
-  'error.removeWorktreeBlocked': 'Cannot remove the worktree: {msg}',
+  // Em dash, not a colon: the refusal message is a sentence of its own, and the
+  // worktree-in-use one carries a colon of its own ("… another session: <title>").
+  'error.removeWorktreeBlocked': 'Cannot remove the worktree — {msg}',
   'error.worktreeRefreshFailed': 'The worktree change was applied, but the session list could not be refreshed ({msg}). Re-open the project to see the change.',
   'error.notAWorktreeSession': 'This session does not live in a git worktree.',
   'error.noProjectPath': 'This project has no directory to create a worktree from.',

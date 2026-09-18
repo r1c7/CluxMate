@@ -70,6 +70,26 @@ async function worktreeRemoveWithRetry(
   return worktreeRemove(opts)
 }
 
+// The refusal BOTH occupancy checks in WORKTREE_REMOVE_SESSION return, built in
+// ONE place so the early check and the last-moment re-check cannot drift apart.
+// It names what blocks the removal — the session's title, or how many there are
+// plus the first one — and both ways out the UI actually offers: "Delete session"
+// (the sidebar and the context menu have no "close session"), or moving it
+// somewhere else (SESSION_UPDATE_CWD clears the block, because the guard reads
+// `cwd`). Nothing is deleted on this path; the renderer reads the code to tell a
+// deliberate refusal from a failure.
+function worktreeInUseResult(blockers: SessionMeta[]): WorktreeRemoveResult {
+  const first = blockers[0].title || blockers[0].id
+  return {
+    ok: false,
+    error: 'worktree-in-use',
+    message:
+      blockers.length === 1
+        ? `This worktree is in use by another session: "${first}". Delete that session, or move it to another directory, and then remove the worktree.`
+        : `This worktree is in use by ${blockers.length} other sessions, starting with "${first}". Delete those sessions, or move them to another directory, and then remove the worktree.`,
+  }
+}
+
 const bridges = new Map<string, AgentBridge>()
 const pendingSpawns = new Map<string, Promise<void>>()
 let activeSessionId: string | null = null
@@ -836,17 +856,7 @@ export function registerIpcHandlers() {
       // before the bridge is killed and before the CLI is called — leaves every
       // session exactly as it was.
       const blockers = sessionsInTree(target, sessionStore.listSessions(), sid)
-      if (blockers.length > 0) {
-        const first = blockers[0].title || blockers[0].id
-        return {
-          ok: false,
-          error: 'worktree-in-use',
-          message:
-            blockers.length === 1
-              ? `This worktree is in use by another session: "${first}". Close that session, or move it to another directory, and then remove the worktree.`
-              : `This worktree is in use by ${blockers.length} other sessions, starting with "${first}". Close them, or move them to another directory, and then remove the worktree.`,
-        }
-      }
+      if (blockers.length > 0) return worktreeInUseResult(blockers)
       // Kill the bridge and AWAIT it BEFORE removing the directory: on Windows a
       // live process's cwd LOCKS the directory, so `git worktree remove` would
       // fail against a running agent. Dropping it from the map first keeps its
@@ -856,6 +866,18 @@ export function registerIpcHandlers() {
         bridges.delete(sid)
         try { await bridge.kill() } catch { /* already gone */ }
       }
+      // …and ASK AGAIN, because that kill is an `await`: the check above is now
+      // several turns of the event loop old, and SESSION_UPDATE_CWD can file a
+      // session into this tree from the renderer in the window between them (the
+      // guard reads the session's `cwd`, so a plain "change working directory" is
+      // enough). THIS second check is the authoritative one — it is the last
+      // statement before the delete — and a refusal here costs only this
+      // session's own bridge, already killed: a cold bridge respawns on the
+      // session's next use, exactly as it does on the `!result.ok` path below,
+      // whereas deleting a tree another session is working in discards its
+      // working directory and anything uncommitted in it. Still a pure read.
+      const lateBlockers = sessionsInTree(target, sessionStore.listSessions(), sid)
+      if (lateBlockers.length > 0) return worktreeInUseResult(lateBlockers)
       // The CLI resolves the tree from the repository, so hand it the project
       // CONFIG root (§E) — the main worktree, where `.worktrees/` lives. The
       // TARGET is the tree's absolute path, never the bare name: the path is what
