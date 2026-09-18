@@ -201,6 +201,13 @@ def test_create_honours_an_explicit_branch(tmp_path):
 
 def test_create_writes_worktrees_into_info_exclude_exactly_once(tmp_path):
     repo = _repo(tmp_path)
+    # The precondition is checked BEFORE the tree exists (that is what makes a
+    # failure leave nothing behind), so the "is it ignored" question is asked
+    # about a directory that is not on disk yet. `git check-ignore` does NOT
+    # ignore the bare name in that state — only the directory form does:
+    # measured exit 1 for `.worktrees`, exit 0 for `.worktrees/`. This pins the
+    # trailing slash, whose absence made every create fail with exclude-failed.
+    assert worktree._container_ignored(str(repo)) is False
     worktree.create(str(repo), name="one")
     exclude = repo / ".git" / "info" / "exclude"
     assert ".worktrees/" in exclude.read_text(encoding="utf-8")
@@ -209,6 +216,30 @@ def test_create_writes_worktrees_into_info_exclude_exactly_once(tmp_path):
     assert _git_out("status", "--porcelain", cwd=repo).strip() == ""
     worktree.create(str(repo), name="two")
     assert exclude.read_text(encoding="utf-8").count(".worktrees/") == 1
+
+
+def test_an_ignored_container_leaves_no_gitlink_for_git_add_all(tmp_path):
+    """The pollution this whole path exists to prevent, asserted directly.
+
+    `git add -A` records a container that is NOT ignored as an embedded
+    repository (a 160000 gitlink): the user's repo gains a pointer nobody can
+    obtain and `restore` cannot take back. The positive case (excluded ⇒ clean
+    index) and the negative case (ignored entry removed ⇒ gitlink) are asserted
+    together, because only the pair proves the exclude is what does the work —
+    without them, "no gitlink" could just as well mean the premise never held.
+    """
+    repo = _repo(tmp_path)
+    worktree.create(str(repo), name="me")
+    (repo / ".worktrees" / "me" / "wip.txt").write_text("wip\n", encoding="utf-8")
+
+    _git("add", "-A", cwd=repo)
+    assert "160000" not in _git_out("ls-files", "-s", cwd=repo)
+
+    # Negative case: same repository, ignore entry dropped. Literal name in the
+    # assertion is deliberate — a regex would read `<repo>/.worktrees` too.
+    (repo / ".git" / "info" / "exclude").write_text("", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    assert "160000" in _git_out("ls-files", "-s", cwd=repo)
 
 
 def test_create_does_not_touch_info_exclude_when_the_repo_already_ignores_it(tmp_path):
@@ -220,6 +251,30 @@ def test_create_does_not_touch_info_exclude_when_the_repo_already_ignores_it(tmp
     before = exclude.read_text(encoding="utf-8")
     worktree.create(str(repo), name="one")
     assert exclude.read_text(encoding="utf-8") == before
+
+
+def test_create_refuses_when_the_container_cannot_be_ignored(tmp_path):
+    """A container git cannot be told to ignore is refused, not half-built.
+
+    ``<git-common-dir>/info/exclude`` is made unwritable in a way git cannot see
+    through (a directory where the file belongs): the append fails, the ignore
+    cannot be verified, and the create must stop — reporting the file to fix —
+    rather than leave a tree the main tree would count as an uncommitted change.
+    """
+    repo = _repo(tmp_path)
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.unlink()
+    exclude.mkdir()
+
+    with pytest.raises(worktree.WorktreeError) as err:
+        worktree.create(str(repo), name="me")
+
+    assert err.value.code == "exclude-failed"
+    assert str(exclude) in err.value.message
+    assert err.value.details["exclude"] == str(exclude)
+    # Nothing was created, and the main tree stayed exactly as it was.
+    assert not (repo / ".worktrees").exists()
+    assert _git_out("status", "--porcelain", cwd=repo).strip() == ""
 
 
 def test_create_suffixes_a_slug_that_already_exists(tmp_path):
@@ -256,17 +311,20 @@ def test_create_allows_a_dirty_main_tree_with_allow_dirty(tmp_path):
 def test_dirty_files_ignores_the_worktree_container(tmp_path, monkeypatch):
     """CluxMate's own `.worktrees/` is never one of the USER's uncommitted files.
 
-    `_ensure_excluded` is best-effort, so on a repository whose
-    `<git-common-dir>/info` cannot be written the trees we just made stay
-    untracked in the main tree. Counting that entry makes the NEXT `create`
-    report `dirty` with `details.files = ['.worktrees/']` — refusing a tree the
-    user never touched, over a directory we created.
+    The SECOND line of defence behind `create`'s `exclude-failed` precondition:
+    a repository whose exclude was written by an older build — or removed by
+    hand — still carries an untracked container. Counting that entry makes the
+    NEXT `create` report `dirty` with `details.files = ['.worktrees/']`, refusing
+    a tree the user never touched over a directory we created.
 
-    `_ensure_excluded` is neutered here so the premise is REAL on disk: the only
-    thing hiding the container from `git status` is the guard under test, not the
-    exclude file the successful `create` just wrote.
+    `_ensure_excluded` is neutered here (it reports success without writing) so
+    the premise is REAL on disk: the only thing hiding the container from
+    `git status` is the guard under test, not the exclude file a successful
+    `create` would have written. Reporting success is what a `create` on a
+    repository git already ignores does; the alternative `False` is the
+    exclude-failed path, which has its own test.
     """
-    monkeypatch.setattr(worktree, "_ensure_excluded", lambda root: None)
+    monkeypatch.setattr(worktree, "_ensure_excluded", lambda root: True)
     repo = _repo(tmp_path)
     worktree.create(str(repo), name="me")
 

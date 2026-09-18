@@ -14,7 +14,8 @@ reachable by the model, and nothing here writes ``~/.cluxmate/config.json``.
 
 Payloads (exactly what the CLI prints with ``--json``)::
 
-    info   {"ok":true,"cwd":…,"root":…,"config_root":…,"is_worktree":…,"branch":…}
+    info   {"ok":true,"cwd":…,"root":…,"config_root":…,"is_worktree":…,"branch":…,
+            "container":…,"container_ignored":…}
     create {"ok":true,"name":…,"path":…,"branch":…,"base":<sha>,"base_ref":…,
             "project_root":…,"repo_root":…,"dirty":[…]}
     list   {"ok":true,"worktrees":[{"path":…,"name":…,"branch":…,"head":…,
@@ -23,9 +24,9 @@ Payloads (exactly what the CLI prints with ``--json``)::
     error  {"ok":false,"error":<code>,"message":…,"details":{…}}
 
 ``WorktreeError.code`` is a closed set: ``not-a-repo``, ``bad-name``,
-``in-worktree-container``, ``dirty`` (``details.files``), ``branch-exists``,
-``base-missing``, ``not-found``, ``main-worktree``, ``git-failed``
-(``details.stderr``) and ``usage``.
+``in-worktree-container``, ``dirty`` (``details.files``), ``exclude-failed``
+(``details.exclude``), ``branch-exists``, ``base-missing``, ``not-found``,
+``main-worktree``, ``git-failed`` (``details.stderr``) and ``usage``.
 
 This module never prints: it either returns the ``ok: True`` payload or raises
 ``WorktreeError``, and the CLI is the thin layer that renders an error as the
@@ -111,8 +112,26 @@ def info(cwd: str) -> dict:
     ``config_root`` (not ``root``) is what a session in this directory reads its
     project config from, and it is what the desktop stores; inside a linked
     worktree it is the main worktree, everywhere else it is the cwd itself.
+
+    ``container`` / ``container_ignored`` describe OUR container (see
+    ``_CONTAINER``): its name, and whether git currently ignores it. Both are
+    here so the desktop never has to re-derive the rule — a second copy of the
+    ignore policy is exactly how the container came to be counted as one of the
+    USER's uncommitted changes. A caller that knows the name can drop those rows
+    from its own ``git status`` output, and one that reads
+    ``container_ignored`` knows whether that is even necessary.
+
+    Never raises: a directory that is not a repository (or has no git) degrades
+    to the pre-existing payload with ``container_ignored = False``.
     """
     resolved = project_root.resolve(cwd)
+    ignored, container = False, _CONTAINER
+    try:
+        ignored = _container_ignored(resolved.root)
+    except WorktreeError:
+        # Not a repository, or git is unavailable: there is no container to
+        # ignore. The desktop treats `False` as "no filtering to do".
+        pass
     return {
         "ok": True,
         "cwd": resolved.cwd,
@@ -120,6 +139,8 @@ def info(cwd: str) -> dict:
         "config_root": resolved.config_root,
         "is_worktree": resolved.is_worktree,
         "branch": resolved.branch,
+        "container": container,
+        "container_ignored": ignored,
     }
 
 
@@ -136,10 +157,13 @@ def create(
 
     The repository is resolved from ``cwd`` — so a worktree created from inside
     another worktree still lands in the MAIN repository's container — and the
-    new tree starts on ``cluxmate/<slug>`` at ``--base`` (default ``HEAD``),
-    with ``<git-common-dir>/info/exclude`` extended so the main tree keeps
-    calling itself clean. Uncommitted changes in the main tree are refused
-    unless ``allow_dirty``.
+    new tree starts on ``cluxmate/<slug>`` at ``--base`` (default ``HEAD``).
+    Uncommitted changes in the main tree are refused unless ``allow_dirty``.
+
+    The container is ignored BEFORE the tree is created (``exclude-failed`` if
+    git cannot be made to ignore it): an unignored container is a change the
+    main tree reports as the user's own, and the desktop's "commit them" button
+    would then record every checkout as an embedded repository.
     """
     repo_root = _repo_root(cwd)
     _reject_container(cwd, repo_root)
@@ -175,6 +199,31 @@ def create(
             {"files": dirty},
         )
 
+    # BEFORE the tree exists, because this is the ONE thing an unignored
+    # container does to a repository the user did not ask for: `git add -A` —
+    # which the desktop's "commit the changes" button really runs — records each
+    # checkout as an embedded repository (a 160000 gitlink), and the shadow repo
+    # cannot undo a pointer it cannot `unlink()` (see `checkpoints._init`). The
+    # pre-existing alternatives are both worse: fail AFTER `worktree add` and
+    # leave a tree on disk, or stay best-effort, report success, and let the
+    # very next `create` refuse a dirty main tree whose only entry is
+    # ``?? .worktrees/`` — a directory CluxMate made (that guard is
+    # `_dirty_files`, and it only papers over this).
+    #
+    # The cost is deliberate: a repository whose `<common>/info` cannot be
+    # written now fails here instead of quietly working. It is a hard failure
+    # because the alternative is a contaminated repository, and the message
+    # names the two things the user can actually do about it.
+    if not _ensure_excluded(repo_root):
+        raise WorktreeError(
+            "exclude-failed",
+            f"git still does not ignore {_CONTAINER}/, so the new tree would "
+            "show up as an uncommitted change in the main tree; allow writes "
+            f"to {_exclude_file(repo_root)}, or add `{_CONTAINER}/` to the "
+            "repository's .gitignore",
+            {"container": _CONTAINER, "exclude": _exclude_file(repo_root)},
+        )
+
     code, _, err = _run(
         ["worktree", "add", "-b", final_branch, str(target), base_sha],
         repo_root,
@@ -189,7 +238,6 @@ def create(
             {"stderr": err.strip()},
         )
 
-    _ensure_excluded(repo_root)
     return {
         "ok": True,
         "name": final_slug,
@@ -519,10 +567,11 @@ def _dirty_files(cwd: str) -> list[str]:
     """Uncommitted paths of a working tree, capped for display.
 
     Paths under ``<root>/.worktrees/`` are left out: that container is
-    CluxMate's own, not the user's work. ``_ensure_excluded`` is best-effort, so
-    on a repository whose ``<git-common-dir>/info`` is not writable the trees we
-    created keep showing up as one untracked ``.worktrees/`` entry — and
-    counting it would make the NEXT ``create`` refuse a tree the user never
+    CluxMate's own, not the user's work. ``_ensure_excluded`` is now a hard
+    precondition of ``create``, so this filter is a SECOND line of defence —
+    it also covers the repositories whose exclude was written by an older build
+    (or removed by hand) before the check existed. Without it, counting the
+    container would make the NEXT ``create`` refuse a tree the user never
     touched, blaming them for a directory we made. The entry is relative to the
     tree being asked about, which is why the test is on ``_CONTAINER`` and not
     on the container's absolute path (this is also the guard ``remove`` runs
@@ -571,38 +620,73 @@ def _common_dir(root: str) -> str | None:
     return None
 
 
-def _ensure_excluded(root: str) -> None:
-    """Make the main tree ignore ``.worktrees/``, idempotently and best-effort.
+def _exclude_file(root: str) -> str:
+    """``<git-common-dir>/info/exclude`` as an absolute path ("" when unknown).
+
+    Best-effort and for REPORTING only: the ``exclude-failed`` message and the
+    ``info`` payload name it, so the user can fix the permission rather than
+    guess at a path. Nothing is decided from this value.
+    """
+    common = _common_dir(root)
+    return str(Path(common) / "info" / "exclude") if common else ""
+
+
+def _container_ignored(root: str) -> bool:
+    """Does git currently ignore the container in ``root``?
+
+    ``git check-ignore --no-index`` asks the ignore rules themselves, so every
+    source counts: our own ``<git-common-dir>/info/exclude`` line, the user's
+    ``.gitignore``, and a global ``core.excludesFile``. It exits 0 for ignored
+    and 1 for not — and, like ``_dirty_files``, it runs with the user's config in
+    place, because "is this path ignored" is a config question.
+
+    The path asked about carries a TRAILING SLASH (``.worktrees/``), and that is
+    load-bearing: `check-ignore` matches a literal path, so without a directory
+    on disk to stat, the bare name is not ignored and this answers ``False`` even
+    though ``git status``/``git add -A`` honour the rule (measured on git 2.52:
+    bare name → exit 1, ``.worktrees/`` → exit 0, while the directory does not
+    exist yet). `create` asks this BEFORE the tree exists, and the directory
+    pattern is also what ``_ensure_excluded`` writes, so both ask the same
+    question: "would a container placed here be ignored?"
+
+    Raises ``WorktreeError`` for a directory that is not a repository or a
+    machine without git; the callers above decide what that means.
+    """
+    code, _, _ = _run(
+        ["check-ignore", "--no-index", "-q", f"{_CONTAINER}/"], root, user_config=True
+    )
+    return code == 0
+
+
+def _ensure_excluded(root: str) -> bool:
+    """Make the main tree ignore the container → ``True`` when it now does.
 
     ``<git-common-dir>/info/exclude`` rather than the user's TRACKED
     ``.gitignore``: ``git add -A`` obeys the exclude too, it needs no commit and
-    it leaves no diff noise in a repository CluxMate does not own. Skipped when
-    the repository already ignores the path (``git check-ignore``), and skipped
-    again when our line is already there, so creating the tenth worktree does
-    not append a tenth line.
+    it leaves no diff noise in a repository CluxMate does not own. ``True`` is
+    returned early when the repository already ignores the container — by our
+    own line, or by a rule of the user's own — so creating the tenth worktree
+    neither appends a tenth line nor touches the file at all.
 
-    A write failure is swallowed: the tree already exists at this point, and
-    failing the create over an unwritable ``info/`` would report a worktree that
-    is in fact there. The cost is that the new tree keeps showing up as
-    untracked in the main tree until the exclude can be written.
+    The RESULT matters — ``create`` refuses to build a tree that would show up
+    as an uncommitted change in the main tree — so a write failure is reported
+    instead of swallowed, and the ignore is verified afterwards rather than
+    inferred from a successful append (a rule can be written and still not win,
+    e.g. a negation in the user's ``.gitignore``).
+
+    Raises ``WorktreeError`` only for "could not even ask"; a plain "no" is
+    ``False``.
     """
-    # "Already ignored?" is a config question (a user's core.excludesFile counts),
-    # so it is asked with the user's own config in place.
-    code, _, _ = _run(
-        ["check-ignore", "--no-index", "-q", _CONTAINER], root, user_config=True
-    )
-    if code == 0:
-        return
+    if _container_ignored(root):
+        return True
     common = _common_dir(root)
     if common is None:
-        return
+        return False
     exclude = Path(common) / "info" / "exclude"
     try:
         existing = exclude.read_text(encoding="utf-8", errors="replace")
     except OSError:
         existing = ""
-    if any(line.strip() == f"{_CONTAINER}/" for line in existing.splitlines()):
-        return
     try:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with exclude.open("a", encoding="utf-8") as handle:
@@ -610,7 +694,8 @@ def _ensure_excluded(root: str) -> None:
                 handle.write("\n")
             handle.write(f"{_CONTAINER}/\n")
     except OSError:
-        return
+        return False
+    return _container_ignored(root)
 
 
 def _porcelain_blocks(porcelain: str) -> list[dict[str, str]]:
