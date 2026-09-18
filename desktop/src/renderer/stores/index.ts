@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types'
 import { deriveSessionTitle } from '../../shared/session-title'
 import { markShadowed } from '../../shared/skill-rules'
+import { isWorktreeSession } from '../../shared/worktree-rules'
 import { shouldPromptFromFetch } from '../../shared/trust-rules'
 import { defaultReasoningValue } from '../../shared/reasoning'
 import { editsFromToolInput } from '../components/MultiEditDiff'
@@ -85,6 +86,17 @@ function nextId(): string { return `msg-${++_msgId}` }
 function sameCwd(a: string | undefined, b: string): boolean {
   const norm = (p: string) => (p || '').replace(/[\\/]+$/, '').replace(/\\/g, '/')
   return norm(a || '') === norm(b)
+}
+
+// §E (frozen desktop rule): a session's PROJECT CONFIG root is
+// `project_root || cwd`. Every renderer call that reads or writes
+// `<X>/.cluxmate/{permissions,mcp,skills,settings}.json`, `<X>/.cluxmate/memory/facts`
+// or `<X>/AGENTS.md` must pass this root as X — a session in a linked git
+// worktree shares the main worktree's config. Everything that addresses the
+// EXECUTION tree (bridge spawn/warm, GIT_*, chat:send, the write fence) keeps
+// using `session.cwd` / `workingDir` and must NOT be routed through here.
+function projectConfigRoot(session: SessionMeta | undefined, fallback: string): string {
+  return session?.project_root || session?.cwd || fallback
 }
 
 // --- ordered-block helpers -------------------------------------------------
@@ -273,6 +285,30 @@ export interface SelectedAgent {
   agentId: string
 }
 
+// The open "new worktree session" dialog: which project it belongs to and the
+// directory the CLI resolves the repository from (the auto group's path).
+export interface WorktreeDialogState {
+  groupId: string
+  path: string
+}
+
+// What the renderer has to show the user BEFORE a worktree removal happens:
+// the tree's path, its branch, and the files inside it that are not committed.
+// `error` is set when git could not report them — "clean" and "could not tell"
+// must not look alike on a prompt that is about to delete a directory.
+export interface WorktreeRemovalInfo {
+  name: string
+  path: string
+  branch: string
+  files: string[]
+  error: string | null
+}
+
+// Result the worktree dialog renders verbatim: a failure carries the IPC
+// result's own `message` (the only exit for dirty / branch-exists / not-a-repo /
+// bad-name — the renderer never re-words or re-derives those codes).
+export type WorktreeActionResult = { ok: true } | { ok: false; message: string }
+
 interface AppState {
   sessions: SessionMeta[]
   groups: GroupMeta[]
@@ -382,6 +418,11 @@ interface AppState {
   // sibling component — can start a rename inline for the target session/group.
   editingSessionId: string | null
   editingGroupId: string | null
+  // The open "new worktree session" dialog (null = closed). Held here so both
+  // entries into it — the project header button and the project context menu —
+  // open the same dialog, and so the create action can read the target project
+  // without threading it back through the component.
+  worktreeDialog: WorktreeDialogState | null
   // One-shot draft to load into the input box (e.g. the undone message's text).
   // InputBox consumes it on change, then clears it via consumeInputDraft.
   inputDraft: string | null
@@ -423,6 +464,20 @@ interface AppState {
   refreshGitInfo: () => Promise<void>
   createSession: (cwd?: string) => Promise<void>
   deleteSession: (id: string) => Promise<void>
+  // ── worktree sessions ──
+  // Open the create dialog for one project (auto group id). Resolves the project
+  // directory itself; a group with no resolvable path reports instead of opening.
+  openWorktreeDialog: (groupId: string) => void
+  closeWorktreeDialog: () => void
+  // Create a worktree + a session inside it. On success the sidebar is reloaded
+  // and the new session becomes active; on failure the dialog shows `message`.
+  createWorktreeSession: (input: { name?: string; base?: string; branch?: string }) => Promise<WorktreeActionResult>
+  // The confirmation content for removing a worktree session (read before the
+  // prompt). null when the session no longer exists.
+  worktreeRemovalInfo: (sessionId: string) => Promise<WorktreeRemovalInfo | null>
+  // Remove the session's worktree (and branch) and the session row with it. The
+  // caller confirms first; this performs the removal and reconciles the store.
+  removeWorktreeSession: (sessionId: string) => Promise<WorktreeActionResult>
   createGroup: (name: string) => Promise<void>
   renameGroup: (id: string, name: string) => Promise<void>
   deleteGroup: (id: string) => Promise<void>
@@ -576,6 +631,7 @@ export const useStore = create<AppState>((set, get) => ({
   contextMenuTarget: null,
   editingSessionId: null,
   editingGroupId: null,
+  worktreeDialog: null,
   inputDraft: null,
   mainView: 'chat',
   skills: [],
@@ -902,6 +958,196 @@ export const useStore = create<AppState>((set, get) => ({
     })
     // Bridge for the deleted session is now gone — refresh sidebar dots.
     get().refreshBridgeStatuses()
+  },
+
+  // ── worktree sessions ──
+  // The tree is made by the `cluxmate worktree` CLI (main process, §D); the
+  // renderer only collects the inputs, mirrors createSession's state wiring, and
+  // hands the CLI's failure `message` back to the dialog untouched.
+
+  openWorktreeDialog: (groupId) => {
+    const group = get().groups.find((g) => g.id === groupId)
+    if (!group?.is_auto) return
+    // Auto groups are keyed by their resolved path; fall back to a member
+    // session's config root for a row created before groups carried one.
+    const member = get().sessions.find((s) => s.group_id === group.id)
+    const path = group.path || member?.project_root || member?.cwd || ''
+    if (!path) {
+      set({ error: tGlobal('error.noProjectPath') })
+      return
+    }
+    set({ worktreeDialog: { groupId, path } })
+  },
+
+  closeWorktreeDialog: () => set({ worktreeDialog: null }),
+
+  createWorktreeSession: async (input) => {
+    const dialog = get().worktreeDialog
+    if (!dialog) return { ok: false, message: tGlobal('error.unknown') }
+    const { models, defaultModelId } = get()
+    const entry = models.find((m) => m.id === defaultModelId) || models[0]
+    if (!entry) {
+      const message = tGlobal('error.noModel')
+      set({ error: message })
+      return { ok: false, message }
+    }
+    const name = input.name?.trim() || undefined
+    const base = input.base?.trim() || undefined
+    const branch = input.branch?.trim() || undefined
+    const entryEffort = defaultReasoningValue(entry)
+    let res
+    try {
+      res = await window.electronAPI.worktreeCreateSession({
+        cwd: dialog.path,
+        // NO `title` on purpose. The dialog collects a WORKTREE NAME, not a
+        // session title, and the card's badge already shows that name — passing
+        // it as the title is what made a fresh card read `login-fix [login-fix]`.
+        // Omitting it stores the default 'New Session' row (main's
+        // session-store insert is `params.title || 'New Session'`), which is
+        // exactly the state both auto-titlers key on: the renderer's optimistic
+        // sendMessage (only while `!title || title === 'New Session'`) and main's
+        // CHAT_SEND (same test, plus the model's `title_suggested` event). So the
+        // session ends up titled after its first message like any other.
+        // The NAME alone still drives the slug: the CLI derives it from `--name`
+        // and only falls back to `--title` when `--name` is blank — the dialog
+        // never lets that field be blank.
+        name,
+        base,
+        branch,
+        modelId: entry.id,
+        apiType: entry.api_type,
+        provider: entry.provider,
+        model: entry.model_name,
+      })
+    } catch (e: any) {
+      return { ok: false, message: e?.message || tGlobal('error.unknown') }
+    }
+    // Never fall back to a plain session and never re-ask: the CLI's message is
+    // the dialog's only explanation of dirty / branch-exists / not-a-repo.
+    if (!res.ok) return { ok: false, message: res.message || tGlobal('error.unknown') }
+
+    const meta = res.session
+    const states = new Map(get().sessionStates)
+    states.set(meta.id, { ...NEW_SS, messages: [], modelId: entry.id, reasoningEffort: entryEffort })
+    // Reload both lists instead of splicing the returned row in: only the
+    // backend knows which group the new session landed in — it must join its
+    // project's EXISTING group (the main worktree's), not grow a second project
+    // keyed by the tree path.
+    const [groups, sessions] = await Promise.all([
+      window.electronAPI.listGroups(),
+      window.electronAPI.listSessions(),
+    ])
+    set({
+      sessions: sessions.some((s) => s.id === meta.id) ? sessions : [...get().sessions, meta],
+      groups,
+      activeSessionId: meta.id,
+      activeModelId: entry.id,
+      activeReasoningEffort: entryEffort,
+      workingDir: meta.cwd,
+      sessionStates: states,
+      messages: [],
+      isStreaming: false,
+      streamingContent: '',
+      thinkingContent: '',
+      pendingPermission: null,
+      pendingBatchEdit: null,
+      pendingQuestion: null,
+      pendingTrust: null,
+      todos: null,
+      selectedAgent: null,
+      // This IS a session switch, so the same per-session panels switchSession
+      // clears have to go too — otherwise a subagent focus view or context
+      // history from the previous session stays on screen over the new one.
+      focusAgent: null,
+      contextOpen: false,
+      turnContexts: [],
+      contextTarget: null,
+      error: null,
+      worktreeDialog: null,
+    })
+    // Load the project's saved policy and pre-warm the new session's bridge.
+    get().refreshPermissions()
+    get().refreshBridgeStatuses()
+    // The active working dir changed (tree path) — refresh the branch pill.
+    get().refreshGitInfo()
+    return { ok: true }
+  },
+
+  worktreeRemovalInfo: async (sessionId) => {
+    const session = get().sessions.find((s) => s.id === sessionId)
+    if (!session) return null
+    let files: string[] = []
+    let error: string | null = null
+    try {
+      const status = await window.electronAPI.gitStatus({ cwd: session.cwd })
+      if (status.ok) files = status.files || []
+      else error = status.message || tGlobal('error.unknown')
+    } catch (e: any) {
+      error = e?.message || tGlobal('error.unknown')
+    }
+    return {
+      name: session.worktree_name || session.title,
+      path: session.cwd,
+      branch: session.worktree_branch || '',
+      files,
+      error,
+    }
+  },
+
+  removeWorktreeSession: async (sessionId) => {
+    const session = get().sessions.find((s) => s.id === sessionId)
+    if (!session) return { ok: false, message: tGlobal('error.unknown') }
+    if (!isWorktreeSession(session)) return { ok: false, message: tGlobal('error.notAWorktreeSession') }
+    let res
+    try {
+      // force: the uncommitted changes were already shown in the confirm; a
+      // second, unanswerable git objection inside the IPC call would only strand
+      // the user with a tree they cannot remove through the UI.
+      res = await window.electronAPI.worktreeRemoveSession({ sessionId, force: true })
+    } catch (e: any) {
+      return { ok: false, message: e?.message || tGlobal('error.unknown') }
+    }
+    if (!res.ok) return { ok: false, message: res.message || tGlobal('error.unknown') }
+
+    // The main process deleted the session row along with the tree; mirror
+    // deleteSession's local cleanup and then point the app somewhere that exists.
+    const wasActive = get().activeSessionId === sessionId
+    const states = new Map(get().sessionStates)
+    states.delete(sessionId)
+    const remaining = get().sessions.filter((s) => s.id !== sessionId)
+    const groups = await window.electronAPI.listGroups()
+    set({
+      sessions: remaining,
+      groups,
+      activeSessionId: wasActive ? null : get().activeSessionId,
+      sessionStates: states,
+      ...(wasActive
+        ? {
+            messages: [],
+            isStreaming: false,
+            streamingContent: '',
+            thinkingContent: '',
+            pendingPermission: null,
+            pendingBatchEdit: null,
+            pendingQuestion: null,
+            pendingTrust: null,
+            todos: null,
+          }
+        : {}),
+    })
+    if (wasActive) {
+      const next = remaining.find((s) => s.message_count > 0) || remaining[0]
+      if (next) {
+        await get().switchSession(next.id)
+      } else if (session.project_root) {
+        // Nothing left to switch to, and the current workingDir is the tree we
+        // just deleted — start over in the main worktree rather than leave the
+        // app pointed at a directory that no longer exists.
+        await get().createSession(session.project_root)
+      }
+    }
+    get().refreshBridgeStatuses()
+    return { ok: true }
   },
 
   switchSession: async (id) => {
@@ -2388,9 +2634,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   showSkills: async () => {
     set({ mainView: 'skills' })
-    // Scan using the active session's cwd (for project skills), else the app cwd.
+    // Scan the active session's PROJECT CONFIG root (for project skills), else
+    // the app cwd — §E: a worktree session reads the main worktree's skills.json.
     const sid = get().activeSessionId
-    const cwd = get().sessions.find((s) => s.id === sid)?.cwd || get().workingDir
+    const cwd = projectConfigRoot(get().sessions.find((s) => s.id === sid), get().workingDir)
     try {
       const skills = await window.electronAPI.listSkills(cwd)
       set({ skills })
@@ -2406,7 +2653,8 @@ export const useStore = create<AppState>((set, get) => ({
   // Lightweight skills loader for chat autocomplete — doesn't switch views.
   loadSkills: async () => {
     const sid = get().activeSessionId
-    const cwd = get().sessions.find((s) => s.id === sid)?.cwd || get().workingDir
+    // §E: project skills live in the config root, not in the worktree.
+    const cwd = projectConfigRoot(get().sessions.find((s) => s.id === sid), get().workingDir)
     try {
       const skills = await window.electronAPI.listSkills(cwd)
       set({ skills })
@@ -2434,7 +2682,8 @@ export const useStore = create<AppState>((set, get) => ({
   // effect next session (no hot-swap of system prompt).
   setSkillDisabled: async (id, disabled) => {
     const sid = get().activeSessionId
-    const cwd = get().sessions.find((s) => s.id === sid)?.cwd || get().workingDir
+    // §E: the file this writes is the PROJECT CONFIG root's skills.json.
+    const cwd = projectConfigRoot(get().sessions.find((s) => s.id === sid), get().workingDir)
     if (!cwd) return
 
     // Optimistic local update — exactly the row that was clicked. The shadowing

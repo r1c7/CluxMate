@@ -15,6 +15,7 @@ import CheckpointTimeline from './components/CheckpointTimeline'
 import DiffPanel from './components/DiffPanel'
 import ContextViewer from './components/ContextViewer'
 import ContextMenu from './components/ContextMenu'
+import WorktreeDialog from './components/WorktreeDialog'
 import SkillsView from './components/SkillsView'
 import McpView from './components/McpView'
 import HooksView from './components/HooksView'
@@ -66,6 +67,11 @@ function AppInner() {
   const showSettings = useStore((s) => s.showSettings)
   const pendingQuestion = useStore((s) => s.pendingQuestion)
   const pendingTrust = useStore((s) => s.pendingTrust)
+  // The "new worktree session" dialog is app-level, not sidebar-level: it is
+  // driven by store state (worktreeDialog), so collapsing the sidebar or opening
+  // Settings — both of which unmount SessionList — must not take it (and the
+  // user's half-filled inputs) with them.
+  const worktreeDialog = useStore((s) => s.worktreeDialog)
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title || t('chat.newSession')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [ready, setReady] = useState(false)
@@ -294,6 +300,9 @@ function AppInner() {
       </div>
 
       <ContextMenu />
+      {/* Overlay slot: app-level, next to ContextMenu, because the sidebar
+          (SessionList) is conditionally rendered — see the selector above. */}
+      {worktreeDialog && <WorktreeDialog path={worktreeDialog.path} />}
       <Toast />
     </div>
   )

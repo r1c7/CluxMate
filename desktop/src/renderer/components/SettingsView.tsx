@@ -306,8 +306,11 @@ export default function SettingsView() {
   const workingDir = useStore((s) => s.workingDir)
   const setError = useStore((s) => s.setError)
   // Same resolution the skills view uses: the active session's project, else
-  // the app working dir. '' means "global facts only".
-  const factsCwd = sessions.find((s) => s.id === activeSessionId)?.cwd || workingDir
+  // the app working dir. '' means "global facts only". §E: the PROJECT CONFIG
+  // root, not the execution tree — facts for a worktree session live in the main
+  // worktree's .cluxmate/memory/facts, which is what the Python side reads.
+  const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const factsCwd = activeSession?.project_root || activeSession?.cwd || workingDir
   const [facts, setFacts] = useState<MemoryFactList | null>(null)
   const [expandedFact, setExpandedFact] = useState<string | null>(null)
 

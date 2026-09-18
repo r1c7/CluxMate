@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
 import { useStore } from '../stores'
 import type { SessionMeta, GroupMeta, SessionSearchHit } from '../../shared/types'
+import { worktreeBadgeLabel } from '../../shared/worktree-rules'
 import { useT } from '../useI18n'
 
 // ── Highlight ──
@@ -196,6 +197,11 @@ function SessionItem({
     : pending === 'edit' ? t('sessionList.waitingReview')
     : undefined
 
+  // Worktree sessions carry a chip next to the title: the tree's name, with the
+  // branch in the tooltip. The null/blank rule lives in shared/worktree-rules so
+  // the badge and the "remove worktree" menu entry can never disagree.
+  const worktreeName = worktreeBadgeLabel(session)
+
   if (editing) {
     return (
       <div className="px-3 py-1.5 flex items-center gap-1">
@@ -268,6 +274,12 @@ function SessionItem({
             <span className="inline-block w-4 flex-shrink-0" aria-hidden />
           )}
           <span className="truncate">{session.title || t('sessionList.newSession')}</span>
+          {worktreeName && (
+            <span
+              className="text-[9px] px-1 py-0.5 rounded border flex-shrink-0 bg-accent/15 text-accent border-accent/30"
+              title={session.worktree_branch || t('sessionList.worktreeBadge')}
+            >{worktreeName}</span>
+          )}
         </div>
         {showCwd && (
           <div className="text-[11px] text-ink-faint/60 truncate mt-0.5" title={session.cwd}>
@@ -314,6 +326,7 @@ function CollapsibleGroup({
   onStartEditSession, onCancelEditSession,
   onStartEditGroup, onCancelEditGroup,
   onCreateSession,
+  onCreateWorktree,
   displayName,
 }: {
   group: GroupMeta
@@ -336,6 +349,9 @@ function CollapsibleGroup({
   onCancelEditGroup: () => void
   // Auto (project) groups render a "+" that creates a session in this project.
   onCreateSession?: () => void
+  // ...and a worktree button that creates a session in a fresh git worktree of
+  // the same project. Only rendered when the project can resolve a directory.
+  onCreateWorktree?: () => void
   // Disambiguated project label (shortest unique path suffix); falls back to name.
   displayName?: string
 }) {
@@ -378,6 +394,30 @@ function CollapsibleGroup({
           />
         ) : (
           <span className="flex-1 truncate" title={groupTitle}>{displayName ?? group.name}</span>
+        )}
+        {group.is_auto && onCreateWorktree && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onCreateWorktree() }}
+            className="text-ink-soft hover:text-accent hover:bg-accent/10 w-5 h-5 flex items-center justify-center rounded flex-shrink-0 transition-colors"
+            title={t('sessionList.newWorktreeSession')}
+          >
+            {/* git-branch glyph (lucide) — distinguishes "new worktree session"
+                from the plain "+" it sits next to. */}
+            <svg
+              className="w-3.5 h-3.5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <line x1="6" x2="6" y1="3" y2="15" />
+              <circle cx="18" cy="6" r="3" />
+              <circle cx="6" cy="18" r="3" />
+              <path d="M18 9a9 9 0 0 1-9 9" />
+            </svg>
+          </button>
         )}
         {group.is_auto && onCreateSession && (
           <button
@@ -493,6 +533,7 @@ export default function SessionList({ width }: { width: number }) {
   const switchSession = useStore((s) => s.switchSession)
   const deleteSession = useStore((s) => s.deleteSession)
   const createSession = useStore((s) => s.createSession)
+  const openWorktreeDialog = useStore((s) => s.openWorktreeDialog)
   const createGroup = useStore((s) => s.createGroup)
   const renameGroup = useStore((s) => s.renameGroup)
   const deleteGroup = useStore((s) => s.deleteGroup)
@@ -770,6 +811,7 @@ export default function SessionList({ width }: { width: number }) {
                     const cwd = sessionsByGroup.get(g.id)?.[0]?.cwd
                     if (cwd) { createSession(cwd); showChat() }
                   }}
+                  onCreateWorktree={() => openWorktreeDialog(g.id)}
                 />
               </div>
             ))}

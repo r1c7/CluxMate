@@ -1,6 +1,12 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useStore } from '../stores'
+import { isWorktreeSession } from '../../shared/worktree-rules'
 import { useT } from '../useI18n'
+
+// How many uncommitted paths the removal confirm lists. The prompt is plain
+// window.confirm text, so an unbounded list would be unreadable; the count line
+// always states the real total.
+const MAX_CONFIRM_FILES = 20
 
 function MenuItem({
   label, disabled, onClick,
@@ -73,6 +79,7 @@ export default function ContextMenu() {
   const target = useStore((s) => s.contextMenuTarget)
   const close = useStore((s) => s.closeContextMenu)
   const groups = useStore((s) => s.groups)
+  const sessions = useStore((s) => s.sessions)
   const deleteSession = useStore((s) => s.deleteSession)
   const deleteGroup = useStore((s) => s.deleteGroup)
   const moveSession = useStore((s) => s.moveSession)
@@ -80,6 +87,10 @@ export default function ContextMenu() {
   const pinSession = useStore((s) => s.pinSession)
   const startEditSession = useStore((s) => s.startEditSession)
   const startEditGroup = useStore((s) => s.startEditGroup)
+  const openWorktreeDialog = useStore((s) => s.openWorktreeDialog)
+  const worktreeRemovalInfo = useStore((s) => s.worktreeRemovalInfo)
+  const removeWorktreeSession = useStore((s) => s.removeWorktreeSession)
+  const setError = useStore((s) => s.setError)
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ x: 0, y: 0 })
 
@@ -136,11 +147,41 @@ export default function ContextMenu() {
     close()
   }
 
+  // Remove a worktree session's tree (and its branch). The user is shown exactly
+  // what the removal destroys — the tree's path, its branch, and the files inside
+  // it that are not committed — so git is read BEFORE the prompt (and the menu
+  // closed first, since that read is async). The removal itself is the store's;
+  // its failure is surfaced as a toast rather than dropped.
+  const doRemoveWorktree = async (sessionId: string) => {
+    close()
+    const info = await worktreeRemovalInfo(sessionId)
+    if (!info) return
+    const files = info.error
+      ? t('contextMenu.removeWorktreeUnknown', { msg: info.error })
+      : info.files.length === 0
+        ? t('contextMenu.removeWorktreeClean')
+        : t('contextMenu.removeWorktreeDirty', {
+            count: info.files.length,
+            files: info.files.slice(0, MAX_CONFIRM_FILES).join('\n')
+              + (info.files.length > MAX_CONFIRM_FILES ? '\n…' : ''),
+          })
+    const ok = window.confirm(t('contextMenu.removeWorktreeConfirm', {
+      name: info.name,
+      path: info.path,
+      branch: info.branch || t('git.noBranch'),
+      files,
+    }))
+    if (!ok) return
+    const res = await removeWorktreeSession(sessionId)
+    if (!res.ok) setError(t('error.removeWorktreeFailed', { msg: res.message }))
+  }
+
   // Session context menu
   if (target?.type === 'session') {
     const currentGroup = groups.find((g) => g.id === target.groupId)
     const inUserGroup = !!currentGroup && !currentGroup.is_auto
     const userGroups = groups.filter((g) => !g.is_auto)
+    const session = sessions.find((s) => s.id === target.id)
     return (
       <div
         ref={ref}
@@ -174,6 +215,11 @@ export default function ContextMenu() {
           <MenuItem label={t('contextMenu.pin')} onClick={() => { pinSession(target.id, true); close() }} />
         )}
         <Separator />
+        {/* Only a session that lives in a worktree has a tree to remove; a plain
+            delete stays a delete (it must never touch a worktree). */}
+        {isWorktreeSession(session) && (
+          <MenuItem label={t('contextMenu.removeWorktree')} onClick={() => { void doRemoveWorktree(target.id) }} />
+        )}
         <MenuItem label={t('contextMenu.deleteSession')} onClick={doDeleteSession} />
       </div>
     )
@@ -189,6 +235,17 @@ export default function ContextMenu() {
         className="fixed z-[60] min-w-[188px] py-1 rounded-md border border-surface-border bg-surface-raised shadow-lg shadow-black/40"
         onContextMenu={(e) => e.preventDefault()}
       >
+        {/* A project (auto group) is the only kind of group with a repository to
+            build a worktree from. */}
+        {!!group?.is_auto && (
+          <>
+            <MenuItem
+              label={t('contextMenu.newWorktreeSession')}
+              onClick={() => { openWorktreeDialog(target.id); close() }}
+            />
+            <Separator />
+          </>
+        )}
         {group && !group.is_auto && (
           <MenuItem label={t('contextMenu.renameGroup')} onClick={() => { startEditGroup(target.id); close() }} />
         )}
