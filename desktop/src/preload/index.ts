@@ -3,7 +3,7 @@ import { IPC } from '../shared/ipc-channels'
 import type {
   ElectronAPI, CreateSessionParams,
   ChatResult, SessionStreamEvent, SsrConfigPayload, EgressConfigPayload,
-  TrustSnapshot,
+  TrustSnapshot, WorktreeCreateSessionParams,
 } from '../shared/types'
 
 const api: ElectronAPI = {
@@ -73,6 +73,12 @@ const api: ElectronAPI = {
   checkoutBranch: (cwd: string, branch: string, strategy) =>
     ipcRenderer.invoke(IPC.GIT_CHECKOUT, cwd, branch, strategy),
   watchGit: (cwd: string) => ipcRenderer.invoke(IPC.GIT_WATCH, cwd),
+
+  gitStatus: (p: { cwd: string }) => ipcRenderer.invoke(IPC.GIT_STATUS, p),
+  gitStash: (p: { cwd: string }) => ipcRenderer.invoke(IPC.GIT_STASH, p),
+  gitCommitWip: (p: { cwd: string }) => ipcRenderer.invoke(IPC.GIT_COMMIT_WIP, p),
+  worktreeCreateSession: (p: WorktreeCreateSessionParams) => ipcRenderer.invoke(IPC.WORKTREE_CREATE_SESSION, p),
+  worktreeRemoveSession: (p: { sessionId: string; force?: boolean }) => ipcRenderer.invoke(IPC.WORKTREE_REMOVE_SESSION, p),
 
   listMcp: (sessionId: string) => ipcRenderer.invoke(IPC.MCP_LIST, sessionId),
   setMcpDisabled: (sessionId: string, name: string, disabled: boolean) =>

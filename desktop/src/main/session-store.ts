@@ -128,6 +128,15 @@ function getDb(): Database.Database {
     if (!pcols.has('is_pinned')) {
       _db.exec('ALTER TABLE sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0')
     }
+    // v7: the session's PROJECT config root, plus the worktree it lives in. The
+    // Python core writes `project_root` into this same db file (it groups by the
+    // same key), so every column here is additive and guarded — an ALTER without
+    // the guard would fail on a db the other side already migrated. NULL
+    // `project_root` keeps a pre-existing row grouped by its own cwd (today's
+    // behaviour); a worktree session's `cwd` stays its own tree either way.
+    if (!pcols.has('project_root')) _db.exec('ALTER TABLE sessions ADD COLUMN project_root TEXT')
+    if (!pcols.has('worktree_name')) _db.exec('ALTER TABLE sessions ADD COLUMN worktree_name TEXT')
+    if (!pcols.has('worktree_branch')) _db.exec('ALTER TABLE sessions ADD COLUMN worktree_branch TEXT')
   }
   return _db
 }
@@ -213,17 +222,24 @@ export function createSession(params: CreateSessionParams): SessionMeta {
   const db = getDb()
   const id = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
   const now = new Date().toISOString()
-  const groupId = _ensureGroupForCwd(params.cwd)
+  // A worktree session runs in its own tree (`cwd`) but belongs to the project
+  // it was created from, so the auto group keys on the project config root —
+  // mirroring the Python side's `project_root or _resolve_root(cwd)`.
+  const projectRoot = params.projectRoot || params.cwd
+  const groupId = _ensureGroupForCwd(projectRoot)
 
   db.prepare(`
-    INSERT INTO sessions (id, title, provider, model, model_id, api_type, cwd, created_at, updated_at, message_count, group_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-  `).run(id, params.title || 'New Session', params.provider, params.model, params.modelId, params.apiType, params.cwd, now, now, groupId)
+    INSERT INTO sessions (id, title, provider, model, model_id, api_type, cwd, project_root, worktree_name, worktree_branch, created_at, updated_at, message_count, group_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+  `).run(id, params.title || 'New Session', params.provider, params.model, params.modelId, params.apiType, params.cwd, projectRoot, params.worktreeName ?? null, params.worktreeBranch ?? null, now, now, groupId)
 
   // Seed the JSONL event-log header so the Python agent's _load_or_create_log
   // finds an existing session to append to (rather than creating a fresh one).
   // `modelId` is the config entry id (SQLite-only); the header carries the
   // display provider/model/apiType, matching Python's SessionStore.create().
+  // `cwd` is the EXECUTION tree and is deliberately not the project root:
+  // Python's SessionHeader.cwd is immutable and drives the fence, the sandbox
+  // workspace, the shadow repo and the turn diff.
   const sessionsDir = join(app.getPath('home'), '.cluxmate', 'sessions')
   mkdirSync(sessionsDir, { recursive: true })
   writeFileSync(
@@ -270,15 +286,19 @@ export function updateSession(
   getDb().prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
 }
 
-export function updateSessionCwd(id: string, cwd: string) {
+export function updateSessionCwd(id: string, cwd: string, projectRoot?: string) {
   const db = getDb()
   const old = db.prepare('SELECT group_id FROM sessions WHERE id = ?').get(id) as { group_id: string | null } | undefined
   const oldGroupId = old?.group_id ?? null
-  const newGroupId = _ensureGroupForCwd(cwd)
+  // `cwd` stays the tree identity; only the auto-group key follows the project
+  // config root, so moving a session into (or out of) a worktree re-groups it
+  // under the repository (mirrors Python's `update_cwd`).
+  const root = projectRoot || cwd
+  const newGroupId = _ensureGroupForCwd(root)
 
   db.prepare(
-    'UPDATE sessions SET cwd = ?, group_id = ?, updated_at = ? WHERE id = ?'
-  ).run(cwd, newGroupId, new Date().toISOString(), id)
+    'UPDATE sessions SET cwd = ?, project_root = ?, group_id = ?, updated_at = ? WHERE id = ?'
+  ).run(cwd, root, newGroupId, new Date().toISOString(), id)
 
   if (oldGroupId && oldGroupId !== newGroupId) {
     _cleanupAutoGroup(oldGroupId)

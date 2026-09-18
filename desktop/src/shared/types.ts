@@ -46,6 +46,17 @@ export interface SessionMeta {
   // The session's selected reasoning level (null → provider default).
   reasoning_effort: string | null
   cwd: string
+  // The project's CONFIG root: the main worktree for a session living in a
+  // linked git worktree, otherwise the session's own cwd. Desktop config readers
+  // (permissions/mcp/skills/settings/memory facts/AGENTS.md) and the trust key
+  // use this; `cwd` stays the execution tree (fence, sandbox, shadow repo,
+  // bridge spawn). null on rows created before this column existed — callers
+  // fall back to `cwd`.
+  project_root: string | null
+  // Set only for a session created in its own git worktree (null otherwise):
+  // the worktree's name and the branch checked out in it.
+  worktree_name: string | null
+  worktree_branch: string | null
   created_at: string
   updated_at: string
   message_count: number
@@ -73,7 +84,35 @@ export interface CreateSessionParams {
   // Denormalized snapshot for display.
   provider: string
   model: string
+  // The project config root to group the session under, when the caller can
+  // resolve one (a worktree session passes its main worktree). Omitted ⇒ `cwd`.
+  projectRoot?: string
+  // Worktree metadata, set only by the worktree-create-session path.
+  worktreeName?: string
+  worktreeBranch?: string
 }
+
+// --- worktrees (cluxmate worktree CLI, driven from the main process) ---
+// Parameters for creating a session inside a fresh git worktree. `cwd` is the
+// project root (the auto group's path); the CLI resolves the real repo root
+// itself, so nothing here needs to know about `.worktrees/`.
+export interface WorktreeCreateSessionParams {
+  cwd: string
+  title?: string
+  // Worktree name; empty ⇒ the CLI derives one from `title`.
+  name?: string
+  // Base ref; empty ⇒ HEAD.
+  base?: string
+  // Branch name; empty ⇒ cluxmate/<slug>.
+  branch?: string
+  modelId: string; apiType: string; provider: string; model: string
+}
+export type WorktreeCreateSessionResult =
+  | { ok: true; session: SessionMeta; path: string; name: string; branch: string }
+  | { ok: false; error: string; message: string; details?: Record<string, unknown> }
+export type WorktreeRemoveResult =
+  | { ok: true }
+  | { ok: false; error: string; message: string; details?: Record<string, unknown> }
 
 // Per-message model + reasoning-effort override carried on chat/send.
 export interface ChatSendOptions {
@@ -928,6 +967,21 @@ export interface ElectronAPI {
   // (incl. one the agent performs via its shell) pushes `git:changed`.
   watchGit: (cwd: string) => Promise<void>
   onGitChanged: (callback: (payload: { cwd: string }) => void) => () => void
+
+  // --- worktrees ---
+  // Creates a git worktree via the `cluxmate worktree` CLI and a session bound
+  // to it. A failure never falls back to a plain session: the caller shows
+  // `message` (`dirty` / `branch-exists` / `not-a-repo` are the useful ones).
+  worktreeCreateSession: (p: WorktreeCreateSessionParams) => Promise<WorktreeCreateSessionResult>
+  // Kills the session's bridge, removes its worktree (and branch) and deletes
+  // the session. A failure leaves both the tree and the session alone.
+  worktreeRemoveSession: (p: { sessionId: string; force?: boolean }) => Promise<WorktreeRemoveResult>
+  // Working-tree state of `cwd` for the worktree dialog's dirty-tree warning:
+  // one entry per changed file, with git's 2-char status + space stripped.
+  gitStatus: (p: { cwd: string }) => Promise<{ ok: boolean; files: string[]; message?: string }>
+  // Reconcile uncommitted changes before creating a worktree.
+  gitStash: (p: { cwd: string }) => Promise<{ ok: boolean; message?: string }>
+  gitCommitWip: (p: { cwd: string }) => Promise<{ ok: boolean; message?: string }>
 
   // Fetch live MCP server status + tool list from the per-session Python
   // process (which owns the MCP client connections). Returns an empty list

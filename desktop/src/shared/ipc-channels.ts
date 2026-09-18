@@ -64,6 +64,12 @@ export const IPC = {
   GIT_CHECKOUT:  'git:checkout',
   GIT_WATCH:     'git:watch',
   GIT_CHANGED:   'git:changed',
+  GIT_STATUS:    'git:status',
+  GIT_STASH:     'git:stash',
+  GIT_COMMIT_WIP: 'git:commit-wip',
+
+  WORKTREE_CREATE_SESSION: 'worktree:create-session',
+  WORKTREE_REMOVE_SESSION: 'worktree:remove-session',
 
   MCP_LIST:        'mcp:list',
   MCP_SET_DISABLED: 'mcp:set-disabled',

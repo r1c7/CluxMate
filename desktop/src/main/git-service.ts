@@ -56,6 +56,36 @@ async function hasChanges(root: string): Promise<boolean> {
   }
 }
 
+// --- shared change-reconciliation primitives ---
+// `checkout` and the worktree dialog must reconcile uncommitted changes the same
+// way, so the two command sequences live here once. Both throw on failure (the
+// callers turn that into their own error shape).
+
+// Stash tracked + untracked changes under a human-readable label.
+export async function stashChanges(root: string, label: string): Promise<void> {
+  await runGit(root, ['stash', 'push', '-u', '-m', label])
+}
+
+// Commit everything as a throwaway WIP commit.
+export async function commitWip(root: string): Promise<void> {
+  await runGit(root, ['add', '-A'])
+  await runGit(root, ['commit', '-m', 'chore: WIP'])
+}
+
+// Porcelain status lines with git's 2-char status code + separator stripped, so
+// callers get plain paths. A directory that is not inside a repo (or where git
+// is missing) yields []; a git failure propagates, because "clean" and "could
+// not tell" must not look alike to a caller about to create a worktree.
+export async function statusLines(cwd: string): Promise<string[]> {
+  const root = await repoRoot(cwd)
+  if (!root) return []
+  const out = await runGit(root, ['status', '--porcelain'])
+  return out
+    .split('\n')
+    .filter((line) => line.length > 3)
+    .map((line) => line.slice(3))
+}
+
 export async function gitInfo(cwd: string): Promise<GitInfo> {
   const root = await repoRoot(cwd)
   if (!root) return { inRepo: false, currentBranch: null, hasChanges: false }
@@ -89,11 +119,10 @@ export async function checkout(
   try {
     switch (strategy) {
       case 'stash':
-        await runGit(root, ['stash', 'push', '-u', '-m', `cluxmate: WIP before switch to ${branch}`])
+        await stashChanges(root, `cluxmate: WIP before switch to ${branch}`)
         break
       case 'commit':
-        await runGit(root, ['add', '-A'])
-        await runGit(root, ['commit', '-m', 'chore: WIP'])
+        await commitWip(root)
         break
       case 'discard':
         await runGit(root, ['reset', '--hard'])
