@@ -90,8 +90,15 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
       await deleteSession(prompt.sessionId)
       closeDeletePrompt()
     } catch (e: any) {
-      // The row is only removed from the store once the main process confirms, so
-      // a failure here means the session is still there — say so, do not close.
+      // Only a row that is STILL there is a failure: `deleteSession` awaits its
+      // groups reload after the main process has already deleted the row, so a
+      // rejection can equally mean "deleted, the list just could not be refreshed"
+      // (see sessionIsGone). Closing on that case reports the success it was; see
+      // the same guard removeWorktreeSession puts around that reload.
+      if (await sessionIsGone(prompt.sessionId)) {
+        closeDeletePrompt()
+        return
+      }
       setMessage(t('deleteWorktree.deleteFailed', { msg: e?.message || tGlobal('error.unknown') }))
     } finally {
       setBusy(false)
@@ -101,13 +108,31 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
   const branch = prompt.branch || t('git.noBranch')
   const dirty = !!info && !info.error && info.files.length > 0
   const clean = !!info && !info.error && info.files.length === 0
+  // A blank name is the identity requestDeleteSession stores when it could not
+  // read the row (the list refresh failed). Naming a worktree that was never read
+  // — `""`, `(no branch)`, a bare `cluxmate worktree remove` — says nothing true,
+  // so both the body and the keep-hint (plain and as the button's tooltip) have an
+  // unnamed variant. The missing-row warning and the three exits are unaffected.
+  const hasName = prompt.name.trim().length > 0
+  const keepHint = hasName
+    ? t('deleteWorktree.keepHint', { name: prompt.name })
+    : t('deleteWorktree.keepHintNoName')
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
       <div className="bg-chat-agent rounded-xl w-[520px] max-h-[85vh] flex flex-col shadow-2xl border border-surface-border">
         <div className="flex items-center justify-between px-6 pt-5 pb-2">
           <h2 className="text-base font-semibold text-ink">{t('deleteWorktree.title')}</h2>
-          <button onClick={closeDeletePrompt} className="text-ink-faint hover:text-ink text-xl">&times;</button>
+          {/* Disabled while busy like the three buttons below: closing unmounts this
+              dialog, and both outcomes report their {ok:false} refusal through local
+              state — removal kills the bridge first and retries once after ~1.5s, so
+              a late refusal would land on a dead component and the user would never
+              learn that nothing was deleted. */}
+          <button
+            onClick={closeDeletePrompt}
+            disabled={busy}
+            className="text-ink-faint hover:text-ink text-xl disabled:opacity-50"
+          >&times;</button>
         </div>
         {info?.path && (
           <div className="px-6 pb-2 text-[11px] text-ink-faint/70 truncate" title={info.path}>{info.path}</div>
@@ -120,11 +145,13 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
           <p className="text-sm text-ink-soft leading-relaxed">
             {/* Same empty-title fallback the sidebar card uses: a row with no
                 title is rendered as "New Session", never as "". */}
-            {t('deleteWorktree.body', {
-              title: prompt.title || t('sessionList.newSession'),
-              name: prompt.name,
-              branch,
-            })}
+            {hasName
+              ? t('deleteWorktree.body', {
+                title: prompt.title || t('sessionList.newSession'),
+                name: prompt.name,
+                branch,
+              })
+              : t('deleteWorktree.bodyNoName', { title: prompt.title || t('sessionList.newSession') })}
           </p>
 
           {loading && <div className="text-[11px] text-ink-faint">{t('common.loading')}</div>}
@@ -162,7 +189,7 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
               the session is gone the UI has no entry to the tree at all, and the
               CLI is the only way left. */}
           <div className="text-[11px] text-ink-faint leading-snug">
-            {t('deleteWorktree.keepHint', { name: prompt.name })}
+            {keepHint}
           </div>
         </div>
 
@@ -180,7 +207,7 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
           <button
             onClick={() => void deleteOnly()}
             disabled={busy}
-            title={t('deleteWorktree.keepHint', { name: prompt.name })}
+            title={keepHint}
             className="px-4 py-2 bg-surface-raised hover:bg-sidebar-hover text-ink text-sm rounded-lg border border-surface-border disabled:opacity-50"
           >{t('deleteWorktree.deleteOnly')}</button>
           {/* Disabled until the worktree facts are in (and when the session row is
@@ -195,6 +222,24 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
       </div>
     </div>
   )
+}
+
+// Did the session row actually go? A rejected `deleteSession` does NOT prove it did
+// not: the action awaits listGroups() AFTER the main process has already deleted the
+// row, and GROUP_LIST deliberately does not swallow its errors, so a failed reload
+// rejects with the deletion done — the action's own `set` never runs, leaving a ghost
+// row in the sidebar. Reporting that as a failure is a lie, and the ghost row keeps a
+// "remove the worktree" entry the main process can only refuse as `not-a-worktree`:
+// exactly the stranded tree this dialog exists to prevent. So the row's fate is
+// re-read rather than assumed. SESSION_LIST is the call the sidebar itself refreshes
+// with, and adopting its answer is also what clears that ghost row; the rows the
+// store already holds are the fallback when even the re-read fails. Same reasoning as
+// the guard removeWorktreeSession puts around its own groups reload.
+async function sessionIsGone(sessionId: string): Promise<boolean> {
+  try {
+    useStore.setState({ sessions: await window.electronAPI.listSessions() })
+  } catch { /* keep the rows we hold — they are the only evidence left */ }
+  return !useStore.getState().sessions.some((s) => s.id === sessionId)
 }
 
 function Warning({ tone, children }: { tone: 'warn' | 'error'; children: React.ReactNode }) {
