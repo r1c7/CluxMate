@@ -28,6 +28,12 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
   const deleteSession = useStore((s) => s.deleteSession)
   const worktreeRemovalInfo = useStore((s) => s.worktreeRemovalInfo)
   const removeWorktreeSession = useStore((s) => s.removeWorktreeSession)
+  // Lives in the store, not here: proving the row is gone and converging on that
+  // proof are one step ("a fresh read that lacks the row is the only proof"), and
+  // the convergence repeats deleteSession's own `set` for this id — session
+  // states, the active pointer, the bridge dots and the groups reload — rather
+  // than reaching into useStore.setState from a component.
+  const adoptDeletedSession = useStore((s) => s.adoptDeletedSession)
 
   const [info, setInfo] = useState<WorktreeRemovalInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -79,9 +85,11 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
     }
   }
 
-  // Outcome 2: the session goes, the tree and its branch stay. deleteSession
-  // converges the sidebar itself; this only closes the prompt afterwards (it must
-  // not also touch sessions/activeSessionId, which would fight that convergence).
+  // Outcome 2: the session goes, the tree and its branch stay. On success
+  // deleteSession has already converged the sidebar, so this only closes the
+  // prompt; on a rejection the store's adoptDeletedSession re-reads and, only if
+  // a fresh read proves the row is gone, finishes the convergence that action's
+  // skipped `set` would have done.
   const deleteOnly = async () => {
     setBusy(true)
     setMessage(null)
@@ -92,10 +100,10 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
     } catch (e: any) {
       // Only a row that is STILL there is a failure: `deleteSession` awaits its
       // groups reload after the main process has already deleted the row, so a
-      // rejection can equally mean "deleted, the list just could not be refreshed"
-      // (see sessionIsGone). Closing on that case reports the success it was; see
-      // the same guard removeWorktreeSession puts around that reload.
-      if (await sessionIsGone(prompt.sessionId)) {
+      // rejection can equally mean "deleted, the list just could not be refreshed".
+      // adoptDeletedSession adopts that proof (and converges the store with it);
+      // an UNPROVEN absence stays a failure rather than a fabricated success.
+      if (await adoptDeletedSession(prompt.sessionId)) {
         closeDeletePrompt()
         return
       }
@@ -222,24 +230,6 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
       </div>
     </div>
   )
-}
-
-// Did the session row actually go? A rejected `deleteSession` does NOT prove it did
-// not: the action awaits listGroups() AFTER the main process has already deleted the
-// row, and GROUP_LIST deliberately does not swallow its errors, so a failed reload
-// rejects with the deletion done — the action's own `set` never runs, leaving a ghost
-// row in the sidebar. Reporting that as a failure is a lie, and the ghost row keeps a
-// "remove the worktree" entry the main process can only refuse as `not-a-worktree`:
-// exactly the stranded tree this dialog exists to prevent. So the row's fate is
-// re-read rather than assumed. SESSION_LIST is the call the sidebar itself refreshes
-// with, and adopting its answer is also what clears that ghost row; the rows the
-// store already holds are the fallback when even the re-read fails. Same reasoning as
-// the guard removeWorktreeSession puts around its own groups reload.
-async function sessionIsGone(sessionId: string): Promise<boolean> {
-  try {
-    useStore.setState({ sessions: await window.electronAPI.listSessions() })
-  } catch { /* keep the rows we hold — they are the only evidence left */ }
-  return !useStore.getState().sessions.some((s) => s.id === sessionId)
 }
 
 function Warning({ tone, children }: { tone: 'warn' | 'error'; children: React.ReactNode }) {

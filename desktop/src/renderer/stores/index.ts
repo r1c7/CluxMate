@@ -494,6 +494,11 @@ interface AppState {
   // can decide.
   requestDeleteSession: (id: string) => Promise<void>
   closeDeletePrompt: () => void
+  // The aftermath of a delete whose row is gone but whose action never converged
+  // (see the implementation). Resolves true only on proof from a FRESH list read
+  // — and then finishes that convergence for the one id; false means "not
+  // confirmed gone", so the caller reports a failure instead of a success.
+  adoptDeletedSession: (sessionId: string) => Promise<boolean>
   // ── worktree sessions ──
   // Open the create dialog for one project (auto group id). Resolves the project
   // directory itself; a group with no resolvable path reports instead of opening.
@@ -1054,6 +1059,72 @@ export const useStore = create<AppState>((set, get) => ({
   // `activeSessionId` themselves (deleteSession; removeWorktreeSession), so
   // clearing the identity here cannot fight either of them.
   closeDeletePrompt: () => set({ deletePrompt: null }),
+
+  // Adopt a delete that really happened but whose action never converged.
+  // deleteSession awaits its groups reload AFTER the main process has already
+  // deleted the row, and GROUP_LIST deliberately does not swallow its errors, so
+  // a failed reload rejects the action with the deletion done and abandons the
+  // `set` it would have run: the row stays in `sessions` as a ghost, its
+  // sessionStates entry survives, `activeSessionId` still points at it (nothing
+  // repairs that while it is non-null) and the bridge dots are never refreshed.
+  //
+  // Only a FRESH, SUCCESSFUL read may prove absence. A failed read proves
+  // nothing at all: the rows the store holds are precisely the list that never
+  // contained the id when this was reached from the blank-identity prompt (that
+  // prompt exists because a local lookup missed), so falling back to them would
+  // report a deletion that never happened as a success. `false` therefore means
+  // "not confirmed gone" and the caller must report a failure.
+  //
+  // The convergence mirrors — for this one id — what deleteSession's own `set`
+  // would have done, including its choice of activeSessionId (null, which App
+  // then repairs), so the two paths cannot drift into different states.
+  adoptDeletedSession: async (sessionId) => {
+    const fresh = await window.electronAPI.listSessions().catch(() => null)
+    if (!fresh) return false
+    if (fresh.some((s) => s.id === sessionId)) {
+      // Still there: the delete did not happen. Adopt the authoritative list
+      // anyway — it is what a stale local row is corrected from.
+      set({ sessions: fresh })
+      return false
+    }
+    // The groups reload gets its OWN try/catch, like removeWorktreeSession's:
+    // the row is already gone, so letting a failed GROUP_LIST — the very failure
+    // that got us here — reject again would abandon the convergence below and
+    // leave the app sitting on the deleted session. The error is reported, not
+    // swallowed, and the held groups are the fallback (worst case an auto group
+    // emptied by this delete lingers until the next load).
+    let groups = get().groups
+    try {
+      groups = await window.electronAPI.listGroups()
+    } catch (e: any) {
+      get().setError(tGlobal('error.worktreeRefreshFailed', { msg: e?.message || tGlobal('error.unknown') }))
+    }
+    // Read the session state map only now, with no await between it and the
+    // `set`: a turn streaming into another session's state during the reload
+    // above must not be rolled back by a stale snapshot.
+    const states = new Map(get().sessionStates)
+    states.delete(sessionId)
+    const nextId = get().activeSessionId === sessionId ? null : get().activeSessionId
+    const ss = nextId ? states.get(nextId) : undefined
+    set({
+      sessions: fresh.filter((s) => s.id !== sessionId),
+      groups,
+      activeSessionId: nextId,
+      sessionStates: states,
+      messages: ss?.messages || [],
+      isStreaming: ss?.isStreaming || false,
+      streamingContent: ss?.streamingContent || '',
+      thinkingContent: ss?.thinkingContent || '',
+      pendingPermission: ss?.pendingPermission || null,
+      pendingBatchEdit: ss?.pendingBatchEdit || null,
+      pendingQuestion: ss?.pendingQuestion || null,
+      pendingTrust: ss?.pendingTrust || null,
+      todos: ss?.todos ?? null,
+    })
+    // Bridge for the deleted session is now gone — refresh sidebar dots.
+    get().refreshBridgeStatuses()
+    return true
+  },
 
   // ── worktree sessions ──
   // The tree is made by the `cluxmate worktree` CLI (main process, §D); the
