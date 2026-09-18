@@ -118,7 +118,13 @@ const api: ElectronAPI = {
 
   createGroup: (name: string) => ipcRenderer.invoke(IPC.GROUP_CREATE, name),
   renameGroup: (id: string, name: string) => ipcRenderer.invoke(IPC.GROUP_RENAME, id, name),
-  deleteGroup: (id: string) => ipcRenderer.invoke(IPC.GROUP_DELETE, id),
+  // The read-only preview FIRST (does this group hold worktrees?), then the
+  // delete with the user's choice. The option is passed through as an object:
+  // `undefined` is the 'keep' default the main process keys on, so an older
+  // caller's `deleteGroup(id)` keeps yesterday's behaviour exactly.
+  groupDeletePreview: (groupId: string) => ipcRenderer.invoke(IPC.GROUP_DELETE_PREVIEW, groupId),
+  deleteGroup: (id: string, opts?: { worktrees?: 'remove' | 'keep' }) =>
+    ipcRenderer.invoke(IPC.GROUP_DELETE, id, opts),
   moveSession: (sessionId: string, groupId: string | null) => ipcRenderer.invoke(IPC.GROUP_MOVE_SESSION, sessionId, groupId),
   moveSessionToProject: (sessionId: string) => ipcRenderer.invoke(IPC.GROUP_MOVE_SESSION_TO_PROJECT, sessionId),
   listGroups: () => ipcRenderer.invoke(IPC.GROUP_LIST),

@@ -507,6 +507,28 @@ const en = {
   'deleteWorktree.missing': 'This session no longer exists — it may have been deleted already.',
   'deleteWorktree.deleteFailed': 'Failed to delete the session: {msg}',
 
+  // ── delete a group/project (the bulk version of the prompt above) ──
+  // Opened only when the group actually holds worktrees; a group without any
+  // keeps the plain confirm. The dirty-file lines deliberately reuse
+  // contextMenu.removeWorktree* and worktree.dirtyFiles — same facts, same words
+  // as the per-session prompt and the "Remove Worktree…" path.
+  'deleteGroup.title': 'Delete Group and Its Worktrees',
+  'deleteGroup.body': 'Deleting the group "{name}" deletes all {count} session(s) inside it. {trees} of them run in a worktree of their own — remove those worktrees too?',
+  'deleteGroup.bodyUnknown': 'Deleting the group "{name}" deletes every session inside it.',
+  'deleteGroup.unnamed': '(unnamed group)',
+  'deleteGroup.previewFailed': 'Could not read what the sessions in this group are running in ({msg}), so no worktree can be removed safely. Deleting the sessions and keeping the worktrees is still available.',
+  'deleteGroup.noneFound': 'There is no worktree to remove right now — no session in this group still runs in one of its own. Deleting the sessions leaves whatever trees they recorded on disk.',
+  'deleteGroup.worktreesTitle': 'Worktrees that would be removed ({count})',
+  'deleteGroup.branch': 'branch {branch}',
+  'deleteGroup.inUse': 'in use by another session',
+  'deleteGroup.blockedTitle': 'A worktree is in use by another session',
+  'deleteGroup.blockedBody': 'The worktree "{name}" still has {blockers} in it, so it cannot be removed. Move or delete that session first.',
+  'deleteGroup.staleNote': '{count} session(s) still record a worktree they no longer run in — those trees are not touched (and this delete cannot reach them).',
+  'deleteGroup.keepHint': 'Note: deleting the sessions alone keeps these worktrees and their branches on disk. Once the sessions are gone they are no longer reachable from the UI, so remove them with: cluxmate worktree list, then cluxmate worktree remove <name>.',
+  'deleteGroup.deleteOnly': 'Delete Sessions Only (Keep the Worktrees)',
+  'deleteGroup.removeAll': 'Remove Worktrees and Delete Sessions',
+  'deleteGroup.removeAllDesc': 'Removes each tree directory and its branch, then deletes every session in the group.',
+
   // ── agent inspector ──
   'inspector.agentTree': 'Agent Tree',
   'inspector.close': 'Close',
@@ -667,6 +689,13 @@ const en = {
   'error.worktreeRefreshFailed': 'The worktree change was applied, but the session list could not be refreshed ({msg}). Re-open the project to see the change.',
   'error.notAWorktreeSession': 'This session does not live in a git worktree.',
   'error.noProjectPath': 'This project has no directory to create a worktree from.',
+  // The group delete's own failures. `groupWorktreesLeftBehind` is the one that
+  // must never be reworded into "the delete failed": the sessions ARE gone and
+  // only the trees remain.
+  'error.groupWorktreesBlocked': 'Cannot remove the worktrees — {msg}',
+  'error.groupDeleteFailed': 'Failed to delete the group: {msg}',
+  'error.groupWorktreesLeftBehind': 'The sessions were deleted, but {count} worktree(s) could not be removed and are still on disk: {names} ({msg})',
+  'error.groupDeletedRefreshFailed': 'The group was deleted, but the session list could not be refreshed ({msg}). Re-open the project to see the change.',
 
   // ── app shell ──
   'app.renderError': 'Render Error',
@@ -1159,6 +1188,27 @@ const zh: Record<keyof typeof en, string> = {
   'deleteWorktree.missing': '该会话已不存在——可能已被删除。',
   'deleteWorktree.deleteFailed': '删除会话失败：{msg}',
 
+  // ── 删除分组/项目（上面对话框的批量版本）──
+  // 只在分组内确实有工作树时打开；没有工作树的分组仍走原来的 confirm。
+  // 未提交文件的行刻意复用 contextMenu.removeWorktree* 与 worktree.dirtyFiles：
+  // 与单会话弹窗、"移除工作树…"路径描述同一批事实，用同一套措辞。
+  'deleteGroup.title': '删除分组及其工作树',
+  'deleteGroup.body': '删除分组“{name}”会一并删除其中的全部 {count} 个 Session，其中 {trees} 个运行在自己的工作树里——是否连同这些工作树一起移除？',
+  'deleteGroup.bodyUnknown': '删除分组“{name}”会一并删除其中的所有 Session。',
+  'deleteGroup.unnamed': '（未命名分组）',
+  'deleteGroup.previewFailed': '无法读取该分组内会话的运行位置（{msg}），因此无法安全地移除任何工作树。仍可选择“仅删除会话、保留工作树”。',
+  'deleteGroup.noneFound': '当前没有可移除的工作树——分组内已没有会话仍运行在自己的工作树里。仅删除会话会把这些会话记录过的工作树留在磁盘上。',
+  'deleteGroup.worktreesTitle': '将被移除的工作树（{count}）',
+  'deleteGroup.branch': '分支 {branch}',
+  'deleteGroup.inUse': '被其他会话占用',
+  'deleteGroup.blockedTitle': '有工作树被其他会话占用',
+  'deleteGroup.blockedBody': '工作树“{name}”中仍有 {blockers}，因此无法移除。请先移动或删除该会话。',
+  'deleteGroup.staleNote': '有 {count} 个会话仍记录着它们已不再运行的工作树——那些树不会被触碰（本次删除也触及不到它们）。',
+  'deleteGroup.keepHint': '注意：仅删除会话会把这些工作树及其分支留在磁盘上。会话删除后 UI 里再无入口，只能在命令行里移除：先用 cluxmate worktree list 找到它，再用 cluxmate worktree remove <name> 删除。',
+  'deleteGroup.deleteOnly': '仅删除会话（保留工作树）',
+  'deleteGroup.removeAll': '移除工作树并删除会话',
+  'deleteGroup.removeAllDesc': '逐个删除工作树目录及其分支，然后删除分组内的所有会话。',
+
   // ── agent inspector ──
   'inspector.agentTree': 'Agent 树',
   'inspector.close': '关闭',
@@ -1317,6 +1367,12 @@ const zh: Record<keyof typeof en, string> = {
   'error.worktreeRefreshFailed': '工作树更改已生效，但 Session 列表刷新失败（{msg}）。请重新打开项目查看更改。',
   'error.notAWorktreeSession': '该 Session 不在 git 工作树中。',
   'error.noProjectPath': '该项目没有可用于创建工作树的目录。',
+  // 分组删除自己的失败文案。groupWorktreesLeftBehind 绝不能改写成"删除失败"：
+  // 会话确实已经删除，留在磁盘上的只有工作树。
+  'error.groupWorktreesBlocked': '无法移除工作树——{msg}',
+  'error.groupDeleteFailed': '删除分组失败：{msg}',
+  'error.groupWorktreesLeftBehind': '会话已删除，但有 {count} 个工作树未能移除、仍留在磁盘上：{names}（{msg}）',
+  'error.groupDeletedRefreshFailed': '分组已删除，但 Session 列表刷新失败（{msg}）。请重新打开项目查看更改。',
 
   // ── app shell ──
   'app.renderError': '渲染错误',

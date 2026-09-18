@@ -114,6 +114,62 @@ export type WorktreeRemoveResult =
   | { ok: true }
   | { ok: false; error: string; message: string; details?: Record<string, unknown> }
 
+// --- deleting a whole group/project (and, on request, the trees inside it) ---
+// The authoritative preview of a group delete: what the sessions inside it are
+// running in, before anything is touched. Every field is a FACT read from the
+// session rows (the occupancy decision) or from git (`dirty`); `dirtyError` is
+// set when git could not be read, and must never be rendered as "clean".
+export interface GroupDeleteWorktree {
+  // The session whose recorded name resolved to this tree (the row that anchors
+  // the removal). A tree two sessions share appears ONCE.
+  sessionId: string
+  title: string
+  name: string
+  branch: string
+  // The tree's absolute path — what the CLI would be handed.
+  path: string
+  dirty: string[]
+  dirtyError: string | null
+}
+
+// A session that still records a worktree it no longer runs in: it is skipped by
+// a 'remove' (nothing is deleted on a stale name) and blocks nothing.
+export interface GroupDeleteStaleWorktree {
+  sessionId: string
+  title: string
+  name: string
+}
+
+export interface GroupDeleteBlocker {
+  id: string
+  title: string
+}
+
+// A tree that CANNOT be removed because sessions from outside the group are
+// still living in it. Named per tree, so the user knows which one to clear.
+export interface GroupDeleteBlockedWorktree {
+  sessionId: string
+  title: string
+  name: string
+  blockers: GroupDeleteBlocker[]
+}
+
+export interface GroupDeletePreview {
+  // Total sessions in the group (the ones the delete would remove).
+  sessions: number
+  worktrees: GroupDeleteWorktree[]
+  stale: GroupDeleteStaleWorktree[]
+  blocked: GroupDeleteBlockedWorktree[]
+}
+
+// `removed` counts TREES actually removed (0 on the 'keep' path). `failed` lists
+// the trees that stayed on disk — a git-level failure (a lock, or a session filed
+// into the tree mid-run) never aborts the rest of the batch, so the renderer has
+// to report these honestly: the sessions ARE deleted, the trees are NOT.
+export type GroupDeleteResult =
+  | { ok: true; removed: number; failed: { name: string; message: string }[] }
+  | { ok: false; error: string; message: string }
+
 // Per-message model + reasoning-effort override carried on chat/send.
 export interface ChatSendOptions {
   modelId: string
@@ -824,7 +880,16 @@ export interface ElectronAPI {
   // --- projects ---
   createGroup: (name: string) => Promise<GroupMeta>
   renameGroup: (id: string, name: string) => Promise<void>
-  deleteGroup: (id: string) => Promise<void>
+  // Read-only: what a worktree-removing delete of this group would do, so the
+  // prompt can show it BEFORE anything is deleted. Never deletes anything.
+  groupDeletePreview: (groupId: string) => Promise<GroupDeletePreview>
+  // Delete a group and every session inside it. `worktrees: 'remove'` also
+  // removes each tree those sessions recorded — validating all of them first and
+  // refusing as a whole when one is occupied; the default ('keep', and what a
+  // caller that passes nothing gets) is the historical behaviour and touches no
+  // tree. A `{ok:false}` refusal must be surfaced verbatim; on success a
+  // non-empty `failed` means the sessions are gone but those trees are not.
+  deleteGroup: (id: string, opts?: { worktrees?: 'remove' | 'keep' }) => Promise<GroupDeleteResult>
   moveSession: (sessionId: string, groupId: string | null) => Promise<void>
   moveSessionToProject: (sessionId: string) => Promise<void>
   renameSession: (id: string, title: string) => Promise<void>

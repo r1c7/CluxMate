@@ -543,14 +543,15 @@ export default function SessionList({ width }: { width: number }) {
   const mainView = useStore((s) => s.mainView)
   const switchSession = useStore((s) => s.switchSession)
   // Every delete entry in this file (the row ✕, the search-result ✕ and both
-  // group variants) goes through requestDeleteSession, not deleteSession: an
-  // ordinary session is deleted immediately, a worktree session asks first.
+  // group variants) goes through a `request…` action, not the raw delete: an
+  // ordinary session (or a group holding no worktrees) is deleted immediately,
+  // while one that would strand a tree asks first.
   const requestDeleteSession = useStore((s) => s.requestDeleteSession)
   const createSession = useStore((s) => s.createSession)
   const openWorktreeDialog = useStore((s) => s.openWorktreeDialog)
   const createGroup = useStore((s) => s.createGroup)
   const renameGroup = useStore((s) => s.renameGroup)
-  const deleteGroup = useStore((s) => s.deleteGroup)
+  const requestDeleteGroup = useStore((s) => s.requestDeleteGroup)
   const moveSession = useStore((s) => s.moveSession)
   const renameSession = useStore((s) => s.renameSession)
   const showSkills = useStore((s) => s.showSkills)
@@ -808,9 +809,7 @@ export default function SessionList({ width }: { width: number }) {
                   onSessionRename={(id, title) => renameSession(id, title)}
                   onSessionContextMenu={handleSessionContextMenu}
                   onRenameGroup={(id, name) => renameGroup(id, name)}
-                  onDeleteGroup={(id) => {
-                    if (window.confirm(t('sessionList.deleteProjectConfirm', { name: g.name }))) deleteGroup(id)
-                  }}
+                  onDeleteGroup={(id) => { void requestDeleteGroup(id) }}
                   onGroupContextMenu={handleGroupContextMenu}
                   onDrop={handleDropOnGroup(g.id)}
                   dragOver={dragOverGroupId === g.id}
@@ -866,9 +865,7 @@ export default function SessionList({ width }: { width: number }) {
                   onSessionRename={(id, title) => renameSession(id, title)}
                   onSessionContextMenu={handleSessionContextMenu}
                   onRenameGroup={(id, name) => renameGroup(id, name)}
-                  onDeleteGroup={(id) => {
-                    if (window.confirm(t('sessionList.deleteGroupConfirm', { name: g.name }))) deleteGroup(id)
-                  }}
+                  onDeleteGroup={(id) => { void requestDeleteGroup(id) }}
                   onGroupContextMenu={handleGroupContextMenu}
                   onDrop={handleDropOnGroup(g.id)}
                   dragOver={dragOverGroupId === g.id}

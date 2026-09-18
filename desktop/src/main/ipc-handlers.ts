@@ -3,7 +3,7 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot, SessionMeta, WorktreeCreateSessionParams, WorktreeCreateSessionResult, WorktreeRemoveResult } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot, SessionMeta, WorktreeCreateSessionParams, WorktreeCreateSessionResult, WorktreeRemoveResult, GroupDeletePreview, GroupDeleteResult } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { bridgesToRestart, planTrustCall, projectConfigRoot, trustTargetDir } from '../shared/trust-rules'
 import { canonicalCwdKey } from './cwd-key'
@@ -23,7 +23,7 @@ import { NO_CONTAINER } from '../shared/worktree-container.ts'
 // The containment test and the occupancy guard are PURE (no electron import), so
 // desktop/tests can exercise them directly with the Node runner — this file
 // cannot be loaded there. See the module header.
-import { isInsideOrEqual, sessionsInTree } from './worktree-guard'
+import { isInsideOrEqual, planTreeRemovals, sessionsInTree, sessionsInTreeExcluding } from './worktree-guard'
 import { version as appVersion } from '../../package.json'
 
 // §B: every tree CluxMate creates lives in `<repo_root>/.worktrees/<name>`, and a
@@ -89,6 +89,59 @@ function worktreeInUseResult(blockers: SessionMeta[]): WorktreeRemoveResult {
         ? `This worktree is in use by another session: "${first}". Delete that session, or move it to another directory, and then remove the worktree.`
         : `This worktree is in use by ${blockers.length} other sessions, starting with "${first}". Delete those sessions, or move them to another directory, and then remove the worktree.`,
   }
+}
+
+// The half of the removal sequence BOTH delete paths share — the single-session
+// 「移除工作树」 handler and the bulk group delete — in the ONE order that works
+// on Windows:
+//
+//   1. kill the bridges holding the directory and AWAIT them (a live process's
+//      cwd LOCKS the directory, so `git worktree remove` would fail against a
+//      running agent), dropping each from the map first so its exit notification
+//      cannot race this caller's own bookkeeping;
+//   2. ASK AGAIN, because that kill is an `await`: the check the caller ran is
+//      now several turns of the event loop old, and SESSION_UPDATE_CWD can file a
+//      session into this tree from the renderer in the window between them. THIS
+//      re-check is the authoritative one — it is the last statement before the
+//      delete — and a refusal here costs only bridges already killed: a cold
+//      bridge respawns on the session's next use, whereas deleting a directory
+//      another session is working in discards its cwd and anything uncommitted;
+//   3. let the CLI remove the tree, with the project CONFIG root (§E) as its cwd
+//      (the main worktree, where `.worktrees/` lives) and the tree's ABSOLUTE
+//      path as its target — never the bare name, and never a path the caller did
+//      not verify. The CLI's own container check is then a second gate.
+//
+// `session` is the row the CLI call is anchored on, `killIds` every session
+// still dwelling in the tree (whichever tree each of them THINKS it is in — a
+// stale name or a plain row filed here is just as capable of locking it), and
+// `deletingIds` the sessions the caller is deleting right now: they do not block
+// each other (see `sessionsInTreeExcluding`). Returning the CLI's own result —
+// never a synthesized success — is what keeps "nothing is deleted unless the CLI
+// actually removed the tree" true for both callers.
+//
+// The declared type is the IPC reply's `WorktreeRemoveResult` (what the
+// per-session handler has always answered with): the object handed back at
+// runtime is still the CLI's own payload, untouched.
+async function removeTreeNow(
+  session: SessionMeta,
+  target: string,
+  killIds: readonly string[],
+  deletingIds: ReadonlySet<string>,
+  force: boolean,
+): Promise<WorktreeRemoveResult> {
+  for (const id of killIds) {
+    const bridge = bridges.get(id)
+    if (!bridge) continue
+    bridges.delete(id)
+    try { await bridge.kill() } catch { /* already gone */ }
+  }
+  const lateBlockers = sessionsInTreeExcluding(target, sessionStore.listSessions(), deletingIds)
+  if (lateBlockers.length > 0) return worktreeInUseResult(lateBlockers)
+  return worktreeRemoveWithRetry({
+    cwd: projectConfigRoot(session, session.cwd),
+    target,
+    force,
+  })
 }
 
 const bridges = new Map<string, AgentBridge>()
@@ -858,40 +911,15 @@ export function registerIpcHandlers() {
       // session exactly as it was.
       const blockers = sessionsInTree(target, sessionStore.listSessions(), sid)
       if (blockers.length > 0) return worktreeInUseResult(blockers)
-      // Kill the bridge and AWAIT it BEFORE removing the directory: on Windows a
-      // live process's cwd LOCKS the directory, so `git worktree remove` would
-      // fail against a running agent. Dropping it from the map first keeps its
-      // exit notification from racing this handler's own bookkeeping.
-      const bridge = bridges.get(sid)
-      if (bridge) {
-        bridges.delete(sid)
-        try { await bridge.kill() } catch { /* already gone */ }
-      }
-      // …and ASK AGAIN, because that kill is an `await`: the check above is now
-      // several turns of the event loop old, and SESSION_UPDATE_CWD can file a
-      // session into this tree from the renderer in the window between them (the
-      // guard reads the session's `cwd`, so a plain "change working directory" is
-      // enough). THIS second check is the authoritative one — it is the last
-      // statement before the delete — and a refusal here costs only this
-      // session's own bridge, already killed: a cold bridge respawns on the
-      // session's next use, exactly as it does on the `!result.ok` path below,
-      // whereas deleting a tree another session is working in discards its
-      // working directory and anything uncommitted in it. Still a pure read.
-      const lateBlockers = sessionsInTree(target, sessionStore.listSessions(), sid)
-      if (lateBlockers.length > 0) return worktreeInUseResult(lateBlockers)
-      // The CLI resolves the tree from the repository, so hand it the project
-      // CONFIG root (§E) — the main worktree, where `.worktrees/` lives. The
-      // TARGET is the tree's absolute path, never the bare name: the path is what
-      // this handler just verified, and the CLI's own container check (inside
-      // `<repo_root>/.worktrees`, never the main worktree) is then a second gate
-      // against a name that resolves somewhere unexpected. Default force:
-      // removing the tree discards whatever is left in it, which is what the user
-      // asked for.
-      const result = await worktreeRemoveWithRetry({
-        cwd: projectConfigRoot(session, session.cwd),
-        target,
-        force: params.force !== false,
-      })
+      // Kill the bridge, ASK AGAIN, and let the CLI remove the tree — the whole
+      // sequence lives in `removeTreeNow` so this handler and the bulk group
+      // delete cannot drift apart. For this caller the deletion set is exactly
+      // this one session, which makes the helper's occupancy re-check
+      // (`sessionsInTreeExcluding` with `{sid}`) the same answer as the
+      // `sessionsInTree(target, …, sid)` check above — pinned by a test in
+      // desktop/tests/worktree-guard.test.ts. The refusal codes, the messages and
+      // the absolute-path target are this handler's own, unchanged.
+      const result = await removeTreeNow(session, target, [sid], new Set([sid]), params.force !== false)
       // The tree is still on disk, so the session stays usable: report the
       // failure and leave the row, its logs and its (now cold) bridge alone —
       // the next interaction respawns it.
@@ -1020,14 +1048,172 @@ export function registerIpcHandlers() {
     sessionStore.renameGroup(id, name)
   })
 
-  ipcMain.handle(IPC.GROUP_DELETE, (_, id: string) => {
+  // ── a whole group's worktrees ────────────────────────────────────────────
+  // Deleting a group/project used to remove every session inside it without
+  // touching a single tree, stranding those trees and their branches on disk with
+  // no UI left to reach them — the exact harm the per-session prompt exists to
+  // prevent. The bulk path now offers the same choice, and it needs the same
+  // facts: which sessions still run in a tree of their own, which recorded names
+  // are stale, and who (from OUTSIDE the group) is still in each tree.
+  //
+  // One function computes the phase-1 plan for both channels, so the preview the
+  // user reads and the batch the handler executes can never disagree: the
+  // preview merely adds the dirty-file read the dialog shows. Pure reads only —
+  // session rows plus the recorded names; no bridge is killed, no CLI is called.
+  function groupTreePlan(groupId: string) {
+    const all = sessionStore.listSessions()
+    const groupSessions = all.filter((s) => s.group_id === groupId)
+    // The deletion set is the WHOLE group: those sessions are all going
+    // regardless of the worktree choice, so they must not block each other.
+    const deletingIds = new Set(groupSessions.map((s) => s.id))
+    return { groupSessions, deletingIds, plan: planTreeRemovals(all, deletingIds, worktreePathForSession) }
+  }
+
+  // The authoritative, READ-ONLY description of what 'remove' would do to this
+  // group's trees. `dirty` is read per tree with `statusLines`; a git failure is
+  // reported as `dirtyError`, never degraded to "clean" — "could not tell" and
+  // "nothing to lose" must not look alike on a prompt that is about to delete a
+  // directory.
+  async function buildGroupDeletePreview(groupId: string): Promise<GroupDeletePreview> {
+    const { groupSessions, plan } = groupTreePlan(groupId)
+    const worktrees = await Promise.all(plan.removable.map(async (c) => {
+      let dirty: string[] = []
+      let dirtyError: string | null = null
+      try {
+        dirty = await gitService.statusLines(c.target)
+      } catch (e: any) {
+        dirtyError = e?.message || 'git status failed'
+      }
+      return {
+        // The tree's owner names it; the path is what the CLI would be handed.
+        sessionId: c.owner.id,
+        title: c.owner.title || '',
+        name: (c.owner.worktree_name || '').trim(),
+        branch: c.owner.worktree_branch || '',
+        path: c.target,
+        dirty,
+        dirtyError,
+      }
+    }))
+    // Every candidate, blocked or not: the dialog shows the whole inventory and
+    // marks the ones that cannot go, instead of hiding a tree the user is about
+    // to lose sight of.
+    const blocked = plan.removable
+      .filter((c) => c.blockers.length > 0)
+      .map((c) => ({
+        sessionId: c.owner.id,
+        title: c.owner.title || '',
+        name: (c.owner.worktree_name || '').trim(),
+        blockers: c.blockers.map((b) => ({ id: b.id, title: b.title || '' })),
+      }))
+    return {
+      sessions: groupSessions.length,
+      worktrees,
+      stale: plan.stale.map((s) => ({
+        sessionId: s.session.id,
+        title: s.session.title || '',
+        name: s.name,
+      })),
+      blocked,
+    }
+  }
+
+  // The bulk counterpart of `worktreeInUseResult`, and deliberately NOT that
+  // function: it is worded for one session ("This worktree…"), and the
+  // per-session path's refusal text must not move. A group can hold several
+  // trees, so this names WHICH tree is blocked, by WHOM, and says outright that
+  // nothing was deleted — the phase-1 refusal deletes nothing at all.
+  function groupWorktreeInUseResult(
+    blocked: { owner: SessionMeta; blockers: SessionMeta[] }[],
+  ): GroupDeleteResult {
+    const first = blocked[0]
+    const tree = (first.owner.worktree_name || '').trim() || first.owner.cwd
+    const owner = first.owner.title || first.owner.id
+    const blocker = first.blockers[0]
+    const blockerName = blocker.title || blocker.id
+    const blockerText = first.blockers.length === 1
+      ? `another session: "${blockerName}"`
+      : `${first.blockers.length} other sessions, starting with "${blockerName}"`
+    const more = blocked.length > 1
+      ? ` ${blocked.length - 1} more worktree${blocked.length > 2 ? 's' : ''} in this group ${blocked.length > 2 ? 'are' : 'is'} in use too.`
+      : ''
+    return {
+      ok: false,
+      error: 'worktree-in-use',
+      message:
+        `The worktree "${tree}" of session "${owner}" is in use by ${blockerText}.` +
+        `${more} Nothing has been deleted yet: move or delete that session, and then delete the group.`,
+    }
+  }
+
+  ipcMain.handle(IPC.GROUP_DELETE_PREVIEW, (_, id: string) => buildGroupDeletePreview(id))
+
+  ipcMain.handle(IPC.GROUP_DELETE, async (_, id: string, opts?: { worktrees?: 'remove' | 'keep' }): Promise<GroupDeleteResult> => {
     // Deleting a group/project deletes ALL sessions inside it (their bridges,
     // DB rows, and on-disk .jsonl logs), then the group row itself. Auto
     // groups are also removed by the last session's cleanup, but the explicit
     // delete is harmless and covers user groups.
-    const groupSessions = sessionStore.listSessions().filter((s) => s.group_id === id)
-    for (const s of groupSessions) deleteSessionFully(s.id)
+    //
+    // 'keep' — and the absent option, which is what a renderer from before this
+    // choice sends — is EXACTLY the historical behaviour: no tree is touched.
+    // The default staying compatible is deliberate.
+    if (opts?.worktrees !== 'remove') {
+      const groupSessions = sessionStore.listSessions().filter((s) => s.group_id === id)
+      for (const s of groupSessions) deleteSessionFully(s.id)
+      sessionStore.deleteGroup(id)
+      return { ok: true, removed: 0, failed: [] }
+    }
+
+    // ── phase 1: validate EVERY tree before anything is killed or deleted ──
+    // Pure reads (the plan) plus nothing else. One occupied tree refuses the
+    // whole batch: a partial delete would leave the user with half a group and
+    // trees they can no longer reach, and the refusal is answerable (move the
+    // blocking session, then delete the group).
+    const { deletingIds, plan } = groupTreePlan(id)
+    const blocked = plan.removable.filter((c) => c.blockers.length > 0)
+    if (blocked.length > 0) return groupWorktreeInUseResult(blocked)
+
+    // ── phase 2: execute ──
+    // Tree by tree — kill the bridges dwelling in it, re-check its occupancy,
+    // remove it — then every session row, then the group. A tree that fails at
+    // the git level (a lock, or a session filed into it between the two phases)
+    // must NOT abandon the rest: the sessions are all going anyway, and stopping
+    // here would leave a half-deleted group with no report of what stayed behind.
+    // The honest outcome is to finish, count what went, and name what did not.
+    let removed = 0
+    const failed: { name: string; message: string }[] = []
+    for (const c of plan.removable) {
+      const result = await removeTreeNow(
+        c.owner,
+        c.target,
+        c.occupants.map((o) => o.id),
+        deletingIds,
+        true,
+      )
+      if (result.ok) {
+        removed++
+        continue
+      }
+      failed.push({
+        name: (c.owner.worktree_name || '').trim() || c.target,
+        message: result.message,
+      })
+    }
+    // The rows are re-read HERE rather than reused from the phase-1 snapshot: the
+    // tree work above can take seconds (a bridge kill each, a git retry after
+    // ~1.5s), and a session created into this group in the meantime must not
+    // survive holding a group_id that no longer exists — which is what "deletes
+    // ALL sessions inside it" means, and what the 'keep' branch above does. Such a
+    // latecomer is NOT in `deletingIds`, so if it filed itself into one of the
+    // trees being removed, the re-check inside `removeTreeNow` refuses that tree
+    // (reported in `failed`) instead of deleting a directory a live session sits
+    // in.
+    for (const s of sessionStore.listSessions().filter((s) => s.group_id === id)) deleteSessionFully(s.id)
     sessionStore.deleteGroup(id)
+    // `removed` counts TREES, not sessions: the sessions are gone either way, and
+    // the renderer has to say so honestly when `failed` is non-empty (the tree is
+    // still on disk and only the CLI can remove it now).
+    return { ok: true, removed, failed }
   })
 
   ipcMain.handle(IPC.GROUP_MOVE_SESSION, (_, sessionId: string, groupId: string | null) => {

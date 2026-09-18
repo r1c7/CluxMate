@@ -98,6 +98,7 @@ export const IPC = {
   GROUP_CREATE: 'group:create',
   GROUP_RENAME: 'group:rename',
   GROUP_DELETE: 'group:delete',
+  GROUP_DELETE_PREVIEW: 'group:delete-preview',
   GROUP_MOVE_SESSION: 'group:move-session',
   GROUP_MOVE_SESSION_TO_PROJECT: 'group:move-session-to-project',
   GROUP_LIST: 'group:list',

@@ -17,6 +17,7 @@ import ContextViewer from './components/ContextViewer'
 import ContextMenu from './components/ContextMenu'
 import WorktreeDialog from './components/WorktreeDialog'
 import DeleteWorktreeSessionDialog from './components/DeleteWorktreeSessionDialog'
+import DeleteGroupDialog from './components/DeleteGroupDialog'
 import SkillsView from './components/SkillsView'
 import McpView from './components/McpView'
 import HooksView from './components/HooksView'
@@ -77,6 +78,9 @@ function AppInner() {
   // sidebar's ✕ / context menu / search results, all of which can unmount, so it
   // is driven by store state and mounted here too.
   const deletePrompt = useStore((s) => s.deletePrompt)
+  // Same again for the group version: the group ✕ and the group context menu can
+  // both unmount the sidebar (or the whole menu) while it is open.
+  const deleteGroupPrompt = useStore((s) => s.deleteGroupPrompt)
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title || t('chat.newSession')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [ready, setReady] = useState(false)
@@ -309,6 +313,7 @@ function AppInner() {
           (SessionList) is conditionally rendered — see the selector above. */}
       {worktreeDialog && <WorktreeDialog path={worktreeDialog.path} />}
       {deletePrompt && <DeleteWorktreeSessionDialog prompt={deletePrompt} />}
+      {deleteGroupPrompt && <DeleteGroupDialog prompt={deleteGroupPrompt} />}
       <Toast />
     </div>
   )
