@@ -292,6 +292,192 @@ def test_untrusted_permissions_refuse_always_allow_writes(tmp_path, monkeypatch)
     assert not (cwd / ".cluxmate" / "permissions.json").exists()
 
 
+def test_always_allow_verdict_separates_fixable_from_forbidden(tmp_path, monkeypatch):
+    """Why the gate returns a REASON and not just False.
+
+    "untrusted" is recoverable in the same click (the approval card can trust the
+    project right there), while escalation / critical / a non-grantable dangerous
+    tool never become grantable in any directory. A bare False cannot tell those
+    apart, and the card used to guess — which is how "always allow" ended up
+    invisible in exactly the directory that needed it.
+    """
+    cwd = _project(tmp_path, monkeypatch)
+
+    from cluxmate.core.permissions import PermissionPolicy
+
+    untrusted = PermissionPolicy(str(cwd), trusted=False)
+    assert untrusted.always_allow_verdict("write_file", "write") == "untrusted"
+    # …and the same call WOULD be grantable once trusted — the question the
+    # approval path asks before it adopts the trust answer.
+    assert untrusted.always_allow_verdict("write_file", "write", assume_trusted=True) == "ok"
+    assert untrusted.is_always_allowable("write_file", "write", assume_trusted=True) is True
+
+    trusted = PermissionPolicy(str(cwd), trusted=True)
+    assert trusted.always_allow_verdict("write_file", "write") == "ok"
+
+    for policy in (untrusted, trusted):
+        assert policy.always_allow_verdict("bash", "dangerous", escalated=True) == "escalated"
+        assert policy.always_allow_verdict("bash", "critical") == "critical"
+        assert policy.always_allow_verdict("read_file", "safe") == "safe"
+        assert policy.always_allow_verdict("some_mcp_tool", "dangerous") == "not-grantable"
+    # Even asking "if it were trusted" keeps the structural refusals structural.
+    assert untrusted.always_allow_verdict("bash", "dangerous", escalated=True, assume_trusted=True) == "escalated"
+
+
+def test_mark_trusted_unlocks_writes_and_merges_the_file(tmp_path, monkeypatch):
+    cwd = _project(tmp_path, monkeypatch)
+    shipped = cwd / ".cluxmate" / "permissions.json"
+    shipped.write_text(json.dumps({"always_allow_tools": ["read_file"]}), encoding="utf-8")
+
+    from cluxmate.core.permissions import PermissionPolicy
+
+    policy = PermissionPolicy(str(cwd), trusted=False)
+    assert policy.trusted is False
+    assert policy.snapshot()["always_allow_tools"] == []  # withheld, not deleted
+    assert policy.add_always_allow("write_file") is False  # refused: nothing written
+    assert json.loads(shipped.read_text("utf-8"))["always_allow_tools"] == ["read_file"]
+
+    policy.mark_trusted()
+
+    assert policy.trusted is True
+    # The flip LOADS the shipped rule (merge, never replace) and the new grant
+    # lands beside it — a directory that shipped permissions.json must not lose
+    # them to the consent that unlocked it.
+    assert policy.add_always_allow("write_file") is True
+    assert json.loads(shipped.read_text("utf-8"))["always_allow_tools"] == ["read_file", "write_file"]
+    assert policy.is_auto_approved("write_file", "write") is True
+
+
+async def _registered(cbs, call_id: str) -> None:
+    """Wait until on_tool_start has parked the call (it runs on the turn's task)."""
+    import asyncio
+
+    for _ in range(200):
+        if call_id in cbs._pending_names:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"tool_start never registered {call_id}")
+
+
+@pytest.mark.asyncio
+async def test_approval_without_trust_intent_grants_nothing(tmp_path, monkeypatch):
+    """A click that could not be persisted is an ordinary approval, in the log too."""
+    import asyncio
+
+    cwd = _project(tmp_path, monkeypatch)
+
+    from cluxmate.core.jsonrpc_server import JsonRpcCallbacks
+    from cluxmate.core.permissions import PermissionPolicy
+
+    policy = PermissionPolicy(str(cwd), trusted=False)
+    cbs = JsonRpcCallbacks(policy)
+    task = asyncio.create_task(
+        cbs.on_tool_start("write_file", {"file_path": "x.txt"}, "c1", "write")
+    )
+    await _registered(cbs, "c1")
+    try:
+        outcome = cbs.resolve_tool("c1", True, always=True)
+        settled = await asyncio.wait_for(task, timeout=5)
+    finally:
+        cbs.cancel()
+
+    assert settled.approved is True  # the call itself still runs
+    assert settled.decision == "user"  # …but the audit must not claim a grant
+    assert outcome["always"] is False and outcome["trust"] is None
+    assert not (cwd / ".cluxmate" / "permissions.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_approval_can_trust_the_project_and_land_the_grant(tmp_path, monkeypatch):
+    """The dead end this closes.
+
+    A directory that ships no config is never asked about (the prompt needs
+    findings), so the grant that would create the config was refused for exactly
+    as long as the config did not exist: "always allow" could never stick. One
+    click now answers both questions.
+    """
+    import asyncio
+
+    cwd = _project(tmp_path, monkeypatch)
+    (cwd / ".cluxmate").rmdir()  # a brand-new project: nothing on disk at all
+
+    from cluxmate.core.jsonrpc_server import JsonRpcCallbacks
+    from cluxmate.core.permissions import PermissionPolicy
+
+    policy = PermissionPolicy(str(cwd), trusted=False)
+    seen: dict[str, bool] = {}
+
+    def adopter():
+        seen["called"] = True
+        policy.mark_trusted()
+        return {
+            "cwd": str(cwd), "status": "trusted", "source": "registry",
+            "findings": [], "store": {str(cwd): "trusted"},
+        }
+
+    cbs = JsonRpcCallbacks(policy, trust_adopter=adopter)
+    task = asyncio.create_task(
+        cbs.on_tool_start("write_file", {"file_path": "x.txt"}, "c1", "write")
+    )
+    await _registered(cbs, "c1")
+    try:
+        outcome = cbs.resolve_tool("c1", True, always=True, trust=True)
+        settled = await asyncio.wait_for(task, timeout=5)
+    finally:
+        cbs.cancel()
+
+    assert seen.get("called") is True
+    assert outcome["trust"]["status"] == "trusted"
+    assert outcome["always"] is True and outcome["decision"] == "always"
+    assert settled.decision == "always"
+    written = json.loads((cwd / ".cluxmate" / "permissions.json").read_text("utf-8"))
+    assert written["always_allow_tools"] == ["write_file"]
+
+
+@pytest.mark.asyncio
+async def test_trust_intent_cannot_unlock_a_forbidden_call(tmp_path, monkeypatch):
+    """Consent to trust must not buy an escalation (or a critical) a grant.
+
+    The button is not offered for these, but the engine is the authority: a
+    caller that sends `trust` anyway gets an ordinary approval and NO project
+    trust recorded.
+    """
+    import asyncio
+
+    cwd = _project(tmp_path, monkeypatch)
+
+    from cluxmate.core.jsonrpc_server import JsonRpcCallbacks
+    from cluxmate.core.permissions import PermissionPolicy
+
+    policy = PermissionPolicy(str(cwd), trusted=False)
+    seen: dict[str, bool] = {}
+
+    def adopter():  # pragma: no cover - must never run
+        seen["called"] = True
+        policy.mark_trusted()
+        return {"cwd": str(cwd), "status": "trusted", "source": "registry", "findings": [], "store": {}}
+
+    cbs = JsonRpcCallbacks(policy, trust_adopter=adopter)
+    task = asyncio.create_task(
+        cbs.on_tool_start(
+            "write_file",
+            {"file_path": "x.txt", "sandbox_permissions": "danger-full-access"},
+            "c1",
+            "dangerous",
+        )
+    )
+    await _registered(cbs, "c1")
+    try:
+        outcome = cbs.resolve_tool("c1", True, always=True, trust=True)
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        cbs.cancel()
+
+    assert "called" not in seen
+    assert policy.trusted is False
+    assert outcome["always"] is False and outcome["decision"] == "user"
+
+
 # ── retrieval facts ──────────────────────────────────────────────────────
 
 def _enabled_retrieval_config(tmp_path) -> "object":

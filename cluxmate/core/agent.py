@@ -220,8 +220,10 @@ class ToolDecision:
 
     ``approved`` is whether the call runs. ``decision`` distinguishes HOW it was
     settled: ``auto`` (no human — safe/yolo/acceptEdits/prior always-allow),
-    ``user`` (human approved), ``always`` (human chose "always allow"), or
-    ``denied``.
+    ``user`` (human approved), ``always`` (human chose "always allow" AND the
+    rule is on disk), or ``denied``. An "always allow" that could not be
+    persisted — an untrusted project the user did not consent to trust — is
+    ``user``: the log must not claim a grant that does not exist.
     """
 
     approved: bool

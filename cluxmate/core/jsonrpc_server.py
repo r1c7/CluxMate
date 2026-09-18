@@ -31,7 +31,7 @@ from cluxmate.core.hooks import HookManager
 from cluxmate.core.permissions import PermissionPolicy
 from cluxmate.core.subagents import SubagentRegistry
 from cluxmate.core.trust import (
-    DENIED, TRUSTED, TrustDecision, TrustStore, resolve_trust,
+    DENIED, TRUSTED, UNKNOWN, TrustDecision, TrustStore, resolve_trust,
 )
 from cluxmate.core.session_log import (
     SessionHeader,
@@ -137,9 +137,16 @@ async def _generate_title(provider: Any, user_text: str, assistant_text: str) ->
 
 class JsonRpcCallbacks(AgentCallbacks):
 
-    def __init__(self, policy: "PermissionPolicy"):
+    def __init__(self, policy: "PermissionPolicy", *, trust_adopter=None):
         super().__init__()
         self._policy = policy
+        # Called to record "…and trust this project" when the user settles an
+        # approval with "always allow" in a directory that is not trusted yet.
+        # Supplied by the server, which owns the registry and the resolved
+        # decision; returns the fresh trust snapshot, or None when this
+        # directory may not be trusted this way (an explicit deny, or no
+        # project to file the answer under).
+        self._trust_adopter = trust_adopter
         self._tool_events: dict[str, threading.Event] = {}
         self._tool_decisions: dict[str, bool] = {}
         self._tool_decision_kind: dict[str, str] = {}
@@ -147,6 +154,7 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._pending_names: dict[str, str] = {}
         self._pending_risk: dict[str, str] = {}
         self._pending_categories: dict[str, frozenset[str]] = {}
+        self._pending_escalated: dict[str, bool] = {}
         self._question_events: dict[str, threading.Event] = {}
         self._question_answers: dict[str, dict[str, Any]] = {}
         # One outstanding question batch at a time (see ask_question). Created
@@ -161,36 +169,100 @@ class JsonRpcCallbacks(AgentCallbacks):
         for evt in self._question_events.values():
             evt.set()
 
-    def resolve_tool(self, call_id: str, approved: bool, always: bool = False, selected: list[int] | None = None):
+    def _grant_always(self, call_id: str, *, trust: bool) -> tuple[bool, dict[str, Any] | None]:
+        """Persist the "always allow" this call was approved with.
+
+        Returns ``(granted, trust_snapshot)``: ``granted`` is True only when the
+        rule is actually on disk, so the caller can record an honest decision.
+        ``trust_snapshot`` is the fresh project-trust answer when this click also
+        trusted the directory, for the front-end to paint.
+
+        An untrusted project is the whole reason this is not a two-line dict
+        write. Its rules are loaded by nothing, so writing one there would be
+        invisible — but leaving it at that dead-ends the user: a brand-new
+        directory ships no config, so nothing ever prompts about trust, so the
+        grant that would create the config can never be remembered. `trust=True`
+        is the user answering that second question in the same click, and it is
+        only honored for a directory the adopter agrees to (an UNDECIDED one —
+        an explicit deny is a decision, not an obstacle to route around).
+        """
+        name = self._pending_names.get(call_id)
+        if not name:
+            return False, None
+        risk = self._pending_risk.get(call_id, "")
+        escalated = self._pending_escalated.get(call_id, False)
+        categories = self._pending_categories.get(call_id) or frozenset()
+
+        snapshot: dict[str, Any] | None = None
+        if not self._policy.trusted:
+            # Never adopt trust for a call that could not be remembered even in a
+            # trusted directory (escalation, critical, an MCP dangerous tool): the
+            # consent would buy the user nothing and cost them the gate.
+            if not trust or not self._policy.is_always_allowable(
+                name, risk, escalated, assume_trusted=True
+            ):
+                return False, None
+            snapshot = self._trust_adopter() if self._trust_adopter else None
+            if not self._policy.trusted:  # the adopter refused
+                return False, None
+
+        # Persist into the tier the call actually ran at: a dangerous call goes
+        # to the dangerous list (bash category-scoped as `bash:<category>`), a
+        # write call to the write list. Escalation and critical never reach here
+        # (the UI hides "always" for them).
+        if risk == "dangerous":
+            if name == "bash":
+                # Category-scoped: persist one `bash:<category>` grant per matched
+                # destructive category (never a bare "bash"). Every category is
+                # attempted — a partial grant would silently auto-approve less
+                # than the user asked for, so the call reports the failure instead.
+                granted = bool(categories)
+                for c in categories:
+                    granted = self._policy.add_always_allow_dangerous(f"bash:{c}") and granted
+            else:
+                granted = self._policy.add_always_allow_dangerous(name)
+        elif risk == "write":
+            granted = self._policy.add_always_allow(name)
+        else:
+            granted = False
+        return granted, snapshot
+
+    def resolve_tool(
+        self,
+        call_id: str,
+        approved: bool,
+        always: bool = False,
+        selected: list[int] | None = None,
+        trust: bool = False,
+    ) -> dict[str, Any]:
+        """Settle one pending approval; returns the audit outcome.
+
+        ``trust`` is the user answering the second question the "always allow"
+        button asks in a directory that is not trusted yet (see _grant_always).
+        """
+        granted = False
+        snapshot: dict[str, Any] | None = None
         if always and approved:
-            name = self._pending_names.get(call_id)
-            if name:
-                # Persist into the tier the call actually ran at: a dangerous
-                # call goes to the dangerous list (bash category-scoped as
-                # `bash:<category>`), a write call to the write list. Escalation
-                # and critical never reach here (the UI hides "always" for them).
-                risk = self._pending_risk.get(call_id)
-                if risk == "dangerous":
-                    if name == "bash":
-                        # Category-scoped: persist one `bash:<category>` grant per
-                        # matched destructive category (never a bare "bash").
-                        for c in (self._pending_categories.get(call_id) or frozenset()):
-                            self._policy.add_always_allow_dangerous(f"bash:{c}")
-                    else:
-                        self._policy.add_always_allow_dangerous(name)
-                elif risk == "write":
-                    self._policy.add_always_allow(name)
+            granted, snapshot = self._grant_always(call_id, trust=trust)
         self._tool_decisions[call_id] = approved
-        # Record HOW it was settled for the audit trail: "always" when the user
-        # clicked "总是允许", else "user" (approved) or "denied".
+        # Record HOW it was settled for the audit trail: "always" means the rule
+        # is on disk. A click that could NOT be persisted is an ordinary
+        # approval — the log must never claim a grant that does not exist.
         self._tool_decision_kind[call_id] = (
-            "always" if (always and approved) else ("user" if approved else "denied")
+            "always" if granted else ("user" if approved else "denied")
         )
         if selected is not None:
             self._tool_selections[call_id] = selected
         evt = self._tool_events.get(call_id)
         if evt is not None:
             evt.set()
+        return {
+            "call_id": call_id,
+            "approved": approved,
+            "always": granted,
+            "decision": self._tool_decision_kind[call_id],
+            "trust": snapshot,
+        }
 
     async def get_tool_selection(self, call_id: str) -> list[int] | None:
         return self._tool_selections.pop(call_id, None)
@@ -284,18 +356,25 @@ class JsonRpcCallbacks(AgentCallbacks):
         always_allowable = self._policy.is_always_allowable(
             name, risk_level, escalated=escalated
         )
+        always_reason = self._policy.always_allow_verdict(
+            name, risk_level, escalated=escalated
+        )
 
         # Emit tool_start so the UI renders the tool card. auto_approved tells it
         # whether a permission prompt follows: when true the card goes straight to
         # "running" with no approve/deny buttons. always_allowable tells it whether
-        # to render the "总是允许" button (false for escalation / other dangerous).
-        # categories lets the UI show "总是允许 rm" instead of a coarse "bash".
+        # to render the "总是允许" button (false for escalation / other dangerous),
+        # and always_allowable_reason says WHY — the card has to tell "this project
+        # is not trusted yet" (offering to trust it in the same click) apart from
+        # "this call can never be remembered" (no button at all). categories lets
+        # the UI show "总是允许 rm" instead of a coarse "bash".
         _write_dict({
             "jsonrpc": "2.0", "method": "chat/stream",
             "params": {
                 "type": "tool_start", "call_id": call_id,
                 "name": name, "input": params, "risk_level": risk_level,
                 "auto_approved": auto, "always_allowable": always_allowable,
+                "always_allowable_reason": always_reason,
                 "categories": sorted(categories),
             },
         })
@@ -306,6 +385,7 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._pending_names[call_id] = name
         self._pending_risk[call_id] = risk_level
         self._pending_categories[call_id] = categories
+        self._pending_escalated[call_id] = escalated
         evt = threading.Event()
         self._tool_events[call_id] = evt
 
@@ -319,6 +399,7 @@ class JsonRpcCallbacks(AgentCallbacks):
         self._pending_names.pop(call_id, None)
         self._pending_risk.pop(call_id, None)
         self._pending_categories.pop(call_id, None)
+        self._pending_escalated.pop(call_id, None)
         if self._cancelled:
             raise _CancelledError()
         approved = self._tool_decisions.pop(call_id, False)
@@ -678,13 +759,27 @@ class JsonRpcServer:
                 _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {"status": "cancelled"}})
         elif method == "tool/approve":
             always = bool(params.get("always", False))
+            # "…and trust this project", from the same click (see
+            # JsonRpcCallbacks._grant_always). Only meaningful with `always`, and
+            # only honored for a directory that is undecided.
+            trust = bool(params.get("trust", False))
             selected = params.get("selected")
             # Accept both list[int] and list passed as-is from JSON
             if isinstance(selected, list):
                 selected = [int(x) for x in selected]
-            self._tool_decision(params["call_id"], True, always, selected)
+            outcome = self._tool_decision(params["call_id"], True, always, selected, trust=trust)
             if req_id is not None:
-                _write_dict({"jsonrpc": "2.0", "id": req_id, "result": {"call_id": params["call_id"], "approved": True, "always": always}})
+                # Answer with what HAPPENED, not with what was asked: `always`
+                # reports whether the rule is on disk (an untrusted project that
+                # was not consented to writes nothing) and `trust` carries the
+                # fresh decision when this click recorded one.
+                _write_dict({
+                    "jsonrpc": "2.0", "id": req_id,
+                    "result": outcome or {
+                        "call_id": params["call_id"], "approved": True,
+                        "always": False, "decision": "user", "trust": None,
+                    },
+                })
         elif method == "tool/deny":
             self._tool_decision(params["call_id"], False)
             if req_id is not None:
@@ -1197,7 +1292,7 @@ class JsonRpcServer:
             except Exception:
                 traceback.print_exc(file=sys.stderr)
 
-        cbs = JsonRpcCallbacks(self._policy)
+        cbs = JsonRpcCallbacks(self._policy, trust_adopter=self._adopt_trust_for_approval)
         self._callbacks = cbs
         # Attach the callbacks as this turn's subagent tracker so TaskTool/
         # SkillTool emit agent lifecycle, tool, and streamed-text events (tagged
@@ -1823,9 +1918,52 @@ class JsonRpcServer:
         if task is not None and loop is not None and not task.done():
             loop.call_soon_threadsafe(task.cancel)
 
-    def _tool_decision(self, call_id: str, approved: bool, always: bool = False, selected: list[int] | None = None):
+    def _tool_decision(
+        self,
+        call_id: str,
+        approved: bool,
+        always: bool = False,
+        selected: list[int] | None = None,
+        trust: bool = False,
+    ) -> dict[str, Any] | None:
+        """Settle one approval; returns what actually happened (None: no turn)."""
         if self._callbacks:
-            self._callbacks.resolve_tool(call_id, approved, always, selected)
+            return self._callbacks.resolve_tool(call_id, approved, always, selected, trust=trust)
+        return None
+
+    def _adopt_trust_for_approval(self) -> dict[str, Any] | None:
+        """Trust this session's project because the user said so on a card.
+
+        The desktop's "always allow" button asks both questions at once when the
+        directory is untrusted, and this is the second half: record the answer
+        where every other reader looks for it (`trust.json`, keyed on the config
+        root), re-resolve it, and flip the LIVE policy in place — the callbacks
+        hold that same object, so the grant that follows is written instead of
+        being dropped on the floor.
+
+        Only an UNDECIDED directory can be trusted this way. A recorded denial is
+        a decision: routing around it from an approval card would silently undo
+        it, so the user has to say so in Settings (or `cluxmate trust add`).
+        Returns the fresh snapshot for the front-end, or None when refused.
+
+        No bridge restart follows, unlike the `trust/set` path: adoption is
+        offered only in a directory the findings probe found EMPTY (that is why
+        no prompt ever appeared for it), so there is no project config left to
+        load — permission rules were the one thing it could not have, and they
+        are now live in this process. AGENTS.md is not trust-gated at all.
+        """
+        if self._trust is None or not self._project_root:
+            return None
+        if self._trust.status != UNKNOWN:
+            return None
+        self._trust_store.set(self._project_root, TRUSTED)
+        # A persisted answer supersedes this run's "trust for this run only", the
+        # same way trust/set does it — leaving the override in place would keep
+        # resolving to it.
+        self._trust_store.clear_session(self._project_root)
+        self._trust = resolve_trust(self._project_root, self._trust_store)
+        self._policy.mark_trusted()
+        return self._trust_get({"cwd": self._cwd})
 
     def _question_decision(self, call_id: str, answers: list[dict[str, Any]]):
         if self._callbacks:

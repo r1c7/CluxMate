@@ -116,7 +116,12 @@ class PermissionPolicy:
     """In-memory tool-approval policy for one session, backed by a PermissionStore
     scoped to the session's working directory. The two always-allow tiers are
     loaded at construction and written through on mutation; the development mode
-    starts at DEFAULT_MODE and is never persisted."""
+    starts at DEFAULT_MODE and is never persisted.
+
+    Project trust is the third input and it is NOT the same axis: an untrusted
+    directory's rules are neither loaded nor written, because a grant nothing
+    ever reads back is worse than no grant at all (see `mark_trusted` for the one
+    way in, and `always_allow_verdict` for what that costs the UI)."""
 
     def __init__(self, cwd: str, *, trusted: bool = True):
         self._lock = threading.Lock()
@@ -134,6 +139,33 @@ class PermissionPolicy:
         self.always_allow_dangerous: set[str] = set(
             state["always_allow_dangerous_tools"]
         )
+
+    @property
+    def trusted(self) -> bool:
+        with self._lock:
+            return self._trusted
+
+    def mark_trusted(self) -> None:
+        """Trust this project for the rest of the session (the user consented).
+
+        The approval card is the one place that asks about trust mid-turn: in a
+        directory that ships no config there is nothing to prompt about, so
+        "always allow" was refused forever — the grant that would create the
+        config was exactly what trust gated. Answering both questions in the one
+        click closes that loop, and the flip has to land BEFORE the write or the
+        user is left with a rule that silently does not exist.
+
+        On-disk rules are MERGED, never replaced: a directory that shipped its
+        own permissions.json must not lose them to the flip. The mode is
+        untouched — it is per-session and never persisted.
+        """
+        with self._lock:
+            if self._trusted:
+                return
+            self._trusted = True
+            state = self._store.load()
+            self.always_allow.update(state["always_allow_tools"])
+            self.always_allow_dangerous.update(state["always_allow_dangerous_tools"])
 
     def is_auto_approved(
         self,
@@ -184,8 +216,47 @@ class PermissionPolicy:
             return False
         return all(f"bash:{c}" in self.always_allow_dangerous for c in cats)
 
+    def always_allow_verdict(
+        self,
+        name: str,
+        risk_level: str,
+        escalated: bool = False,
+        *,
+        assume_trusted: bool = False,
+    ) -> str:
+        """Why "always allow" is (or is not) on offer for this call.
+
+        The single source of truth behind :meth:`is_always_allowable`, and what
+        the approval card renders from: ``untrusted`` is recoverable in the SAME
+        click (the project can be trusted right there), while ``escalated`` /
+        ``critical`` / ``not-grantable`` never become grantable in any directory.
+        That difference is why this returns a reason instead of a bool — the UI
+        must not infer "the project is the reason" from a bare ``False``.
+
+        ``assume_trusted`` answers "would this be grantable IF the project were
+        trusted?", which is what the approval path asks before it adopts the
+        trust answer — otherwise the one call that needs to know could never be
+        told apart from a call that is forbidden outright.
+        """
+        if escalated:
+            return "escalated"
+        if risk_level == "critical":
+            return "critical"
+        if risk_level == "safe":
+            return "safe"
+        if risk_level == "dangerous" and name not in ALWAYS_ALLOWABLE_DANGEROUS:
+            return "not-grantable"
+        if not (self._trusted or assume_trusted):
+            return "untrusted"
+        return "ok"
+
     def is_always_allowable(
-        self, name: str, risk_level: str, escalated: bool = False
+        self,
+        name: str,
+        risk_level: str,
+        escalated: bool = False,
+        *,
+        assume_trusted: bool = False,
     ) -> bool:
         """Whether the user may persist an "always allow" for THIS call.
 
@@ -194,15 +265,12 @@ class PermissionPolicy:
         prompts), for critical (device/system-level destruction), for sandbox
         escalation, and for other dangerous tools.
         """
-        if not self._trusted:
-            return False
-        if escalated:
-            return False
-        if risk_level in ("safe", "critical"):
-            return False
-        if risk_level == "write":
-            return True
-        return name in ALWAYS_ALLOWABLE_DANGEROUS
+        return (
+            self.always_allow_verdict(
+                name, risk_level, escalated, assume_trusted=assume_trusted
+            )
+            == "ok"
+        )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -239,17 +307,23 @@ class PermissionPolicy:
             sorted(self.always_allow_dangerous),
         )
 
-    def add_always_allow(self, name: str):
-        """Persist "always allow" at the tool's WRITE tier."""
+    def add_always_allow(self, name: str) -> bool:
+        """Persist "always allow" at the tool's WRITE tier.
+
+        Returns whether the rule is in force afterwards. ``False`` means nothing
+        was written — the project is not trusted — and the caller must report an
+        ordinary approval instead of a grant that does not exist.
+        """
         with self._lock:
             if not self._trusted:
-                return
+                return False
             if name in self.always_allow:
-                return
+                return True
             self.always_allow.add(name)
             self._persist_locked()
+            return True
 
-    def add_always_allow_dangerous(self, name: str):
+    def add_always_allow_dangerous(self, name: str) -> bool:
         """Persist "always allow" at the tool's DANGEROUS tier.
 
         Accepts ``delete_file`` (whole-tool) or a bash category grant
@@ -258,13 +332,18 @@ class PermissionPolicy:
         never silently auto-approve every dangerous shell command. Category names
         are server-computed (the model never controls them), so a prefix check is
         sufficient here — a bogus ``bash:…`` entry is inert, never matching.
+
+        Returns whether the rule is in force afterwards (same contract as
+        :meth:`add_always_allow`); a rejected name is ``False`` too, because
+        nothing was persisted either.
         """
         if name != "delete_file" and not name.startswith("bash:"):
-            return
+            return False
         with self._lock:
             if not self._trusted:
-                return
+                return False
             if name in self.always_allow_dangerous:
-                return
+                return True
             self.always_allow_dangerous.add(name)
             self._persist_locked()
+            return True
