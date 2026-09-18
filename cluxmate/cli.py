@@ -1,6 +1,7 @@
 """CLI entry point for CluxMate."""
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -533,6 +534,96 @@ def run_trust(args) -> int:
     return 0
 
 
+def run_worktree(args) -> int:
+    """`cluxmate worktree [info|create|list|remove] [--cwd DIR] [--json]`.
+
+    The CLI is a thin printer over `cluxmate.core.worktree`: the core resolves,
+    validates and runs git, and hands back either the `ok: true` payload or a
+    `WorktreeError`. In `--json` mode stdout carries EXACTLY one JSON line for
+    both outcomes (the desktop parses stdout, not stderr) and a failure exits 1;
+    without it the payload is rendered for a human and a failure prints
+    `error: <message>` on stderr.
+    """
+    from cluxmate.core import worktree
+
+    cwd = os.path.abspath(args.cwd) if getattr(args, "cwd", None) else os.getcwd()
+    action = getattr(args, "worktree_command", None) or "info"
+    as_json = bool(getattr(args, "json", False))
+    try:
+        if action == "create":
+            payload = worktree.create(
+                cwd,
+                name=getattr(args, "name", None),
+                title=getattr(args, "title", None),
+                base=getattr(args, "base", None),
+                branch=getattr(args, "branch", None),
+                allow_dirty=bool(getattr(args, "allow_dirty", False)),
+            )
+        elif action == "list":
+            payload = {"ok": True, "worktrees": worktree.list_worktrees(cwd)}
+        elif action == "remove":
+            payload = worktree.remove(
+                cwd,
+                args.target,
+                force=bool(getattr(args, "force", False)),
+                keep_branch=bool(getattr(args, "keep_branch", False)),
+            )
+        else:
+            payload = worktree.info(cwd)
+    except worktree.WorktreeError as exc:
+        if as_json:
+            print(json.dumps({
+                "ok": False,
+                "error": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }))
+        else:
+            print(f"error: {exc.message}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(payload))
+        return 0
+    _print_worktree(action, payload)
+    return 0
+
+
+def _print_worktree(action: str, payload: dict) -> None:
+    """Human-readable rendering of the same payloads `--json` prints."""
+    if action == "info":
+        branch = payload["branch"] or "-"
+        print(f"cwd:         {payload['cwd']}")
+        print(f"root:        {payload['root']}")
+        print(f"config_root: {payload['config_root']}")
+        print(f"worktree:    {'yes' if payload['is_worktree'] else 'no'}")
+        print(f"branch:      {branch}")
+        return
+    if action == "create":
+        print(f"created {payload['path']}")
+        print(f"  name:   {payload['name']}")
+        print(f"  branch: {payload['branch']} "
+              f"(from {payload['base_ref']} {payload['base'][:12]})")
+        if payload["dirty"]:
+            print(f"  note:   the main worktree was dirty "
+                  f"({len(payload['dirty'])} file(s), --allow-dirty)")
+        return
+    if action == "list":
+        for row in payload["worktrees"]:
+            mark = "*" if row["is_current"] else " "
+            label = row["name"] or ("(main)" if row["is_main"] else "-")
+            branch = row["branch"] or "-"
+            print(f"{mark} {label:24} {branch:32} {row['path']}")
+        return
+    print(f"removed {payload['path']}")
+    print(f"  branch: {payload['branch'] or '-'} "
+          f"({'deleted' if payload['branch_deleted'] else 'kept'})")
+    if payload["pruned"]:
+        print("  note:   the directory was already gone; "
+              "`git worktree prune` cleaned the entry")
+    if payload.get("message"):
+        print(f"  note:   {payload['message']}")
+
+
 async def run_tui() -> None:
     """Launch the Textual TUI."""
     from cluxmate.tui.app import CluxMateApp
@@ -596,6 +687,42 @@ def main():
     )
     trust_parser.add_argument("path", nargs="?", default=None)
 
+    # cluxmate worktree info|create|list|remove
+    wt_parser = sub.add_parser(
+        "worktree", help="Create / remove the linked worktrees sessions run in"
+    )
+    wt_sub = wt_parser.add_subparsers(dest="worktree_command")
+    wt_info = wt_sub.add_parser("info", help="Resolve the project root of a directory")
+    wt_info.add_argument("--cwd", default=None, help="Project directory (defaults to cwd)")
+    wt_info.add_argument("--json", action="store_true", help="Print one line of JSON")
+
+    wt_create = wt_sub.add_parser("create", help="Create a linked worktree")
+    wt_create.add_argument("--cwd", default=None, help="Project directory (defaults to cwd)")
+    wt_create.add_argument("--json", action="store_true", help="Print one line of JSON")
+    wt_create.add_argument("--name", default=None,
+                           help="Worktree name (default: derived from --title, else wt)")
+    wt_create.add_argument("--title", default=None,
+                           help="Session title the worktree name is derived from")
+    wt_create.add_argument("--base", default=None,
+                           help="Commit or ref to base the worktree on (default: HEAD)")
+    wt_create.add_argument("--branch", default=None,
+                           help="Branch name (default: cluxmate/<name>)")
+    wt_create.add_argument("--allow-dirty", dest="allow_dirty", action="store_true",
+                           help="Create even when the main worktree has uncommitted changes")
+
+    wt_list = wt_sub.add_parser("list", help="List the repository's worktrees")
+    wt_list.add_argument("--cwd", default=None, help="Project directory (defaults to cwd)")
+    wt_list.add_argument("--json", action="store_true", help="Print one line of JSON")
+
+    wt_remove = wt_sub.add_parser("remove", help="Remove a worktree and its branch")
+    wt_remove.add_argument("target", help="Worktree name, or a path under <repo>/.worktrees")
+    wt_remove.add_argument("--cwd", default=None, help="Project directory (defaults to cwd)")
+    wt_remove.add_argument("--json", action="store_true", help="Print one line of JSON")
+    wt_remove.add_argument("--force", action="store_true",
+                           help="Discard uncommitted changes in the worktree")
+    wt_remove.add_argument("--keep-branch", dest="keep_branch", action="store_true",
+                           help="Keep the branch after removing the tree")
+
     # cluxmate -p "..."
     parser.add_argument("-p", "--prompt", help="Run in headless mode with the given prompt.")
     parser.add_argument("--model-id", dest="model_id", help="Config model entry id to use (defaults to the active model).")
@@ -618,6 +745,9 @@ def main():
 
     if args.command == "trust":
         sys.exit(run_trust(args))
+
+    if args.command == "worktree":
+        sys.exit(run_worktree(args))
 
     if args.prompt:
         asyncio.run(run_headless(args.prompt, args.model_id, args.reasoning_effort))

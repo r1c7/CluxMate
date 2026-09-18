@@ -168,6 +168,20 @@ MCP stdio 服务器也复用同一沙箱（best-effort：它是用户显式配�
 - TUI：启动（或切换工作目录）时内联询问。
 
 
+## 会话级 worktree
+
+会话可以跑在自己的链接工作树里，而不是主树——一个任务一棵树，并行会话不再互相踩文件。`cluxmate worktree` 就是这个宿主侧机制（它的 `--json` 输出是桌面端调用的冻结契约）：
+
+```bash
+cluxmate worktree info   [--cwd DIR] --json     # 某目录的项目根
+cluxmate worktree create [--cwd DIR] [--name SLUG] [--title T] [--base REF] [--branch NAME] [--allow-dirty] --json
+cluxmate worktree list   [--cwd DIR] --json     # 仓库的全部工作树
+cluxmate worktree remove NAME|PATH [--cwd DIR] [--force] [--keep-branch] --json
+```
+
+新树落在 `<repo>/.worktrees/<slug>`，分支 `cluxmate/<slug>`（slug 来自 `--name`，否则 `--title`，再否则 `wt`；重名自动加 `-2`、`-3`…），并把 `.worktrees/` 写进 `<git-common-dir>/info/exclude`，主树不再把它当未跟踪文件。`create` 默认拒绝有未提交改动的主树（`--allow-dirty` 放行）；`remove` 默认拒绝脏工作树（`--force` 丢弃），`--keep-branch` 保留分支。树内的 `<worktree>/.cluxmate/` 只放运行态——trust、权限、技能、MCP、hooks 与 `AGENTS.md` 仍然读写**主仓**的那一份。
+
+
 ## 子 agent
 
 把独立工作委派给工具集受限的子 agent：
@@ -340,6 +354,9 @@ cluxmate mcp logout linear                              # 删除已存的 MCP �
 
 cluxmate trust status                                   # 当前目录的 .cluxmate 配置是否加载
 cluxmate trust [list|add|deny|remove|status] [path]     # 项目信任：查看 / 授予 / 撤销
+
+cluxmate worktree create --name me                      # 新建会话工作树：<repo>/.worktrees/me，分支 cluxmate/me
+cluxmate worktree [info|create|list|remove] [--cwd DIR] --json   # 同一机制，每次调用一行 JSON
 ```
 
 运行一次 `cluxmate` 会生成默认配置，然后在 TUI/桌面端设置里选择模型。

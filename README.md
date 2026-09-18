@@ -168,6 +168,20 @@ While the directory is untrusted — "do not trust" and "not answered yet" behav
 - **TUI** — asks inline at startup (and when the working directory changes).
 
 
+## Session worktrees
+
+A session can run in its own linked git worktree instead of the main tree — one tree per task, so parallel sessions stop fighting over the same files. `cluxmate worktree` is the host-side mechanism (its `--json` output is the frozen contract the desktop calls):
+
+```bash
+cluxmate worktree info   [--cwd DIR] --json     # the project root of a directory
+cluxmate worktree create [--cwd DIR] [--name SLUG] [--title T] [--base REF] [--branch NAME] [--allow-dirty] --json
+cluxmate worktree list   [--cwd DIR] --json     # every worktree of the repository
+cluxmate worktree remove NAME|PATH [--cwd DIR] [--force] [--keep-branch] --json
+```
+
+The tree lands at `<repo>/.worktrees/<slug>` on a new branch `cluxmate/<slug>` (slug from `--name`, else `--title`, else `wt`; a taken name becomes `-2`, `-3`…), and `.worktrees/` goes into `<git-common-dir>/info/exclude` so the main tree never sees it as untracked. `create` refuses a main tree with uncommitted changes (`--allow-dirty` overrides); `remove` refuses a dirty worktree (`--force` discards it) and keeps the branch with `--keep-branch`. Inside the tree, `<worktree>/.cluxmate/` holds runtime state only — trust, permissions, skills, MCP, hooks and `AGENTS.md` stay the **main repository's** files.
+
+
 ## Subagents
 
 Delegate independent work to child agents with restricted toolsets:
@@ -340,6 +354,9 @@ cluxmate mcp logout linear                                      # delete stored 
 
 cluxmate trust status                                           # is this directory's .cluxmate config loaded?
 cluxmate trust [list|add|deny|remove|status] [path]             # project trust: inspect / grant / revoke
+
+cluxmate worktree create --name me                              # linked tree <repo>/.worktrees/me on branch cluxmate/me
+cluxmate worktree [info|create|list|remove] [--cwd DIR] --json  # same mechanism, one line of JSON per call
 ```
 
 Run `cluxmate` once to seed a default config, then pick a model in the TUI/desktop Settings.
