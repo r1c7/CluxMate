@@ -56,6 +56,41 @@ export function trustSummary(snapshot: TrustSnapshot | null | undefined): string
 }
 
 /**
+ * What the approval card's "always allow" button should BE for one call.
+ *
+ * `plain`      — the engine can persist the rule as it stands.
+ * `with-trust` — the ONLY reason it cannot is that the project is not trusted
+ *                yet, and the same click fixes that: the button says so and
+ *                sends `trust: true`. Without this the flow dead-ended — a
+ *                brand-new directory ships no config, so nothing ever prompts
+ *                about trust, so the grant that would create the config was
+ *                refused for exactly as long as the config did not exist.
+ * `hidden`     — not grantable in any directory (escalation, critical, a
+ *                dangerous tool outside the allowlist), or the user already
+ *                DENIED this project — a decision the card must not route
+ *                around; Settings / the trust row is the deliberate way back.
+ *
+ * The reason string is server-computed on purpose: `always_allowable === false`
+ * alone cannot tell "untrusted" from "forbidden", and inferring it here is how
+ * the button went missing in exactly the directory that needed it.
+ */
+export type AlwaysAllowAction = 'plain' | 'with-trust' | 'hidden'
+
+export function alwaysAllowAction(
+  alwaysAllowable: boolean | undefined,
+  reason: string | undefined,
+  trustStatus: TrustStatus | null | undefined,
+): AlwaysAllowAction {
+  if (alwaysAllowable !== false) return 'plain'
+  // An older bridge sends no reason: keep the button hidden rather than guess.
+  if (reason !== 'untrusted') return 'hidden'
+  // A null / not-yet-loaded snapshot counts as untrusted — the engine refuses
+  // the adoption for a denied project anyway, and guessing "denied" here would
+  // hide the button on a cold session for no reason.
+  return trustStatus === 'denied' ? 'hidden' : 'with-trust'
+}
+
+/**
  * Does a written trust decision have to cost the live bridge a restart?
  *
  * The running Python process holds the hooks, MCP clients, skills, subagents and

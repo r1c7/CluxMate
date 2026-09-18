@@ -192,6 +192,11 @@ export interface ToolStartEvent {
   // true when the "总是允许" button should be offered for this call — false for
   // sandbox escalation and dangerous tools outside the always-allowable set.
   always_allowable?: boolean
+  // Why it is not offered: "untrusted" (fixable in the same click — the button
+  // becomes "always allow & trust this project"), "escalated" / "critical" /
+  // "not-grantable" / "safe" (never grantable in any directory). Server-computed
+  // so the UI never has to infer it; absent on older bridges.
+  always_allowable_reason?: string
   // Matched dangerous-category labels (bash only; e.g. ["rm"]) — the UI renders
   // "总是允许 rm" so the grant is category-scoped, not whole-tool.
   categories?: string[]
@@ -466,8 +471,27 @@ export interface PermissionRequest {
   // Whether the "总是允许" button should render (server-computed; false for
   // escalation and non-always-allowable dangerous tools).
   always_allowable?: boolean
+  // Why it is false — see ToolStartEvent.always_allowable_reason. Drives
+  // `alwaysAllowAction`: "untrusted" offers the trust-in-the-same-click button.
+  always_allowable_reason?: string
   // Matched dangerous-category labels (bash only) shown in the always-allow button.
   categories?: string[]
+}
+
+// What the engine reports back after settling one approval.
+export interface ToolApproveResult {
+  call_id: string
+  approved: boolean
+  // Whether the rule is ON DISK. An "always allow" in an untrusted project that
+  // was not consented to writes nothing, and this says so instead of the UI
+  // assuming the click was remembered.
+  always: boolean
+  // How the call was recorded in the audit trail: "always" only when the rule
+  // landed, otherwise "user" / "denied".
+  decision: 'always' | 'user' | 'denied'
+  // The fresh project-trust snapshot when this click also trusted the directory,
+  // else null — so the badge/banner can be painted without another round trip.
+  trust: TrustSnapshot | null
 }
 
 // A pending ask_user_question prompt shown by the QuestionCard.
@@ -538,6 +562,12 @@ export interface BatchEditRequest {
   tool_name: string
   edits: { path: string; old_string: string; new_string: string }[]
   risk_level: RiskLevel
+  // Same two fields as PermissionRequest: this card offers "always approve" too,
+  // so it needs the same server-computed verdict (see alwaysAllowAction) — an
+  // untrusted project must offer the trust-in-the-same-click button here as well,
+  // and a forbidden call must not offer one at all.
+  always_allowable?: boolean
+  always_allowable_reason?: string
 }
 
 // An agent turn is an ordered sequence of text and tool blocks so the UI can
@@ -938,7 +968,10 @@ export interface ElectronAPI {
   sendMessage: (sessionId: string, text: string, options?: ChatSendOptions) => Promise<ChatResult>
   cancelChat: (sessionId: string) => Promise<void>
 
-  approveTool: (sessionId: string, callId: string, always?: boolean, selected?: number[]) => Promise<void>
+  // `trust` is the second half of "always allow" in an untrusted directory:
+  // the user consented to trusting this project so the rule can exist. Ignored
+  // for a project that was explicitly denied (the engine's call).
+  approveTool: (sessionId: string, callId: string, always?: boolean, selected?: number[], trust?: boolean) => Promise<ToolApproveResult | null>
   denyTool: (sessionId: string, callId: string) => Promise<void>
   answerQuestion: (sessionId: string, callId: string, answers: QuestionAnswer[]) => Promise<void>
 

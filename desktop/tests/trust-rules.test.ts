@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isUntrusted, shouldPromptTrust, shouldPromptFromFetch, trustSummary, trustChangeRestartsBridge, bridgesToRestart, planTrustCall, projectConfigRoot, trustTargetDir } from '../src/shared/trust-rules.ts'
+import { isUntrusted, shouldPromptTrust, shouldPromptFromFetch, trustSummary, trustChangeRestartsBridge, bridgesToRestart, planTrustCall, projectConfigRoot, trustTargetDir, alwaysAllowAction } from '../src/shared/trust-rules.ts'
 
 const snapshot = (status: string, findings: { kind: string; label: string; path: string }[] = []) => ({
   cwd: 'E:\\proj', status, source: 'registry', findings, store: {},
@@ -46,6 +46,41 @@ test('trustSummary lists labels then paths', () => {
     { kind: 'mcp', label: 'MCP servers (mcp.json)', path: '.cluxmate/mcp.json' },
   ])
   assert.equal(trustSummary(s), 'Hooks (settings.json), MCP servers (mcp.json)')
+})
+
+// ── the "always allow" button's shape ───────────────────────────────────────
+// The dead end this closes: a brand-new directory ships no config, so nothing
+// prompts about trust, so an "always allow" that needs trust could never be
+// granted — the one button that could have created the config was refused for
+// exactly as long as the config did not exist.
+test('an untrusted project turns the always button into trust-and-allow', () => {
+  assert.equal(alwaysAllowAction(false, 'untrusted', 'unknown'), 'with-trust')
+  // A cold session (no snapshot yet) must not be treated as denied: the engine
+  // is the authority and refuses the adoption for a denied project anyway.
+  assert.equal(alwaysAllowAction(false, 'untrusted', null), 'with-trust')
+  assert.equal(alwaysAllowAction(false, 'untrusted', undefined), 'with-trust')
+})
+
+test('an already-trusted project keeps the plain button', () => {
+  assert.equal(alwaysAllowAction(true, 'ok', 'trusted'), 'plain')
+  assert.equal(alwaysAllowAction(undefined, undefined, null), 'plain') // older bridge
+})
+
+test('a denied project never gets the button back', () => {
+  // Revoking trust is a decision; a one-click override from an approval card
+  // would silently undo it. Settings / the trust row is the deliberate way back.
+  assert.equal(alwaysAllowAction(false, 'untrusted', 'denied'), 'hidden')
+})
+
+test('what can never be remembered offers no button at all', () => {
+  for (const status of ['trusted', 'denied', 'unknown', null] as const) {
+    assert.equal(alwaysAllowAction(false, 'escalated', status), 'hidden')
+    assert.equal(alwaysAllowAction(false, 'critical', status), 'hidden')
+    assert.equal(alwaysAllowAction(false, 'not-grantable', status), 'hidden')
+    assert.equal(alwaysAllowAction(false, 'safe', status), 'hidden')
+  }
+  // No reason at all (older bridge) stays conservative.
+  assert.equal(alwaysAllowAction(false, undefined, 'unknown'), 'hidden')
 })
 
 // ── the card derived from a fetched snapshot ───────────────────────────────

@@ -1,6 +1,6 @@
 import { ChildProcess, spawn } from 'child_process'
 import * as readline from 'readline'
-import type { AgentTypeInfo, StreamEvent } from '../shared/types'
+import type { AgentTypeInfo, StreamEvent, ToolApproveResult } from '../shared/types'
 import { agentEnv, pythonCommand } from './python-runtime'
 
 export class AgentBridge {
@@ -219,9 +219,15 @@ export class AgentBridge {
     return { turns: r?.turns ?? [] }
   }
 
-  async approveTool(callId: string, always = false, selected?: number[]): Promise<void> {
+  // Returns the engine's outcome rather than void: `always` reports whether the
+  // rule is actually on disk (an untrusted project that the user did not consent
+  // to writes nothing) and `trust` carries the fresh project-trust snapshot when
+  // this click recorded one.
+  async approveTool(callId: string, always = false, selected?: number[], trust = false): Promise<ToolApproveResult | null> {
     this._lastActivityAt = Date.now()
-    await this.request('tool/approve', { call_id: callId, always, selected })
+    return (await this.request('tool/approve', {
+      call_id: callId, always, selected, trust,
+    })) as ToolApproveResult | null
   }
 
   async denyTool(callId: string): Promise<void> {

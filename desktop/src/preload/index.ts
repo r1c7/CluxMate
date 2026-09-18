@@ -25,7 +25,8 @@ const api: ElectronAPI = {
     ipcRenderer.invoke(IPC.CHAT_SEND, sessionId, text, options),
   cancelChat: (sessionId: string) => ipcRenderer.invoke(IPC.CHAT_CANCEL, sessionId),
 
-  approveTool: (sessionId: string, callId: string, always?: boolean) => ipcRenderer.invoke(IPC.TOOL_APPROVE, sessionId, callId, always),
+  approveTool: (sessionId: string, callId: string, always?: boolean, selected?: number[], trust?: boolean) =>
+    ipcRenderer.invoke(IPC.TOOL_APPROVE, sessionId, callId, always, selected, trust),
   denyTool: (sessionId: string, callId: string) => ipcRenderer.invoke(IPC.TOOL_DENY, sessionId, callId),
   answerQuestion: (sessionId: string, callId: string, answers) => ipcRenderer.invoke(IPC.TOOL_ANSWER_QUESTION, sessionId, callId, answers),
 

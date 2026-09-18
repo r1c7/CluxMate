@@ -2,6 +2,7 @@ import React, { useEffect } from 'react'
 import { useStore } from '../stores'
 import type { RiskLevel } from '../../shared/types'
 import { MultiEditFileList, editStats, toolDisplayName } from './MultiEditDiff'
+import { alwaysAllowAction } from '../../shared/trust-rules'
 import { useT } from '../useI18n'
 
 // Aligned with PermissionCard so the two approval surfaces read as one system.
@@ -17,18 +18,33 @@ export default function BatchEditCard() {
   const pending = useStore((s) => s.pendingBatchEdit)
   const approveBatchEdit = useStore((s) => s.approveBatchEdit)
   const denyTool = useStore((s) => s.denyTool)
+  const trust = useStore((s) => s.activeTrust)
+
+  // Same verdict the single-file card uses: this card offers "always approve"
+  // too, so an untrusted project must offer the trust-in-the-same-click button
+  // here as well instead of a button that silently persists nothing.
+  const alwaysAction = alwaysAllowAction(
+    pending?.always_allowable,
+    pending?.always_allowable_reason,
+    trust?.status,
+  )
+  const alwaysTrusts = alwaysAction === 'with-trust'
 
   // Keyboard shortcuts mirror PermissionCard: y = approve, a = always, n/esc = deny.
   useEffect(() => {
     if (!pending) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'y') { e.preventDefault(); approveBatchEdit(pending.call_id) }
-      else if (e.key === 'a') { e.preventDefault(); approveBatchEdit(pending.call_id, true) }
+      else if (e.key === 'a') {
+        if (alwaysAction === 'hidden') return
+        e.preventDefault()
+        approveBatchEdit(pending.call_id, true, alwaysTrusts)
+      }
       else if (e.key === 'n' || e.key === 'Escape') { e.preventDefault(); denyTool(pending.call_id) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [pending, approveBatchEdit, denyTool])
+  }, [pending, alwaysAction, alwaysTrusts, approveBatchEdit, denyTool])
 
   if (!pending) return null
   const style = RISK_STYLE[pending.risk_level]
@@ -60,10 +76,17 @@ export default function BatchEditCard() {
           onClick={() => approveBatchEdit(pending.call_id)}
           className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink text-xs rounded font-medium transition-colors"
         >{t('permission.approve')}</button>
-        <button
-          onClick={() => approveBatchEdit(pending.call_id, true)}
-          className="px-3 py-1.5 bg-surface-border hover:bg-ink-faint/40 text-ink text-xs rounded font-medium transition-colors"
-        >{t('permission.alwaysApprove')}</button>
+        {alwaysAction !== 'hidden' && (
+          <button
+            onClick={() => approveBatchEdit(pending.call_id, true, alwaysTrusts)}
+            title={alwaysTrusts ? t('permission.alwaysApproveAndTrustHint') : undefined}
+            className={`px-3 py-1.5 text-xs rounded font-medium transition-colors ${
+              alwaysTrusts
+                ? 'bg-accent/20 hover:bg-accent/30 text-accent border border-accent/40'
+                : 'bg-surface-border hover:bg-ink-faint/40 text-ink'
+            }`}
+          >{alwaysTrusts ? t('permission.alwaysApproveAndTrust') : t('permission.alwaysApprove')}</button>
+        )}
         <button
           onClick={() => denyTool(pending.call_id)}
           className="px-3 py-1.5 bg-transparent hover:bg-red-500/10 text-ink-soft hover:text-red-600 text-xs rounded font-medium transition-colors ml-auto"

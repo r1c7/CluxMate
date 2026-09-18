@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import { useStore } from '../stores'
+import { trustSummary } from '../../shared/trust-rules'
 import { useT } from '../useI18n'
 
 // Keep the folders closest to the working directory's basename visible when the
@@ -32,11 +33,34 @@ export default function WorkingDirBar() {
   const workingDir = useStore((s) => s.workingDir)
   const setWorkingDir = useStore((s) => s.setWorkingDir)
   const isStreaming = useStore((s) => s.isStreaming)
+  const trust = useStore((s) => s.activeTrust)
+  const answerTrust = useStore((s) => s.answerTrust)
+  const [trustBusy, setTrustBusy] = useState(false)
 
   const handleChangeDir = async () => {
     const dir = await window.electronAPI.selectDirectory()
     if (dir) {
       setWorkingDir(dir)
+    }
+  }
+
+  // The one place that always says whether this directory is trusted.
+  //
+  // The trust CARD only appears when the directory ships config to withhold, and
+  // the panel banner shares that condition — so a brand-new directory used to be
+  // silently untrusted: no prompt, no badge, and "always allow" refused with
+  // nothing on screen explaining why. A recorded denial shows here too, so the
+  // state is visible whichever way it was reached; trusting from here is the
+  // explicit, deliberate way back.
+  const untrusted = !!trust && trust.status !== 'trusted'
+  const withheld = trustSummary(trust)
+
+  const handleTrust = async () => {
+    setTrustBusy(true)
+    try {
+      await answerTrust('trusted', true)
+    } finally {
+      setTrustBusy(false)
     }
   }
 
@@ -62,6 +86,16 @@ export default function WorkingDirBar() {
           {base || '...'}
         </span>
       </button>
+      {untrusted && (
+        <button
+          onClick={handleTrust}
+          disabled={isStreaming || trustBusy}
+          title={withheld
+            ? t('trust.badgeHintConfig', { what: withheld })
+            : t('trust.badgeHintBare')}
+          className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 hover:bg-amber-500/25 disabled:opacity-50 flex-shrink-0 transition-colors"
+        >{t('trust.badge')}</button>
+      )}
       <button
         onClick={handleChangeDir}
         disabled={isStreaming}

@@ -616,9 +616,9 @@ interface AppState {
   switchSession: (id: string) => Promise<void>
   sendMessage: (text: string) => Promise<void>
   cancelChat: () => Promise<void>
-  approveTool: (callId: string, always?: boolean) => Promise<void>
+  approveTool: (callId: string, always?: boolean, trust?: boolean) => Promise<void>
   denyTool: (callId: string) => Promise<void>
-  approveBatchEdit: (callId: string, always?: boolean) => Promise<void>
+  approveBatchEdit: (callId: string, always?: boolean, trust?: boolean) => Promise<void>
   answerQuestion: (callId: string, answers: QuestionAnswer[]) => Promise<void>
   setMode: (mode: PermissionMode) => Promise<void>
   // Select the active session's model + reasoning level (the composer seat).
@@ -1974,10 +1974,12 @@ export const useStore = create<AppState>((set, get) => ({
               tool_name: event.name,
               edits,
               risk_level: event.risk_level,
+              always_allowable: event.always_allowable,
+              always_allowable_reason: event.always_allowable_reason,
             }
           } else {
             css.pendingPermission = !autoApproved
-              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level, always_allowable: event.always_allowable, categories: event.categories }
+              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level, always_allowable: event.always_allowable, always_allowable_reason: event.always_allowable_reason, categories: event.categories }
               : css.pendingPermission
           }
         }
@@ -2246,7 +2248,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({ sessionStates: states, isStreaming: false, pendingPermission: null, pendingBatchEdit: null, pendingQuestion: null, pendingTrust: null })
   },
 
-  approveTool: async (callId, always = false) => {
+  approveTool: async (callId, always = false, trust = false) => {
     const sid = get().activeSessionId
     if (!sid) return
     const states = new Map(get().sessionStates)
@@ -2258,7 +2260,12 @@ export const useStore = create<AppState>((set, get) => ({
       )
     }
     set({ sessionStates: states, pendingPermission: null, messages: ss ? ss.messages : get().messages })
-    await window.electronAPI.approveTool(sid, callId, always)
+    const result = await window.electronAPI.approveTool(sid, callId, always, undefined, trust)
+    // "Always allow" in an undecided directory also answers the trust question
+    // (the button says so). The engine returns the fresh decision — paint it, so
+    // the untrusted badge clears now instead of at the next refresh, and so the
+    // panels stop claiming this project's config is withheld when it no longer is.
+    if (result?.trust) set({ activeTrust: result.trust })
   },
 
   denyTool: async (callId) => {
@@ -2277,7 +2284,7 @@ export const useStore = create<AppState>((set, get) => ({
     await window.electronAPI.denyTool(sid, callId)
   },
 
-  approveBatchEdit: async (callId, always = false) => {
+  approveBatchEdit: async (callId, always = false, trust = false) => {
     const sid = get().activeSessionId
     if (!sid) return
     const states = new Map(get().sessionStates)
@@ -2290,7 +2297,8 @@ export const useStore = create<AppState>((set, get) => ({
     }
     set({ sessionStates: states, pendingBatchEdit: null, messages: ss ? ss.messages : get().messages })
     // Whole-turn approval: no `selected` filter — MultiEditTool applies all edits.
-    await window.electronAPI.approveTool(sid, callId, always)
+    const result = await window.electronAPI.approveTool(sid, callId, always, undefined, trust)
+    if (result?.trust) set({ activeTrust: result.trust })
   },
 
   answerQuestion: async (callId, answers) => {
@@ -2815,10 +2823,10 @@ export const useStore = create<AppState>((set, get) => ({
         if (!isSub) {
           const edits = editsFromToolInput(event.name, event.input)
           if (edits && !autoApproved) {
-            css.pendingBatchEdit = { call_id: event.call_id, tool_name: event.name, edits, risk_level: event.risk_level }
+            css.pendingBatchEdit = { call_id: event.call_id, tool_name: event.name, edits, risk_level: event.risk_level, always_allowable: event.always_allowable, always_allowable_reason: event.always_allowable_reason }
           } else {
             css.pendingPermission = !autoApproved
-              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level, always_allowable: event.always_allowable, categories: event.categories }
+              ? { call_id: event.call_id, tool_name: event.name, params: event.input as Record<string, unknown>, risk_level: event.risk_level, always_allowable: event.always_allowable, always_allowable_reason: event.always_allowable_reason, categories: event.categories }
               : css.pendingPermission
           }
         }

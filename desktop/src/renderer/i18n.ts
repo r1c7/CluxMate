@@ -324,6 +324,8 @@ const en = {
   'permission.approve': 'Approve (y)',
   'permission.alwaysApprove': 'Always approve (a)',
   'permission.alwaysApproveCat': 'Always allow {cat} (a)',
+  'permission.alwaysApproveAndTrust': 'Always allow & trust this project (a)',
+  'permission.alwaysApproveAndTrustHint': 'Remembering this rule needs the project to be trusted — this also trusts it.',
   'permission.deny': 'Deny (n)',
 
   // ── question card ──
@@ -681,6 +683,9 @@ const en = {
   'trust.registry': 'Recorded decisions',
   'trust.loadFailed': 'Failed to read the trust registry: {msg}',
   'trust.cannotRemember': 'This directory is not trusted, so grants cannot be remembered.',
+  'trust.badge': 'Not trusted',
+  'trust.badgeHintConfig': 'This project ships config ({what}) that is NOT loaded. Click to trust this directory.',
+  'trust.badgeHintBare': 'This directory is not trusted, so its project config is not loaded. Click to trust it.',
 
   // ── store / errors ──
   'error.unexpected': 'An unexpected error occurred. Please try again.',
@@ -1046,6 +1051,8 @@ const zh: Record<keyof typeof en, string> = {
   'permission.approve': '批准 (y)',
   'permission.alwaysApprove': '总是批准 (a)',
   'permission.alwaysApproveCat': '总是允许 {cat} (a)',
+  'permission.alwaysApproveAndTrust': '总是允许并信任此项目 (a)',
+  'permission.alwaysApproveAndTrustHint': '要记住这条规则需要先信任该项目——点击会同时信任它。',
   'permission.deny': '拒绝 (n)',
 
   // ── question card ──
@@ -1389,6 +1396,9 @@ const zh: Record<keyof typeof en, string> = {
   'trust.registry': '已记录的决定',
   'trust.loadFailed': '读取信任注册表失败：{msg}',
   'trust.cannotRemember': '此目录未受信任，无法记住授权。',
+  'trust.badge': '未信任',
+  'trust.badgeHintConfig': '该项目带有配置（{what}），当前不会加载。点击信任此目录。',
+  'trust.badgeHintBare': '此目录未受信任，项目配置不会加载。点击信任它。',
 
   // ── store / errors ──
   'error.unexpected': '发生意外错误，请重试。',

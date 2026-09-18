@@ -1328,9 +1328,15 @@ export function registerIpcHandlers() {
     if (bridge) await bridge.cancel()
   })
 
-  ipcMain.handle(IPC.TOOL_APPROVE, async (_, sid: string, callId: string, always?: boolean, selected?: number[]) => {
+  ipcMain.handle(IPC.TOOL_APPROVE, async (
+    _, sid: string, callId: string, always?: boolean, selected?: number[], trust?: boolean,
+  ) => {
     const bridge = bridges.get(sid)
-    if (bridge) await bridge.approveTool(callId, always ?? false, selected)
+    if (!bridge) return null
+    // The engine answers with what happened (whether the rule landed, and the
+    // fresh trust snapshot when this click also trusted the project) — the
+    // renderer paints that instead of assuming the click was remembered.
+    return await bridge.approveTool(callId, always ?? false, selected, trust ?? false)
   })
 
   ipcMain.handle(IPC.TOOL_DENY, async (_, sid: string, callId: string) => {

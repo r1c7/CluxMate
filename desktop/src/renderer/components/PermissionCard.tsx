@@ -3,6 +3,7 @@ import { useStore } from '../stores'
 import type { AgentTypeInfo, RiskLevel } from '../../shared/types'
 import { loadAgentTypes } from '../agentTypes'
 import { toolDisplayName, relativePath, editsFromToolInput, uniquePaths } from './MultiEditDiff'
+import { alwaysAllowAction } from '../../shared/trust-rules'
 import { useT } from '../useI18n'
 
 const RISK_STYLE: Record<RiskLevel, { border: string; badge: string; labelKey: string }> = {
@@ -166,25 +167,40 @@ export default function PermissionCard() {
     return () => { alive = false }
   }, [sid, pending?.tool_name])
 
-  // "Always allow" is withheld for an untrusted directory: the grant would be
-  // written to a project permissions.json that is not being loaded, so it could
-  // never take effect (the engine's is_always_allowable() reports the same).
-  // Offer the decision that unblocks it instead of a button that silently does
-  // nothing. Untrusted ≠ read-only: approval itself stays available.
-  const alwaysBlockedByTrust = pending?.always_allowable === false &&
-    !!trust && trust.status !== 'trusted'
+  // What the "always allow" button is for THIS call (see alwaysAllowAction):
+  // 'with-trust' means the project is the only obstacle and the same click
+  // clears it — the engine records the trust answer and the grant together.
+  const alwaysAction = alwaysAllowAction(
+    pending?.always_allowable,
+    pending?.always_allowable_reason,
+    trust?.status,
+  )
+  const alwaysTrusts = alwaysAction === 'with-trust'
+
+  // The one case where the button stays hidden in an untrusted directory: the
+  // user DENIED this project (or the call itself can never be remembered — but
+  // then this row is not shown either, and there is nothing to fix). A grant
+  // would land in a permissions.json that nothing loads, and overriding a
+  // recorded denial from an approval card would silently undo a decision — so
+  // offer the deliberate way back instead of a button that writes nothing.
+  const alwaysBlockedByTrust = alwaysAction === 'hidden' &&
+    pending?.always_allowable_reason === 'untrusted'
 
   // Keyboard shortcuts: y = approve, a = always, n/esc = deny.
   useEffect(() => {
     if (!pending) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'y') { e.preventDefault(); approve(pending.call_id, false) }
-      else if (e.key === 'a') { if (alwaysBlockedByTrust) return; e.preventDefault(); approve(pending.call_id, true) }
+      else if (e.key === 'a') {
+        if (alwaysAction === 'hidden') return
+        e.preventDefault()
+        approve(pending.call_id, true, alwaysTrusts)
+      }
       else if (e.key === 'n' || e.key === 'Escape') { e.preventDefault(); deny(pending.call_id) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [pending, alwaysBlockedByTrust, approve, deny])
+  }, [pending, alwaysAction, alwaysTrusts, approve, deny])
 
   if (!pending) return null
   const style = RISK_STYLE[pending.risk_level]
@@ -226,11 +242,16 @@ export default function PermissionCard() {
           onClick={() => approve(pending.call_id, false)}
           className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink text-xs rounded font-medium transition-colors"
         >{t('permission.approve')}</button>
-        {pending.always_allowable !== false && (
+        {alwaysAction !== 'hidden' && (
           <button
-            onClick={() => approve(pending.call_id, true)}
-            className="px-3 py-1.5 bg-surface-border hover:bg-ink-faint/40 text-ink text-xs rounded font-medium transition-colors"
-          >{alwaysLabel}</button>
+            onClick={() => approve(pending.call_id, true, alwaysTrusts)}
+            title={alwaysTrusts ? t('permission.alwaysApproveAndTrustHint') : undefined}
+            className={`px-3 py-1.5 text-xs rounded font-medium transition-colors ${
+              alwaysTrusts
+                ? 'bg-accent/20 hover:bg-accent/30 text-accent border border-accent/40'
+                : 'bg-surface-border hover:bg-ink-faint/40 text-ink'
+            }`}
+          >{alwaysTrusts ? t('permission.alwaysApproveAndTrust') : alwaysLabel}</button>
         )}
         <button
           onClick={() => deny(pending.call_id)}
