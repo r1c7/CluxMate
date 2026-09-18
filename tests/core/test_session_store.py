@@ -1,5 +1,6 @@
 """Tests for the SQLite-metadata + JSONL-event-log SessionStore."""
 
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -362,6 +363,36 @@ class TestProjectRoot:
         assert meta["project_root"] == bad_cwd  # degraded to the session cwd
         assert meta["group_id"] is not None  # still a usable group key
         assert [g["name"] for g in store.list_groups()]
+
+    def test_a_cwd_realpath_cannot_resolve_still_creates_a_usable_group(
+        self, tmp_path, monkeypatch
+    ):
+        """The same guard, isolated from the PLATFORM's ``realpath``.
+
+        POSIX ``os.path.realpath`` raises ``ValueError`` on a path with an
+        embedded NUL (``lstat`` refuses it) while Windows' ``realpath`` returns
+        the string unchanged, so the test above can only fail on POSIX CI — on
+        Windows it would pass even if ``create`` called ``realpath`` unguarded.
+        Making the POSIX behaviour explicit here pins the guard everywhere.
+        """
+        real_realpath = os.path.realpath
+
+        def posix_realpath(path, **kwargs):
+            if "\x00" in str(path):
+                raise ValueError("lstat: embedded null character in path")
+            return real_realpath(path, **kwargs)
+
+        monkeypatch.setattr(os.path, "realpath", posix_realpath)
+        bad_cwd = str(tmp_path / "repo") + "\x00sub"
+        store = SessionStore(root_dir=tmp_path / "state")
+
+        sid = store.create("s", "p", "m", bad_cwd)
+
+        meta = store.load(sid)
+        assert meta["working_dir"] == bad_cwd
+        assert meta["project_root"] == bad_cwd
+        assert meta["group_id"] is not None
+        assert [g["name"] for g in store.list_groups()] == ["repo\x00sub"]
 
     def test_creation_survives_a_resolver_that_raises(self, tmp_path, monkeypatch):
         """The STORE's own guard, isolated from `project_root`'s behaviour.

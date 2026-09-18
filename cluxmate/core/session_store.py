@@ -48,6 +48,24 @@ def _resolve_root(cwd: str) -> str:
         return cwd
 
 
+def _resolved_path(cwd: str) -> str:
+    """``os.path.realpath`` under the store's "never raise" guarantee.
+
+    A session cwd can be a path this process cannot RESOLVE at all: on POSIX an
+    embedded NUL makes ``lstat`` raise ``ValueError`` (Windows only fails later,
+    at ``CreateFile``), and the auto-group KEY is derived from this call. So an
+    unusable path degrades to the raw string — the same degradation
+    ``_resolve_root`` makes for the same reason — instead of aborting session
+    creation (and every later ``update_cwd``/delete of that session).
+    """
+    if not cwd:
+        return ""
+    try:
+        return os.path.realpath(cwd)
+    except (OSError, ValueError):
+        return cwd
+
+
 def _same_cwd(a: str, b: str) -> bool:
     """Whether two working directories are the same project.
 
@@ -55,12 +73,16 @@ def _same_cwd(a: str, b: str) -> bool:
     stored the same directory with different spellings (relative vs absolute,
     trailing separator, symlink) must still count as one project. Mirror that
     normalization here rather than comparing raw strings.
+
+    An unresolvable path (see ``_resolved_path``) falls back to comparing the
+    spellings: there is nothing to resolve, and refusing to answer would make
+    ``delete`` raise on a session ``create`` accepted.
     """
     if not a or not b:
         return False
     try:
         return Path(a).resolve() == Path(b).resolve()
-    except OSError:
+    except (OSError, ValueError):
         return a == b
 
 
@@ -146,7 +168,7 @@ class SessionStore:
                 (row["id"],),
             ).fetchone()
             if sess and sess["cwd"]:
-                resolved = os.path.realpath(sess["cwd"])
+                resolved = _resolved_path(sess["cwd"])
                 self.conn.execute(
                     "UPDATE groups SET path = ? WHERE id = ?", (resolved, row["id"])
                 )
@@ -156,7 +178,7 @@ class SessionStore:
 
     def _ensure_group_for_cwd(self, cwd: str) -> str | None:
         """Return the auto group for a group KEY (a project root, not a session cwd)."""
-        resolved = os.path.realpath(cwd) if cwd else ""
+        resolved = _resolved_path(cwd)
         name = os.path.basename(resolved)
         if not name:
             return None
