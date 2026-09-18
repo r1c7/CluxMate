@@ -1,43 +1,7 @@
 import { ChildProcess, spawn } from 'child_process'
 import * as readline from 'readline'
-import { app } from 'electron'
-import { delimiter, join } from 'path'
-import { existsSync, readFileSync } from 'fs'
 import type { AgentTypeInfo, StreamEvent } from '../shared/types'
-
-// Prefer the cluxmate source bundled with the app (electron-builder.yml
-// extraResources → <resources>/cluxmate/) over whatever the user may have
-// pip-installed, so the desktop shell and the agent core are version-locked
-// to the same release. Third-party deps (openai/jinja2/httpx) still come from
-// the user's Python env — full self-containment is the PyInstaller step, not
-// this one. Returns the PYTHONPATH entry to prepend, or null when not packaged
-// (dev runs against the source checkout via `python -m`).
-function bundledCluxmatePythonpath(): string | null {
-  if (!app.isPackaged) return null
-  const resources = process.resourcesPath
-  if (existsSync(join(resources, 'cluxmate', '__init__.py'))) {
-    return resources
-  }
-  // Defensive: allow the package to be nested one level deeper.
-  if (existsSync(join(resources, 'cluxmate', 'cluxmate', '__init__.py'))) {
-    return join(resources, 'cluxmate')
-  }
-  return null
-}
-
-// Read the user's bash/MCP sandbox toggle (~/.cluxmate/sandbox.json). False
-// disables the OS shell sandbox by injecting CLUXMATE_BASH_SANDBOX=off into the
-// agent's spawn env — the Python core honors that at build (sandbox_disabled_by_env).
-// Default = enabled (sandbox on) when the file is absent or unreadable.
-function bashSandboxEnabled(): boolean {
-  try {
-    const p = join(app.getPath('home'), '.cluxmate', 'sandbox.json')
-    const data = JSON.parse(readFileSync(p, 'utf-8'))
-    return data.bash_sandbox_enabled !== false
-  } catch {
-    return true
-  }
-}
+import { agentEnv, pythonCommand } from './python-runtime'
 
 export class AgentBridge {
   private proc: ChildProcess | null = null
@@ -80,27 +44,9 @@ export class AgentBridge {
     this._spawnCwd = cwd
 
     return new Promise((resolve, reject) => {
-      const pythonCmd = process.platform === 'win32' ? 'python' : 'python3'
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUTF8: '1',
-        PYTHONUNBUFFERED: '1',
-      }
-      if (!bashSandboxEnabled()) {
-        env.CLUXMATE_BASH_SANDBOX = 'off'
-      }
-      const bundled = bundledCluxmatePythonpath()
-      if (bundled) {
-        // Prepend the bundled core so it wins over any pip-installed cluxmate,
-        // while still letting the user's env provide third-party deps.
-        env.PYTHONPATH = env.PYTHONPATH
-          ? `${bundled}${delimiter}${env.PYTHONPATH}`
-          : bundled
-      }
-      this.proc = spawn(pythonCmd, ['-m', 'cluxmate', 'agent', 'stdio'], {
+      this.proc = spawn(pythonCommand(), ['-m', 'cluxmate', 'agent', 'stdio'], {
         cwd: cwd,
-        env,
+        env: agentEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
       })
 
