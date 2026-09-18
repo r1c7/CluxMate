@@ -139,7 +139,8 @@ class AgentBuilder:
         self._cwd = cwd
         # Where the PROJECT's config state lives (git main worktree). Same as
         # cwd everywhere except when the session runs in a git worktree; the
-        # writable tree, sandbox workspace, shadow repo and LSP stay on _cwd.
+        # writable tree, sandbox workspace, shadow repo and the LSP WORKSPACE
+        # stay on _cwd. Project config — including lsp.json — is read from here.
         self._project_root = project_root or cwd
         self._provider = provider
         self._model = "claude-sonnet-4-6"
@@ -860,10 +861,16 @@ class AgentBuilder:
             mcp.shutdown()
 
     def _lsp_manager(self) -> "LSPManager":
-        """Lazy, cached LSP manager for this builder's cwd. Shared by children."""
+        """Lazy, cached LSP manager for this builder. Shared by children.
+
+        The manager's workspace (protocol root, spawn cwd, installers) is this
+        builder's cwd; its ``lsp.json`` comes from the project root — the same
+        split the other project-config readers use.
+        """
         if self._lsp is None:
             self._lsp = LSPManager(
-                self._cwd, sandbox=self._shell_sandbox(), trusted=self.trusted
+                self._cwd, sandbox=self._shell_sandbox(), trusted=self.trusted,
+                config_root=self.project_root,
             )
         # Auto-install runs installer commands — a write-class side effect — so
         # plan mode keeps it off regardless of lsp.json: hard isolation holds.

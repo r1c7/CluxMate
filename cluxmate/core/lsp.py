@@ -169,15 +169,24 @@ class LSPConfigManager:
     """Load and merge lsp.json from global and project roots.
 
     Global: ~/.cluxmate/lsp.json
-    Project: <cwd>/.cluxmate/lsp.json (deep-merges over global over defaults;
-    project can override per-server fields, disable a default, or add a new
-    language). Mirrors MCPConfigManager's two-root merge. Top-level shape:
+    Project: <config_root>/.cluxmate/lsp.json (deep-merges over global over
+    defaults; project can override per-server fields, disable a default, or add
+    a new language). Mirrors MCPConfigManager's two-root merge. Top-level shape:
 
     {"auto_install": false, "servers": {lang: ServerSpec-ish dict}}
+
+    ``config_root`` is where the PROJECT's config state lives — the git main
+    worktree when the session runs inside a linked worktree (core/project_root.py)
+    — while ``cwd`` stays the session's writable tree. Omitting it (the default)
+    keeps the project half on ``cwd``, so every pre-existing caller is unchanged.
     """
 
-    def __init__(self, cwd: str, *, trusted: bool = True):
+    def __init__(self, cwd: str, *, trusted: bool = True,
+                 config_root: str | None = None):
         self._cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+        self._config_root = (
+            str(Path(config_root).resolve()) if config_root else self._cwd
+        )
         # Project trust gate (core/trust.py): an untrusted directory contributes
         # no servers and no auto_install, so no installer can ever run for it.
         self._trusted = trusted
@@ -185,7 +194,7 @@ class LSPConfigManager:
     def _roots(self) -> list[Path]:
         roots = [Path.home() / ".cluxmate" / "lsp.json"]
         if self._trusted:
-            roots.append(Path(self._cwd) / ".cluxmate" / "lsp.json")
+            roots.append(Path(self._config_root) / ".cluxmate" / "lsp.json")
         return roots
 
     def load(self) -> dict[str, ServerSpec]:
@@ -898,6 +907,14 @@ class LSPManager:
     session-scoped lifecycle (shutdown/atexit) bounds them, not a single turn.
     Concurrent first-use calls share one spawn via a starting gate.
 
+    Two roots, deliberately different: ``workspace_root`` (``ws_root``) is the
+    TREE the protocol speaks about — it feeds ``LSPClient(root=…)``, the server's
+    spawn cwd, ``initialize``'s rootUri and the installer's cwd — while
+    ``config_root`` is where ``lsp.json`` is read from (the project root, i.e.
+    the git main worktree inside a linked worktree). Omitting ``config_root``
+    puts the config on ``workspace_root``, which is what every pre-existing
+    caller expects.
+
     Auto-install: when a server binary is missing, ``_spawn`` either installs
     it (effective auto_install for the spec is True and an install_cmd exists)
     or surfaces the install hint. Effective auto_install =
@@ -909,14 +926,21 @@ class LSPManager:
     """
 
     def __init__(self, workspace_root: str, specs: dict[str, ServerSpec] | None = None, sandbox=None,
-                 auto_install: bool = True, *, trusted: bool = True):
+                 auto_install: bool = True, *, trusted: bool = True,
+                 config_root: str | None = None):
         self.ws_root = workspace_root
         self._trusted = trusted
         if specs is not None:
             self.specs = specs
             self._auto_install_default = False
         else:
-            cfg = LSPConfigManager(workspace_root, trusted=trusted).load_config()
+            # lsp.json comes from the CONFIG root (the project root, i.e. the git
+            # main worktree); ws_root stays the protocol/tree root below. No
+            # config_root given ⇒ both are workspace_root, exactly as before.
+            cfg = LSPConfigManager(
+                workspace_root, trusted=trusted,
+                config_root=config_root or workspace_root,
+            ).load_config()
             self.specs = cfg.specs
             self._auto_install_default = cfg.auto_install
         self._sandbox = sandbox
