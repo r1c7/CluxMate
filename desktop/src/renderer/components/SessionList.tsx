@@ -141,15 +141,26 @@ function disambiguateProjectLabels(groups: GroupMeta[]): Map<string, string> {
 //   - A session in a Project (auto group) or ungrouped can only move into a
 //     user-created Group.
 //   - A session in a user-created Group can only move back to its Project (the
-//     auto group named after its cwd).
+//     auto group keyed by its project directory — `project_root || cwd`).
 function canMoveSessionTo(groups: GroupMeta[], session: SessionMeta, targetGroupId: string | null): boolean {
   const current = groups.find((g) => g.id === session.group_id)
   if (current && !current.is_auto) {
     if (targetGroupId === null) return false
     const target = groups.find((g) => g.id === targetGroupId)
-    // Match the session's own project by its resolved path (not basename), so
+    // Match the session's own PROJECT by its resolved path (not basename), so
     // two same-named directories don't both light up as the drop target.
-    return !!target && target.is_auto && normPath(target.path || '') === normPath(session.cwd)
+    // The project is `project_root || cwd` (§E), not `cwd`: an auto group is
+    // keyed by the project CONFIG root, so a worktree session's project group
+    // carries the MAIN worktree's path while the session's `cwd` is its tree —
+    // testing `cwd` alone silently refused to drag such a session back out of a
+    // user group (no highlight, dead drop). The `cwd` arm stays so a legacy group
+    // keyed by the tree path, or a row whose `project_root` is spelled
+    // differently from the group's realpath'd path, still lights up: no target
+    // that worked before stops working.
+    const targetPath = normPath(target?.path || '')
+    return !!target && target.is_auto &&
+      (targetPath === normPath(session.project_root || session.cwd) ||
+        targetPath === normPath(session.cwd))
   }
   if (targetGroupId === null) return false
   const target = groups.find((g) => g.id === targetGroupId)
@@ -808,7 +819,20 @@ export default function SessionList({ width }: { width: number }) {
                   onCancelEditGroup={cancelEditGroup}
                   displayName={projectLabels.get(g.id)}
                   onCreateSession={() => {
-                    const cwd = sessionsByGroup.get(g.id)?.[0]?.cwd
+                    // The PROJECT's directory — never a member session's EXECUTION
+                    // tree. `g.path` is the auto group's resolved project dir, so
+                    // it wins; the fallback chain covers a group row whose path is
+                    // unset (and keeps working for manual groups, which never carry
+                    // one: `project_root` is the session's project, `cwd` its tree).
+                    // Taking the first member's `cwd` (the old expression) is what
+                    // made worktree sessions dangerous: they now join their
+                    // project's auto group AND `listSessions()` sorts
+                    // `is_pinned DESC, updated_at DESC`, so right after creating a
+                    // tree session the first member IS the tree session — "+" then
+                    // started the next agent inside `<repo>/.worktrees/<name>`, or
+                    // bound that tree's empty session via SESSION_CREATE's reuse.
+                    const first = sessionsByGroup.get(g.id)?.[0]
+                    const cwd = g.path || first?.project_root || first?.cwd
                     if (cwd) { createSession(cwd); showChat() }
                   }}
                   onCreateWorktree={() => openWorktreeDialog(g.id)}
