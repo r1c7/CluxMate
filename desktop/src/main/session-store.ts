@@ -362,13 +362,26 @@ export function moveSessionToGroup(sessionId: string, groupId: string | null) {
 }
 
 // Move a session out of a user-created group back to the auto group for its
-// working directory (its "project"). Recreates the auto group if it was cleaned
-// up when the session left (e.g. it was the project's last session).
+// project — the same key `createSession` / `updateSessionCwd` group on.
+// Recreates the auto group if it was cleaned up when the session left (e.g. it
+// was the project's last session).
 export function moveSessionToProject(sessionId: string) {
   const db = getDb()
-  const session = db.prepare('SELECT cwd FROM sessions WHERE id = ?').get(sessionId) as { cwd: string } | undefined
+  const session = db.prepare('SELECT cwd, project_root FROM sessions WHERE id = ?').get(sessionId) as
+    | { cwd: string; project_root: string | null }
+    | undefined
   if (!session) return
-  moveSessionToGroup(sessionId, _ensureGroupForCwd(session.cwd))
+  // Key the auto group on the project CONFIG root, not the execution tree: a
+  // worktree session runs in `<repo>/.worktrees/<name>` but belongs to `<repo>`'s
+  // sidebar group, so `cwd` here used to conjure a second project named after the
+  // tree — contradicting the grouping `createSession` performs and the renderer's
+  // drag-back-to-project rule (`project_root || cwd`). `project_root` is null on
+  // rows created before the column existed, hence the fallback. The session's own
+  // `cwd` is deliberately left alone: only the group follows the project root.
+  const root = session.project_root || session.cwd
+  // moveSessionToGroup reads the session's old group before the update and cleans
+  // it up afterwards if it is now empty — that behaviour is reused as-is.
+  moveSessionToGroup(sessionId, _ensureGroupForCwd(root))
 }
 
 export function pinSession(id: string, pinned: boolean) {
