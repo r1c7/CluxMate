@@ -292,6 +292,19 @@ export interface WorktreeDialogState {
   path: string
 }
 
+// The open "delete this worktree session?" prompt. It carries ONLY the identity
+// of the session being deleted: the session row is read once, when the prompt is
+// requested, because the row is exactly what the user is about to destroy. The
+// live worktree facts (uncommitted files, git errors) are loaded by the dialog
+// itself, and `busy` / `message` live there too — the same split between store
+// identity and component state that WorktreeDialog uses.
+export interface DeleteSessionPrompt {
+  sessionId: string
+  title: string
+  name: string
+  branch: string
+}
+
 // What the renderer has to show the user BEFORE a worktree removal happens:
 // the tree's path, its branch, and the files inside it that are not committed.
 // `error` is set when git could not report them — "clean" and "could not tell"
@@ -426,6 +439,11 @@ interface AppState {
   // open the same dialog, and so the create action can read the target project
   // without threading it back through the component.
   worktreeDialog: WorktreeDialogState | null
+  // The open "delete this worktree session?" prompt (null = closed). Held here
+  // because all three delete entry points (the sidebar ✕, the context menu and
+  // the search results) must open the same prompt, and because the sidebar can
+  // unmount while it is open.
+  deletePrompt: DeleteSessionPrompt | null
   // One-shot draft to load into the input box (e.g. the undone message's text).
   // InputBox consumes it on change, then clears it via consumeInputDraft.
   inputDraft: string | null
@@ -467,6 +485,15 @@ interface AppState {
   refreshGitInfo: () => Promise<void>
   createSession: (cwd?: string) => Promise<void>
   deleteSession: (id: string) => Promise<void>
+  // Every delete entry point (sidebar ✕, context menu, search result) calls THIS,
+  // not deleteSession: an ordinary session is deleted right away — exactly the
+  // old path, no prompt — while a session that lives in a worktree opens the
+  // prompt first, because deleting it would strand a tree and a branch on disk.
+  // Callers fire and forget: the local-list hit path stays synchronous (it only
+  // touches state), and the miss path awaits one SESSION_LIST refresh before it
+  // can decide.
+  requestDeleteSession: (id: string) => Promise<void>
+  closeDeletePrompt: () => void
   // ── worktree sessions ──
   // Open the create dialog for one project (auto group id). Resolves the project
   // directory itself; a group with no resolvable path reports instead of opening.
@@ -635,6 +662,7 @@ export const useStore = create<AppState>((set, get) => ({
   editingSessionId: null,
   editingGroupId: null,
   worktreeDialog: null,
+  deletePrompt: null,
   inputDraft: null,
   mainView: 'chat',
   skills: [],
@@ -962,6 +990,70 @@ export const useStore = create<AppState>((set, get) => ({
     // Bridge for the deleted session is now gone — refresh sidebar dots.
     get().refreshBridgeStatuses()
   },
+
+  // The one branch point between an ordinary delete and a worktree one. Only a
+  // worktree session opens the prompt, and everything the prompt shows is
+  // captured HERE, from the row that is about to disappear.
+  //
+  // The lookup is deliberately two-staged. A HIT decides on the local row alone
+  // — no await, no IPC — so the ordinary delete keeps today's path verbatim: no
+  // prompt, no extra click, the same unawaited deleteSession call the ✕ button
+  // has always made. A MISS cannot be trusted to mean "no worktree": the search
+  // results come from the main process's full-text query, so a hit can be a
+  // session this list has never held (created by the CLI/TUI while the app was
+  // open, or simply not reloaded yet). Deleting one of those unasked would
+  // strand its tree and branch on disk with no row left to remove them from —
+  // the exact outcome this prompt exists to prevent. So a miss refreshes the
+  // list from the main process ONCE and decides again with the same rule; only
+  // a session still absent afterwards takes the ordinary path.
+  requestDeleteSession: async (id) => {
+    let session = get().sessions.find((s) => s.id === id)
+    if (!session) {
+      // SESSION_LIST is the same call the store already refreshes with, and it
+      // returns the whole row — worktree_name / worktree_branch included — so
+      // the retry sees exactly what the sidebar would. It is read directly
+      // rather than through loadSessions() only because that action joins on
+      // listGroups(): if GROUP_LIST failed, the joined promise would reject and
+      // throw away the fresh sessions this decision needs. Groups are not part
+      // of the decision and the next ordinary refresh reloads them.
+      try {
+        const sessions = await window.electronAPI.listSessions()
+        set({ sessions })
+        session = sessions.find((s) => s.id === id)
+      } catch {
+        // The refresh itself failed, so "no worktree" is UNKNOWN and must not be
+        // assumed. The prompt is the safe side of that unknown: it shows the
+        // not-readable warning and still offers "delete the session only", while
+        // deleting unasked could silently strand a tree. A session row that is
+        // genuinely gone only costs one extra click here.
+        set({ deletePrompt: { sessionId: id, title: '', name: '', branch: '' } })
+        return
+      }
+      if (!session) {
+        void get().deleteSession(id)
+        return
+      }
+    }
+    if (!isWorktreeSession(session)) {
+      void get().deleteSession(id)
+      return
+    }
+    set({
+      deletePrompt: {
+        sessionId: id,
+        title: session.title,
+        // No `!`: isWorktreeSession guarantees a non-blank name, but it is a
+        // plain boolean, so the trim is what makes the type honest.
+        name: (session.worktree_name || '').trim(),
+        branch: (session.worktree_branch || '').trim(),
+      },
+    })
+  },
+
+  // Only closes the prompt. Both destructive outcomes converge `sessions` /
+  // `activeSessionId` themselves (deleteSession; removeWorktreeSession), so
+  // clearing the identity here cannot fight either of them.
+  closeDeletePrompt: () => set({ deletePrompt: null }),
 
   // ── worktree sessions ──
   // The tree is made by the `cluxmate worktree` CLI (main process, §D); the

@@ -80,7 +80,7 @@ export default function ContextMenu() {
   const close = useStore((s) => s.closeContextMenu)
   const groups = useStore((s) => s.groups)
   const sessions = useStore((s) => s.sessions)
-  const deleteSession = useStore((s) => s.deleteSession)
+  const requestDeleteSession = useStore((s) => s.requestDeleteSession)
   const deleteGroup = useStore((s) => s.deleteGroup)
   const moveSession = useStore((s) => s.moveSession)
   const moveSessionToProject = useStore((s) => s.moveSessionToProject)
@@ -126,8 +126,12 @@ export default function ContextMenu() {
 
   if (!menu) return null
 
+  // A plain delete for an ordinary session; for a worktree session the store
+  // opens the three-outcome prompt instead (the tree would otherwise be stranded
+  // with no entry left to remove it). The "remove worktree" item above stays the
+  // explicit, no-prompt path to the removal itself.
   const doDeleteSession = () => {
-    if (target?.type === 'session') deleteSession(target.id)
+    if (target?.type === 'session') requestDeleteSession(target.id)
     close()
   }
 

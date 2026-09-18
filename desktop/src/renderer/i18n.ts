@@ -485,6 +485,22 @@ const en = {
   'worktree.create': 'Create',
   'worktree.createFailed': 'Failed to create the worktree: {msg}',
 
+  // ── delete a worktree session ──
+  // The prompt that replaces the immediate delete when the session lives in a
+  // worktree. The dirty-file lines deliberately reuse contextMenu.removeWorktree*
+  // and worktree.dirtyFiles: they describe the same facts, in the same words, as
+  // the "Remove Worktree…" path.
+  'deleteWorktree.title': 'Delete Worktree Session',
+  'deleteWorktree.body': 'The session "{title}" runs in the worktree "{name}" (branch {branch}). Remove the worktree together with the session?',
+  'deleteWorktree.removeBoth': 'Remove Worktree and Delete Session',
+  'deleteWorktree.removeBothDesc': 'Deletes the tree directory and its branch, then deletes the session.',
+  'deleteWorktree.deleteOnly': 'Delete Session Only (Keep the Worktree)',
+  'deleteWorktree.keepHint': 'Note: deleting the session alone keeps the worktree and its branch on disk. This session is the only entry to them in the UI, so afterwards they can only be removed with: cluxmate worktree remove {name}',
+  'deleteWorktree.dirtyTitle': 'This worktree has uncommitted changes',
+  'deleteWorktree.dirtyBody': 'They are not committed — removing the worktree discards them.',
+  'deleteWorktree.missing': 'This session no longer exists — it may have been deleted already.',
+  'deleteWorktree.deleteFailed': 'Failed to delete the session: {msg}',
+
   // ── agent inspector ──
   'inspector.agentTree': 'Agent Tree',
   'inspector.close': 'Close',
@@ -1122,6 +1138,18 @@ const zh: Record<keyof typeof en, string> = {
   'worktree.gitFailed': 'git 操作失败：{msg}',
   'worktree.create': '创建',
   'worktree.createFailed': '创建工作树失败：{msg}',
+
+  // ── delete a worktree session ──
+  'deleteWorktree.title': '删除工作树会话',
+  'deleteWorktree.body': '会话“{title}”运行在工作树“{name}”中（分支 {branch}）。是否连同工作树一起移除？',
+  'deleteWorktree.removeBoth': '移除工作树并删除会话',
+  'deleteWorktree.removeBothDesc': '删除该工作树目录及其分支，然后删除该会话。',
+  'deleteWorktree.deleteOnly': '仅删除会话（保留工作树）',
+  'deleteWorktree.keepHint': '注意：仅删除会话会把工作树及其分支留在磁盘上。会话是 UI 里唯一的入口，之后只能这样移除它们：cluxmate worktree remove {name}',
+  'deleteWorktree.dirtyTitle': '该工作树有未提交的更改',
+  'deleteWorktree.dirtyBody': '这些改动尚未提交——移除工作树会一并丢弃。',
+  'deleteWorktree.missing': '该会话已不存在——可能已被删除。',
+  'deleteWorktree.deleteFailed': '删除会话失败：{msg}',
 
   // ── agent inspector ──
   'inspector.agentTree': 'Agent 树',

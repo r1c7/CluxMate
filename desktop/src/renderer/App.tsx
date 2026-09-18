@@ -16,6 +16,7 @@ import DiffPanel from './components/DiffPanel'
 import ContextViewer from './components/ContextViewer'
 import ContextMenu from './components/ContextMenu'
 import WorktreeDialog from './components/WorktreeDialog'
+import DeleteWorktreeSessionDialog from './components/DeleteWorktreeSessionDialog'
 import SkillsView from './components/SkillsView'
 import McpView from './components/McpView'
 import HooksView from './components/HooksView'
@@ -72,6 +73,10 @@ function AppInner() {
   // Settings — both of which unmount SessionList — must not take it (and the
   // user's half-filled inputs) with them.
   const worktreeDialog = useStore((s) => s.worktreeDialog)
+  // Same reasoning: the "delete this worktree session?" prompt is opened from the
+  // sidebar's ✕ / context menu / search results, all of which can unmount, so it
+  // is driven by store state and mounted here too.
+  const deletePrompt = useStore((s) => s.deletePrompt)
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title || t('chat.newSession')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [ready, setReady] = useState(false)
@@ -303,6 +308,7 @@ function AppInner() {
       {/* Overlay slot: app-level, next to ContextMenu, because the sidebar
           (SessionList) is conditionally rendered — see the selector above. */}
       {worktreeDialog && <WorktreeDialog path={worktreeDialog.path} />}
+      {deletePrompt && <DeleteWorktreeSessionDialog prompt={deletePrompt} />}
       <Toast />
     </div>
   )

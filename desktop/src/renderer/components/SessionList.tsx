@@ -542,7 +542,10 @@ export default function SessionList({ width }: { width: number }) {
   const clearSearch = useStore((s) => s.clearSearch)
   const mainView = useStore((s) => s.mainView)
   const switchSession = useStore((s) => s.switchSession)
-  const deleteSession = useStore((s) => s.deleteSession)
+  // Every delete entry in this file (the row ✕, the search-result ✕ and both
+  // group variants) goes through requestDeleteSession, not deleteSession: an
+  // ordinary session is deleted immediately, a worktree session asks first.
+  const requestDeleteSession = useStore((s) => s.requestDeleteSession)
   const createSession = useStore((s) => s.createSession)
   const openWorktreeDialog = useStore((s) => s.openWorktreeDialog)
   const createGroup = useStore((s) => s.createGroup)
@@ -764,7 +767,7 @@ export default function SessionList({ width }: { width: number }) {
                   query={searchQuery}
                   active={hit.meta.id === activeSessionId}
                   onClick={() => { switchSession(hit.meta.id); showChat() }}
-                  onDelete={() => deleteSession(hit.meta.id)}
+                  onDelete={() => requestDeleteSession(hit.meta.id)}
                   onRename={(title) => renameSession(hit.meta.id, title)}
                   onContextMenu={handleSessionContextMenu(hit.meta)}
                 />
@@ -801,7 +804,7 @@ export default function SessionList({ width }: { width: number }) {
                   sessions={sessionsByGroup.get(g.id) || []}
                   activeSessionId={activeSessionId}
                   onSessionClick={(id) => { switchSession(id); showChat() }}
-                  onSessionDelete={(id) => deleteSession(id)}
+                  onSessionDelete={(id) => requestDeleteSession(id)}
                   onSessionRename={(id, title) => renameSession(id, title)}
                   onSessionContextMenu={handleSessionContextMenu}
                   onRenameGroup={(id, name) => renameGroup(id, name)}
@@ -859,7 +862,7 @@ export default function SessionList({ width }: { width: number }) {
                   sessions={sessionsByGroup.get(g.id) || []}
                   activeSessionId={activeSessionId}
                   onSessionClick={(id) => { switchSession(id); showChat() }}
-                  onSessionDelete={(id) => deleteSession(id)}
+                  onSessionDelete={(id) => requestDeleteSession(id)}
                   onSessionRename={(id, title) => renameSession(id, title)}
                   onSessionContextMenu={handleSessionContextMenu}
                   onRenameGroup={(id, name) => renameGroup(id, name)}
@@ -895,7 +898,7 @@ export default function SessionList({ width }: { width: number }) {
                       session={s}
                       active={s.id === activeSessionId}
                       onClick={() => { switchSession(s.id); showChat() }}
-                      onDelete={() => deleteSession(s.id)}
+                      onDelete={() => requestDeleteSession(s.id)}
                       onRename={(title) => renameSession(s.id, title)}
                       onContextMenu={handleSessionContextMenu(s)}
                       editing={editingSessionId === s.id}
