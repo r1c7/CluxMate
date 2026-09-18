@@ -163,7 +163,10 @@ def create(
     The container is ignored BEFORE the tree is created (``exclude-failed`` if
     git cannot be made to ignore it): an unignored container is a change the
     main tree reports as the user's own, and the desktop's "commit them" button
-    would then record every checkout as an embedded repository.
+    would then record every checkout as an embedded repository. It is asked
+    before the dirty check too — a `<common>/info/exclude` git cannot read makes
+    `git status` itself die on POSIX, so the order is what turns that repository
+    into `exclude-failed` (the file to fix) instead of a bare `git-failed`.
     """
     repo_root = _repo_root(cwd)
     _reject_container(cwd, repo_root)
@@ -191,14 +194,6 @@ def create(
     final_branch = explicit_branch or f"{_BRANCH_PREFIX}{final_slug}"
     base_sha, base_ref = _resolve_base(repo_root, base)
 
-    dirty = _dirty_files(repo_root)
-    if dirty and not allow_dirty:
-        raise WorktreeError(
-            "dirty",
-            "the main worktree has uncommitted changes",
-            {"files": dirty},
-        )
-
     # BEFORE the tree exists, because this is the ONE thing an unignored
     # container does to a repository the user did not ask for: `git add -A` —
     # which the desktop's "commit the changes" button really runs — records each
@@ -209,6 +204,18 @@ def create(
     # very next `create` refuse a dirty main tree whose only entry is
     # ``?? .worktrees/`` — a directory CluxMate made (that guard is
     # `_dirty_files`, and it only papers over this).
+    #
+    # It is asked BEFORE the dirty check below as well, and for a reason that is
+    # invisible on Windows: on POSIX a `<common>/info/exclude` that is not a
+    # readable regular file passes git's own `access(R_OK)` probe and then makes
+    # git DIE inside `add_patterns` — ``fatal: cannot use … as an exclude file``,
+    # exit 128 — on EVERY command that parses excludes, `git status` (that dirty
+    # check) included. Asking afterwards would report this repository's broken
+    # exclude as an opaque `git-failed` raised by an unrelated command instead of
+    # the actionable verdict below, which names the file to fix. The price is
+    # that a create refused as `dirty` has already written the exclude line: one
+    # line in an untracked file, the very line the next successful create would
+    # write, and `_dirty_files` never counts the container anyway.
     #
     # The cost is deliberate: a repository whose `<common>/info` cannot be
     # written now fails here instead of quietly working. It is a hard failure
@@ -222,6 +229,14 @@ def create(
             f"to {_exclude_file(repo_root)}, or add `{_CONTAINER}/` to the "
             "repository's .gitignore",
             {"container": _CONTAINER, "exclude": _exclude_file(repo_root)},
+        )
+
+    dirty = _dirty_files(repo_root)
+    if dirty and not allow_dirty:
+        raise WorktreeError(
+            "dirty",
+            "the main worktree has uncommitted changes",
+            {"files": dirty},
         )
 
     code, _, err = _run(

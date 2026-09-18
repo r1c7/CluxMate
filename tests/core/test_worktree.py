@@ -263,6 +263,7 @@ def test_create_refuses_when_the_container_cannot_be_ignored(tmp_path):
     """
     repo = _repo(tmp_path)
     exclude = repo / ".git" / "info" / "exclude"
+    before = sorted(p.name for p in repo.iterdir())
     exclude.unlink()
     exclude.mkdir()
 
@@ -272,9 +273,60 @@ def test_create_refuses_when_the_container_cannot_be_ignored(tmp_path):
     assert err.value.code == "exclude-failed"
     assert str(exclude) in err.value.message
     assert err.value.details["exclude"] == str(exclude)
-    # Nothing was created, and the main tree stayed exactly as it was.
+    # Nothing was created, and the main tree stayed exactly as it was — the
+    # obstruction included: the refusal reports the path, it does not repair it.
     assert not (repo / ".worktrees").exists()
-    assert _git_out("status", "--porcelain", cwd=repo).strip() == ""
+    assert exclude.is_dir()
+    assert sorted(p.name for p in repo.iterdir()) == before
+    # `git status` is only believed where it can answer: on POSIX this
+    # repository is exactly the one git DIES on ("fatal: cannot use … as an
+    # exclude file", exit 128) — the premise of the test, not a second failure.
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True
+    )
+    if status.returncode == 0:
+        assert status.stdout.strip() == ""
+    else:
+        assert "exclude" in status.stderr
+
+
+def test_a_broken_exclude_is_reported_before_the_dirty_check_asks_git(
+    tmp_path, monkeypatch
+):
+    """The exclude precondition is asked FIRST — order, not just the verdict.
+
+    On POSIX the repository below is one git cannot even take a `status` of: a
+    directory at `<git-common-dir>/info/exclude` passes git's own `access(R_OK)`
+    probe and then dies inside `add_patterns` (git 2.43 `dir.c`, exit 128), so
+    asking the dirty question first reports it as an opaque `git-failed` from an
+    unrelated command instead of `exclude-failed`, which names the file to fix.
+
+    Windows git tolerates that directory (it opens it, sees a zero size and
+    returns without parsing), so the POSIX death is simulated here — the sibling
+    test above is the real thing and only fails on POSIX CI.
+    """
+    repo = _repo(tmp_path)
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.unlink()
+    exclude.mkdir()
+    real_run = worktree._run
+
+    def posix_run(args, cwd, *, user_config=False):
+        if args[:1] == ["status"]:
+            raise worktree.WorktreeError(
+                "git-failed",
+                f"git status failed: fatal: cannot use {exclude} as an exclude file",
+                {"stderr": f"fatal: cannot use {exclude} as an exclude file"},
+            )
+        return real_run(args, cwd, user_config=user_config)
+
+    monkeypatch.setattr(worktree, "_run", posix_run)
+
+    with pytest.raises(worktree.WorktreeError) as err:
+        worktree.create(str(repo), name="me")
+
+    assert err.value.code == "exclude-failed"
+    assert not (repo / ".worktrees").exists()
 
 
 def test_create_suffixes_a_slug_that_already_exists(tmp_path):
