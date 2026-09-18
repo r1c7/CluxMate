@@ -263,6 +263,69 @@ def test_create_inside_a_linked_worktree_lands_in_the_main_repo_container(tmp_pa
     assert _same(first["path"], repo / ".worktrees" / "first")
 
 
+# --- git environment of the CONTENT-semantics calls ------------------------
+
+
+def _crlf_repo(tmp_path) -> Path:
+    """A repo whose WORKING TREE is CRLF while its index/commit holds LF.
+
+    That is what Git for Windows produces by default, and it is the measured
+    situation the `user_config=True` exception exists for: whether such a tree
+    counts as "modified" is decided by the user's EOL config, not by the bytes.
+    """
+    repo = tmp_path / "crlf-repo"
+    repo.mkdir()
+    _git("init", cwd=repo)
+    (repo / "a.txt").write_bytes(b"a\r\n")
+    # EOL conversion asked for on the COMMAND LINE only, so nothing about it
+    # lands in the repository's own config: the config under test is the
+    # user-global one the isolation would otherwise null.
+    _git("-c", "core.autocrlf=true", "add", "-A", cwd=repo)
+    _git("commit", "-m", "init", cwd=repo)
+    return repo
+
+
+def test_content_calls_read_the_users_eol_config(tmp_path, monkeypatch):
+    """`user_config=True` is a contract, not an implementation detail.
+
+    `_env(user_config=True)` deliberately leaves `GIT_CONFIG_GLOBAL` /
+    `GIT_CONFIG_SYSTEM` unset for the calls that ask about CONTENT
+    (`status --porcelain`, `worktree add`, `worktree remove`, `check-ignore`).
+    With them nulled git sees no `core.autocrlf`, so the tree below — freshly
+    committed, never touched — reports ` M a.txt`: `create` would call every
+    Windows repository dirty and `remove` would demand `--force`. Re-nulling
+    the two variables turns this test red.
+    """
+    repo = _crlf_repo(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[core]\n\tautocrlf = true\n", encoding="utf-8")
+    # git reads that file precisely because the two GIT_CONFIG_* variables are
+    # unset in this mode; an un-nulled GLOBAL path IS the mechanism.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_SYSTEM", raising=False)
+
+    # Premise, so the assertions below cannot pass vacuously: the commit really
+    # holds LF while the working tree holds CRLF, i.e. only the EOL config can
+    # call this tree clean.
+    assert (repo / "a.txt").read_bytes() == b"a\r\n"
+    assert subprocess.run(
+        ["git", "cat-file", "blob", "HEAD:a.txt"],
+        cwd=repo, check=True, capture_output=True,
+    ).stdout == b"a\n"
+
+    assert worktree._dirty_files(str(repo)) == []  # create's dirty guard
+    created = worktree.create(str(repo), name="crlf")
+    assert created["dirty"] == []
+    # `worktree add` checked the tree out under the same config.
+    assert (Path(created["path"]) / "a.txt").read_bytes() == b"a\r\n"
+    out = worktree.remove(str(repo), "crlf")
+    assert out["ok"] is True  # remove's dirty guard, and git's own re-check
+    assert not Path(created["path"]).exists()
+
+
 # --- info / list -----------------------------------------------------------
 
 

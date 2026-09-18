@@ -47,13 +47,10 @@ from cluxmate.core import project_root
 
 # One git call must never outlive this. `worktree add` on a large repository is
 # the slowest thing here, and "slow" has to become an error, never a hang: the
-# desktop waits on this CLI.
+# desktop waits on this CLI. The post-kill cleanup after a timeout is
+# `project_root._reap` — the ONE copy of that measured Windows hazard (see
+# `_run`), borrowed here rather than duplicated.
 _TIMEOUT_SECONDS = 30
-
-# Bound on the post-kill cleanup of a git call that timed out (see `_reap`).
-# Kept separate from _TIMEOUT_SECONDS: cleanup is not a second chance for the
-# command to answer, it is how we let go of it without waiting on it again.
-_REAP_TIMEOUT_SECONDS = 1
 
 # Worktrees live in ONE container under the main worktree root, so a repository
 # has exactly one directory to ignore (`<git-common-dir>/info/exclude`) and the
@@ -338,9 +335,9 @@ def remove(
 def _run(args: list[str], cwd: str, *, user_config: bool = False) -> tuple[int, str, str]:
     """Run ONE git command → ``(returncode, stdout, stderr)``. Never blocks.
 
-    Mirrors ``project_root._run_git`` / ``_reap``, and borrows its ``_env()``
-    rather than re-implementing it, because both exist for reasons that apply
-    verbatim to every git child this module spawns:
+    Mirrors ``project_root._run_git`` and borrows both its ``_env()`` and its
+    ``_reap()`` rather than re-implementing either, because both exist for
+    reasons that apply verbatim to every git child this module spawns:
 
     * ``stdin`` MUST be detached. Under ``agent stdio``, or when the desktop
       runs this CLI from its bridge, this process's stdin is a pipe; an MSYS2
@@ -350,7 +347,9 @@ def _run(args: list[str], cwd: str, *, user_config: bool = False) -> tuple[int, 
       Windows kills the child and then calls ``communicate()`` AGAIN with no
       timeout (CPython ``subprocess.py``), joining the reader threads unbounded,
       so a child whose pipe write end is still held open hangs forever instead
-      of raising ``TimeoutExpired``. Hence ``kill()`` → ``wait`` → close.
+      of raising ``TimeoutExpired``. Hence ``kill()`` → ``wait`` → close, which
+      is exactly ``project_root._reap``; calling it (never a second
+      ``communicate()``) is what keeps the cleanup itself bounded.
     * ``project_root._env()`` is the ONE home of the git environment isolation
       (``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM`` → ``os.devnull``,
       ``GIT_TERMINAL_PROMPT=0``, ``GIT_OPTIONAL_LOCKS=0``, and popping
@@ -381,7 +380,10 @@ def _run(args: list[str], cwd: str, *, user_config: bool = False) -> tuple[int, 
     try:
         stdout, stderr = proc.communicate(timeout=_TIMEOUT_SECONDS)
     except (subprocess.SubprocessError, OSError, ValueError):
-        _reap(proc)
+        # Delegated on purpose: `project_root._reap` is the ONE copy of the
+        # measured Windows hazard, so a fix to it can never leave this module's
+        # git calls able to hang the CLI the desktop is waiting on.
+        project_root._reap(proc)
         raise WorktreeError(
             "git-failed",
             f"git {args[0] if args else ''} did not finish within {_TIMEOUT_SECONDS}s",
@@ -423,30 +425,6 @@ def _env(*, user_config: bool = False) -> dict[str, str]:
         env.pop("GIT_CONFIG_GLOBAL", None)
         env.pop("GIT_CONFIG_SYSTEM", None)
     return env
-
-
-def _reap(proc: subprocess.Popen) -> None:
-    """Best-effort disposal of a git call that outlived its timeout.
-
-    Deliberately does NOT ``communicate()`` again — that is the unbounded join
-    described in ``_run``. Closing our pipe ends is what releases the orphaned
-    reader threads, and both steps are bounded, so the cleanup cannot become a
-    second hang of its own.
-    """
-    try:
-        proc.kill()
-    except Exception:
-        pass
-    try:
-        proc.wait(timeout=_REAP_TIMEOUT_SECONDS)
-    except Exception:
-        pass
-    for stream in (proc.stdout, proc.stderr):
-        try:
-            if stream is not None:
-                stream.close()
-        except Exception:
-            pass
 
 
 def _repo_root(cwd: str) -> str:
