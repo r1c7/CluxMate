@@ -286,7 +286,33 @@ export function updateSession(
   getDb().prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
 }
 
-export function updateSessionCwd(id: string, cwd: string, projectRoot?: string) {
+// Point a session at another directory. `projectRoot` is its §E project CONFIG
+// root (the main worktree for a session in a linked worktree), defaulting to
+// `cwd` for callers that cannot resolve one.
+//
+// `keepWorktree` says whether the new `cwd` is STILL inside the tree the row
+// already records. `worktree_name`/`worktree_branch` describe that tree and
+// nothing else, so this update has exactly two cases and neither of them may
+// re-derive either column:
+//
+//  - `true` — the session stays in its own tree, so the pair is left out of the
+//    SET list entirely and survives byte-identical. The row already holds the
+//    truth (`createSession` takes them from the CLI SEPARATELY: `worktreeName` is
+//    the slug, `worktreeBranch` is `cluxmate/<slug>`), and writing the slug into
+//    both would silently downgrade the branch — the sidebar badge's tooltip would
+//    then lie.
+//  - `false` — the session has left the tree (or was never in one), so both
+//    columns become NULL. Stale is dangerous here: the sidebar keeps rendering
+//    "remove worktree" off the name, and the removal force-deletes
+//    `<project_root>/.worktrees/<name>`, which after a move is a DIFFERENT tree
+//    than the one the session occupies (it could be a sibling worktree the user
+//    never pointed at).
+export function updateSessionCwd(
+  id: string,
+  cwd: string,
+  projectRoot?: string,
+  keepWorktree = false,
+) {
   const db = getDb()
   const old = db.prepare('SELECT group_id FROM sessions WHERE id = ?').get(id) as { group_id: string | null } | undefined
   const oldGroupId = old?.group_id ?? null
@@ -296,9 +322,15 @@ export function updateSessionCwd(id: string, cwd: string, projectRoot?: string) 
   const root = projectRoot || cwd
   const newGroupId = _ensureGroupForCwd(root)
 
-  db.prepare(
-    'UPDATE sessions SET cwd = ?, project_root = ?, group_id = ?, updated_at = ? WHERE id = ?'
-  ).run(cwd, root, newGroupId, new Date().toISOString(), id)
+  const sets = ['cwd = ?', 'project_root = ?', 'group_id = ?', 'updated_at = ?']
+  const vals: unknown[] = [cwd, root, newGroupId, new Date().toISOString()]
+  if (!keepWorktree) {
+    // Leave the pair untouched above; clear it here. Never written from a name.
+    sets.push('worktree_name = ?', 'worktree_branch = ?')
+    vals.push(null, null)
+  }
+  vals.push(id)
+  db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
 
   if (oldGroupId && oldGroupId !== newGroupId) {
     _cleanupAutoGroup(oldGroupId)

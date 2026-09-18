@@ -149,3 +149,55 @@ export function planTrustCall(
     targetIsSessionDir: session !== '' && sameDir(targetCwd, session),
   }
 }
+
+// ── §E: the project CONFIG root vs the execution tree ───────────────────────
+// The rule the whole desktop config layer hangs on, in the same pure module as
+// the trust helpers because the trust target below is derived from it: a
+// session's project config root is `project_root || cwd`. Kept here (not in
+// ipc-handlers.ts) so desktop/tests can exercise it without an Electron
+// harness — getting it backwards silently points the panels at another tree.
+
+// A session's §E project config root — permissions.json, mcp.json, skills.json,
+// settings.json, memory facts, AGENTS.md and the trust key all resolve through
+// it — read structurally, so this module still has no dependency on
+// shared/types.ts.
+//
+// `fallback` is the caller's `cwd`: a row written before the project_root column
+// existed has it NULL, and `project_root || cwd` must then be the row's own cwd
+// (today's behaviour), never an empty string. A session with no row at all has
+// no config root to report, so the caller's fallback stands alone.
+export function projectConfigRoot(
+  session: { project_root?: string | null } | null | undefined,
+  fallback: string,
+): string {
+  return session?.project_root || fallback
+}
+
+// The directory a TRUST call is about, as the trust subsystem files it.
+//
+// Python resolves every trust target to that directory's PROJECT CONFIG ROOT —
+// both the registry rows and the answer a process loaded are keyed there — so a
+// call about a session's own execution tree and a call about its project root
+// are the same call about the same config. Normalizing here is what keeps the
+// two spellings from becoming two different answers: the renderer asks about the
+// tree the session runs in (`workingDir`), while the session-only decision map
+// and the bridge-restart guard are keyed on the project root. Without it, a
+// worktree session's card would neither file its "just this once" answer where
+// the next spawn reads it, nor restart the processes that loaded the answer that
+// changed.
+//
+// A target that is NOT this session's own tree travels unchanged: the Settings
+// list revokes any recorded row, and rows are project roots already.
+//
+// `sameDir` is the caller's own path comparison, the same injection the rest of
+// this module takes (`sameCwd` in the main process): the comparison resolves
+// symlinks and canonical case, which is filesystem work this module deliberately
+// does not do.
+export function trustTargetDir(
+  cwd: string,
+  meta: { cwd: string },
+  projectRoot: string,
+  sameDir: (a: string, b: string) => boolean,
+): string {
+  return sameDir(cwd, meta.cwd) ? projectRoot : cwd
+}

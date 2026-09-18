@@ -5,7 +5,7 @@ import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
 import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot, SessionMeta, WorktreeCreateSessionParams, WorktreeCreateSessionResult, WorktreeRemoveResult } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
-import { bridgesToRestart, planTrustCall } from '../shared/trust-rules'
+import { bridgesToRestart, planTrustCall, projectConfigRoot, trustTargetDir } from '../shared/trust-rules'
 import { canonicalCwdKey } from './cwd-key'
 import { AgentBridge } from './agent-bridge'
 import { setAttention } from './attention'
@@ -18,7 +18,62 @@ import { SKILL_MAX_BYTES, isAllowedSkillPath, listSkills, setSkillDisabled } fro
 // the Python CLI. Every function here resolves — none throws — so a caller
 // branches on `ok` instead of wrapping the call.
 import { worktreeCreate, worktreeInfo, worktreeRemove } from './worktree'
+import type { WorktreeRemoveOptions, WorktreeRemovePayload, WorktreeResult } from './worktree'
 import { version as appVersion } from '../../package.json'
+
+// §B: every tree CluxMate creates lives in `<repo_root>/.worktrees/<name>`, and a
+// worktree session's `cwd` is exactly that directory. Both halves of the removal
+// path below need to ask "is the session still IN that tree?" — see
+// `worktreePathForSession`.
+const WORKTREE_CONTAINER = '.worktrees'
+
+// Is `candidate` inside `container` (or the container itself)? Plain
+// string/relative comparison on resolved paths: `session.cwd` is where the
+// bridge runs, and by the time it is asked about, the tree is on disk.
+function isInsideDir(container: string, candidate: string): boolean {
+  if (!container || !candidate) return false
+  const rel = path.relative(path.resolve(container), path.resolve(candidate))
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel))
+}
+
+// The absolute path of the tree a session's recorded worktree names — but ONLY
+// while the session still runs inside it. `worktree_name`/`worktree_branch`
+// describe where the session is running, and the sidebar's "change working
+// directory" control can move a session out of its tree (or into a second one)
+// without touching either column; a stale name would then let "remove worktree"
+// delete a tree the user never pointed at. `null` means the session is no longer
+// in its worktree, and callers refuse instead of acting on the stale name.
+function worktreePathForSession(session: SessionMeta): string | null {
+  const name = session.worktree_name
+  if (!name) return null
+  const tree = path.join(projectConfigRoot(session, session.cwd), WORKTREE_CONTAINER, name)
+  return isInsideDir(tree, session.cwd) ? tree : null
+}
+
+// `AgentBridge.kill()` sends SIGTERM and schedules SIGKILL after 5s, then
+// resolves — it does NOT wait for the process to exit (that is its contract for
+// every caller, and it is deliberately not changed here). On Windows a dying
+// process's cwd keeps the directory locked for a moment, so the FIRST
+// `git worktree remove` right after `await bridge.kill()` can come back as
+// `git-failed` while the process is still on its way out.
+const WORKTREE_REMOVE_RETRY_MS = 1500
+
+// Retry `worktree remove` at most ONCE, after a fixed short wait. Bounded by
+// construction: one extra attempt, a constant wait, no backoff growth and no
+// unbounded wait (the CLI call itself is already bounded by main/worktree.ts's
+// timeout). The retry is only for `git-failed` (the transport-level
+// `python-missing` / `timeout` / `bad-output` and every other §A code would just
+// fail again); a second failure is reported exactly as it is today, with the tree
+// and the session left untouched so the user can retry by hand.
+async function worktreeRemoveWithRetry(
+  opts: WorktreeRemoveOptions,
+): Promise<WorktreeResult<WorktreeRemovePayload>> {
+  const first = await worktreeRemove(opts)
+  if (first.ok || first.error !== 'git-failed') return first
+  console.warn(`worktree remove failed, retrying once in ${WORKTREE_REMOVE_RETRY_MS}ms:`, first.message)
+  await new Promise<void>((resolve) => setTimeout(resolve, WORKTREE_REMOVE_RETRY_MS))
+  return worktreeRemove(opts)
+}
 
 const bridges = new Map<string, AgentBridge>()
 const pendingSpawns = new Map<string, Promise<void>>()
@@ -115,39 +170,16 @@ function gitRepoRoot(cwd: string): Promise<string> {
   })
 }
 
-// §E — the ONE place the desktop's project-config-root policy lives: a session's
-// project config root is `session.project_root || session.cwd`.
-//
-// Every main-process read or write of PROJECT CONFIG on disk resolves it through
-// here: permissions.json, mcp.json, settings.json, skills.json, memory facts,
-// AGENTS.md, and the trust key. Everything that locates the EXECUTION tree — the
-// bridge spawn cwd, an ensureBridge warm cwd, the RPCs sent to it, and every
-// workspace file read — keeps using `session.cwd`, the tree the agent actually
-// runs in. Getting the two backwards silently moves the agent or the panels into
-// the wrong tree.
-//
-// `fallback` is the caller's `cwd`: a row written before the project_root column
-// existed has it NULL, and `project_root || cwd` must then be the row's own cwd
-// (today's behaviour), never an empty string.
-function projectConfigRoot(session: SessionMeta | undefined | null, fallback: string): string {
-  return session?.project_root || fallback
-}
-
-// The directory a TRUST call is about, as the trust subsystem files it (§E).
-// Python resolves every trust target to that directory's PROJECT CONFIG ROOT —
-// both the registry rows and the answer a process loaded are keyed there — so a
-// call about a session's own execution tree and a call about its project root are
-// the same call about the same config. Normalizing here is what keeps the two
-// spellings from becoming two different answers: the renderer asks about the tree
-// the session runs in (`workingDir`), while the session-only decision map and the
-// restart guard below are keyed on the project root. Without it, a worktree
-// session's card would neither file its "just this once" answer where the next
-// spawn reads it, nor restart the processes that loaded the answer that changed.
-// A target that is NOT this session's own tree travels unchanged: the Settings
-// list revokes any recorded row, and rows are project roots already.
-function trustTargetDir(cwd: string, meta: SessionMeta, projectRoot: string): string {
-  return sameCwd(cwd, meta.cwd) ? projectRoot : cwd
-}
+// §E — the desktop's project-config-root policy and the trust target derived from
+// it live in shared/trust-rules.ts, the pure module the renderer can load too:
+// every main-process read or write of PROJECT CONFIG on disk (permissions.json,
+// mcp.json, settings.json, skills.json, memory facts, AGENTS.md, the trust key)
+// resolves the root through `projectConfigRoot`, while everything that locates
+// the EXECUTION tree — the bridge spawn cwd, an ensureBridge warm cwd, the RPCs
+// sent to it, and every workspace file read — keeps using `session.cwd`, the tree
+// the agent actually runs in. Getting the two backwards silently moves the agent
+// or the panels into the wrong tree. `sameCwd` above is the main process's own
+// path comparison, injected into the shared rules.
 
 // Project-scoped tool-approval policy, mirrors cluxmate/core/permissions.py.
 // Lives at <project config root>/.cluxmate/permissions.json so "accept edits" is
@@ -695,7 +727,21 @@ export function registerIpcHandlers() {
     // copy of the project's permissions / mcp / skills / facts. Same fail-safe as
     // SESSION_CREATE: an unusable `worktreeInfo` degrades to `cwd`.
     const info = await worktreeInfo(cwd)
-    sessionStore.updateSessionCwd(id, cwd, info.ok ? info.config_root : cwd)
+    const projectRoot = info.ok ? info.config_root : cwd
+    // worktree_name / worktree_branch describe the tree the session RUNS in, so a
+    // move has to clear them: everything downstream (the sidebar badge, the
+    // "remove worktree" entry, the removal's target) reads that name, and a stale
+    // one would point at a tree this session no longer occupies — or at a
+    // DIFFERENT worktree, if the new directory is a second tree. When the new cwd
+    // is still inside that tree the pair is KEPT — the store leaves both columns
+    // untouched rather than re-deriving them, because they are not the same value
+    // (creation writes the slug to `worktree_name` and `cluxmate/<slug>` to
+    // `worktree_branch`).
+    const meta = sessionStore.getSession(id)
+    const stillInTree = meta
+      ? worktreePathForSession({ ...meta, cwd, project_root: projectRoot })
+      : null
+    sessionStore.updateSessionCwd(id, cwd, projectRoot, stillInTree !== null)
     // Don't kill bridge here — ensureBridge will detect the cwd
     // change and respawn when CHAT_SEND fires next.
   })
@@ -770,6 +816,20 @@ export function registerIpcHandlers() {
           message: 'This session is not running in a worktree of its own.',
         }
       }
+      // …and it must still be running IN that tree. The name alone is not proof:
+      // the working-directory control can move a session into the main tree (or
+      // into a SECOND worktree) without clearing the column, and removing the
+      // name it still carries would force-delete a tree the user never pointed
+      // at, discarding whatever was uncommitted in it. Refusing here — before the
+      // CLI is ever called — is the only outcome that cannot lose work.
+      const target = worktreePathForSession(session)
+      if (!target) {
+        return {
+          ok: false,
+          error: 'not-a-worktree',
+          message: `This session is no longer running in its worktree (${name}), so there is nothing here to remove.`,
+        }
+      }
       // Kill the bridge and AWAIT it BEFORE removing the directory: on Windows a
       // live process's cwd LOCKS the directory, so `git worktree remove` would
       // fail against a running agent. Dropping it from the map first keeps its
@@ -780,12 +840,16 @@ export function registerIpcHandlers() {
         try { await bridge.kill() } catch { /* already gone */ }
       }
       // The CLI resolves the tree from the repository, so hand it the project
-      // CONFIG root (§E) — the main worktree, where `.worktrees/` lives — and the
-      // worktree's NAME as the target. Default force: removing the tree discards
-      // whatever is left in it, which is what the user asked for.
-      const result = await worktreeRemove({
+      // CONFIG root (§E) — the main worktree, where `.worktrees/` lives. The
+      // TARGET is the tree's absolute path, never the bare name: the path is what
+      // this handler just verified, and the CLI's own container check (inside
+      // `<repo_root>/.worktrees`, never the main worktree) is then a second gate
+      // against a name that resolves somewhere unexpected. Default force:
+      // removing the tree discards whatever is left in it, which is what the user
+      // asked for.
+      const result = await worktreeRemoveWithRetry({
         cwd: projectConfigRoot(session, session.cwd),
-        target: name || session.cwd,
+        target,
         force: params.force !== false,
       })
       // The tree is still on disk, so the session stays usable: report the
@@ -1063,7 +1127,7 @@ export function registerIpcHandlers() {
     // rename because Python resolves both spellings of the directory to one
     // project-root answer, which is exactly what the normalized target names.
     restartBridgesOnTrustChange(
-      trustTargetDir(cwd, meta, projectConfigRoot(meta, meta.cwd)),
+      trustTargetDir(cwd, meta, projectConfigRoot(meta, meta.cwd), sameCwd),
       before,
       result,
     )
@@ -1082,7 +1146,7 @@ export function registerIpcHandlers() {
     // warmed at the session's own cwd: that is the EXECUTION tree, and warming at
     // the project root would respawn the session's process in the other tree.
     const projectRoot = projectConfigRoot(meta, meta.cwd)
-    const target = trustTargetDir(cwd, meta, projectRoot)
+    const target = trustTargetDir(cwd, meta, projectRoot, sameCwd)
     const plan = planTrustCall(target, projectRoot, sameCwd)
     const b = await ensureBridge(sid, meta.cwd, resolveModelId(meta.model_id))
     const before = (await b.call('trust/get', { cwd })) as TrustSnapshot

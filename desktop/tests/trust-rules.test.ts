@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isUntrusted, shouldPromptTrust, shouldPromptFromFetch, trustSummary, trustChangeRestartsBridge, bridgesToRestart, planTrustCall } from '../src/shared/trust-rules.ts'
+import { isUntrusted, shouldPromptTrust, shouldPromptFromFetch, trustSummary, trustChangeRestartsBridge, bridgesToRestart, planTrustCall, projectConfigRoot, trustTargetDir } from '../src/shared/trust-rules.ts'
 
 const snapshot = (status: string, findings: { kind: string; label: string; path: string }[] = []) => ({
   cwd: 'E:\\proj', status, source: 'registry', findings, store: {},
@@ -190,4 +190,72 @@ test('revoking the session directory still tears the live process down', () => {
   assert.equal(trustChangeRestartsBridge('trusted', 'unknown', 'E:\\proj', plan.warmCwd, sameDir), true)
   assert.equal(trustChangeRestartsBridge('denied', 'unknown', 'E:\\proj', plan.warmCwd, sameDir), true)
   assert.equal(plan.targetIsSessionDir, true)
+})
+
+// ── §E: which directory a session's project config lives in ─────────────────
+// `session.project_root || session.cwd` is the rule every config reader and the
+// trust key resolve through. It used to live in ipc-handlers.ts, where no test
+// could reach it without an Electron harness; the shapes below are exactly the
+// ones the session table produces.
+const session = (projectRoot: string | null | undefined) =>
+  projectRoot === undefined ? {} : { project_root: projectRoot }
+
+test('the project config root is the recorded project root', () => {
+  // A worktree session: config lives in the MAIN worktree while the agent runs
+  // in the linked tree.
+  assert.equal(projectConfigRoot(session('E:\\repo'), 'E:\\repo\\.worktrees\\me'), 'E:\\repo')
+  // A plain session: project_root is its own cwd.
+  assert.equal(projectConfigRoot(session('E:\\repo'), 'E:\\repo'), 'E:\\repo')
+})
+
+test('a NULL or missing project_root falls back to the caller cwd', () => {
+  // The fallback is today's behaviour (the row's own cwd), never an empty
+  // string — an empty root would send every panel to the filesystem root.
+  assert.equal(projectConfigRoot(session(null), 'E:\\repo'), 'E:\\repo')
+  assert.equal(projectConfigRoot(session(undefined), 'E:\\repo'), 'E:\\repo')
+  // A row with a nested cwd keeps that nested cwd when it has no project root.
+  assert.equal(projectConfigRoot(session(null), 'E:\\repo\\pkg'), 'E:\\repo\\pkg')
+})
+
+test('an empty-string project_root is a missing one', () => {
+  // `||`, not `??`: a row written with '' must fall back, or every config read
+  // would resolve to the drive-relative root.
+  assert.equal(projectConfigRoot(session(''), 'E:\\repo'), 'E:\\repo')
+})
+
+test('no session at all keeps the caller fallback', () => {
+  // PERMISSIONS_GET and the roots scan both call this with a possibly-missing
+  // row; the fallback is what they already pass.
+  assert.equal(projectConfigRoot(undefined, ''), '')
+  assert.equal(projectConfigRoot(null, 'E:\\repo'), 'E:\\repo')
+})
+
+// ── the trust target: session tree vs the directory a call is about ─────────
+const meta = (cwd: string) => ({ cwd })
+
+test('a call about the session tree is normalized to the project root', () => {
+  // The renderer asks about `workingDir` (the tree the agent runs in); the
+  // decision map and the registry are keyed on the project config root, so the
+  // two must not become two different answers.
+  assert.equal(trustTargetDir('E:\\repo\\.worktrees\\me', meta('E:\\repo\\.worktrees\\me'), 'E:\\repo', sameDir), 'E:\\repo')
+  assert.equal(trustTargetDir('E:\\OTHER', meta('E:\\other'), 'E:\\other', sameDir), 'E:\\other')
+})
+
+test('a call about a foreign directory travels unchanged', () => {
+  // The Settings list revokes any RECORDED row: the target describes that row,
+  // not this session, so replacing it with our project root would revoke the
+  // wrong project.
+  assert.equal(trustTargetDir('E:\\foreign', meta('E:\\proj'), 'E:\\proj', sameDir), 'E:\\foreign')
+  assert.equal(trustTargetDir('E:\\proj\\nested', meta('E:\\proj'), 'E:\\proj', sameDir), 'E:\\proj\\nested')
+})
+
+test('the comparison is the caller\'s, not raw string equality', () => {
+  // `sameCwd` resolves symlinks and canonical case; the rule must follow it.
+  // With a comparison that says "different", even the identical path is foreign.
+  const never = () => false
+  assert.equal(trustTargetDir('E:\\proj', meta('E:\\proj'), 'E:\\repo', never), 'E:\\proj')
+  // And with one that folds separators, both spellings normalize.
+  const sloppy = (a: string, b: string) => a.replace(/[\\/]+/g, '\\').replace(/\\+$/, '').toLowerCase()
+    === b.replace(/[\\/]+/g, '\\').replace(/\\+$/, '').toLowerCase()
+  assert.equal(trustTargetDir('E:/PROJ/', meta('E:\\proj'), 'E:\\repo', sloppy), 'E:\\repo')
 })

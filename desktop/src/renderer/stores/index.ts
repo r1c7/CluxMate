@@ -1033,12 +1033,31 @@ export const useStore = create<AppState>((set, get) => ({
     // backend knows which group the new session landed in — it must join its
     // project's EXISTING group (the main worktree's), not grow a second project
     // keyed by the tree path.
-    const [groups, sessions] = await Promise.all([
-      window.electronAPI.listGroups(),
-      window.electronAPI.listSessions(),
-    ])
+    //
+    // The reload gets its OWN try/catch: the tree and the session are ALREADY
+    // created by now (main answered `ok:true`), so letting a failed GROUP_LIST
+    // read — GROUP_LIST deliberately does not swallow its errors — reject this
+    // action would report a successful creation as a failure. The user would
+    // retry and end up with a second tree plus a second session, with the first
+    // one orphaned. A failed reload therefore only costs the refresh: the new
+    // session is still spliced in below, and the toast says what to re-open for.
+    let groups = get().groups
+    let sessions = get().sessions
+    try {
+      const [freshGroups, freshSessions] = await Promise.all([
+        window.electronAPI.listGroups(),
+        window.electronAPI.listSessions(),
+      ])
+      groups = freshGroups
+      sessions = freshSessions
+    } catch (e: any) {
+      // The message must stay a HINT — the worktree and the session ARE
+      // created — but it is user-visible, so it goes through the dictionary
+      // like every other toast in this file.
+      get().setError(tGlobal('error.worktreeRefreshFailed', { msg: e?.message || tGlobal('error.unknown') }))
+    }
     set({
-      sessions: sessions.some((s) => s.id === meta.id) ? sessions : [...get().sessions, meta],
+      sessions: sessions.some((s) => s.id === meta.id) ? sessions : [...sessions, meta],
       groups,
       activeSessionId: meta.id,
       activeModelId: entry.id,
@@ -1115,7 +1134,22 @@ export const useStore = create<AppState>((set, get) => ({
     const states = new Map(get().sessionStates)
     states.delete(sessionId)
     const remaining = get().sessions.filter((s) => s.id !== sessionId)
-    const groups = await window.electronAPI.listGroups()
+    // The groups reload gets its OWN try/catch. It runs AFTER main already
+    // removed the tree, the branch and the DB row, so letting a failed
+    // GROUP_LIST — which deliberately does not swallow its errors — reject here
+    // would abandon the local convergence below: the sidebar would keep a ghost
+    // row whose session no longer exists on disk, and the toast would claim the
+    // removal failed when it in fact succeeded. Falling back to the groups we
+    // already hold costs nothing else (worst case an auto group lingers until the
+    // next load), and the user is told what to re-open.
+    let groups = get().groups
+    try {
+      groups = await window.electronAPI.listGroups()
+    } catch (e: any) {
+      // Same dictionary entry as the create path: the worktree and the session
+      // row are already gone, so this only says the list could not be refreshed.
+      get().setError(tGlobal('error.worktreeRefreshFailed', { msg: e?.message || tGlobal('error.unknown') }))
+    }
     set({
       sessions: remaining,
       groups,

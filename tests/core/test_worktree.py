@@ -253,6 +253,45 @@ def test_create_allows_a_dirty_main_tree_with_allow_dirty(tmp_path):
     assert Path(out["path"]).is_dir()
 
 
+def test_dirty_files_ignores_the_worktree_container(tmp_path, monkeypatch):
+    """CluxMate's own `.worktrees/` is never one of the USER's uncommitted files.
+
+    `_ensure_excluded` is best-effort, so on a repository whose
+    `<git-common-dir>/info` cannot be written the trees we just made stay
+    untracked in the main tree. Counting that entry makes the NEXT `create`
+    report `dirty` with `details.files = ['.worktrees/']` — refusing a tree the
+    user never touched, over a directory we created.
+
+    `_ensure_excluded` is neutered here so the premise is REAL on disk: the only
+    thing hiding the container from `git status` is the guard under test, not the
+    exclude file the successful `create` just wrote.
+    """
+    monkeypatch.setattr(worktree, "_ensure_excluded", lambda root: None)
+    repo = _repo(tmp_path)
+    worktree.create(str(repo), name="me")
+
+    # Premise: the container is genuinely untracked in this repository — no
+    # `.gitignore`, no exclude line naming it, and git's own output says so.
+    assert not (repo / ".gitignore").exists()
+    exclude = repo / ".git" / "info" / "exclude"
+    assert ".worktrees" not in exclude.read_text(encoding="utf-8")
+    assert _git_out("status", "--porcelain", cwd=repo).splitlines() == ["?? .worktrees/"]
+    assert worktree._dirty_files(str(repo)) == []
+
+    # The guard's ONLY filter is the container: real dirt is still reported, and
+    # `create` still refuses it. (A tracked-file edit, not a `git rm --cached`:
+    # an unstaged removal also leaves the file untracked, which would add a third
+    # entry to the premise below.) `newline=""` keeps the bytes at LF so the entry
+    # is a plain modification under any `core.autocrlf` setting.
+    (repo / "a.txt").write_text("changed\n", encoding="utf-8", newline="")
+    assert _git_out("status", "--porcelain", cwd=repo).splitlines() == [" M a.txt", "?? .worktrees/"]
+    assert worktree._dirty_files(str(repo)) == ["a.txt"]
+    with pytest.raises(worktree.WorktreeError) as err:
+        worktree.create(str(repo), name="second")
+    assert err.value.code == "dirty"
+    assert err.value.details["files"] == ["a.txt"]
+
+
 def test_create_inside_a_linked_worktree_lands_in_the_main_repo_container(tmp_path):
     repo = _repo(tmp_path)
     first = worktree.create(str(repo), name="first")

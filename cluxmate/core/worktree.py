@@ -516,7 +516,19 @@ def _branch_exists(repo_root: str, branch: str) -> bool:
 
 
 def _dirty_files(cwd: str) -> list[str]:
-    """Uncommitted paths of a working tree, capped for display."""
+    """Uncommitted paths of a working tree, capped for display.
+
+    Paths under ``<root>/.worktrees/`` are left out: that container is
+    CluxMate's own, not the user's work. ``_ensure_excluded`` is best-effort, so
+    on a repository whose ``<git-common-dir>/info`` is not writable the trees we
+    created keep showing up as one untracked ``.worktrees/`` entry — and
+    counting it would make the NEXT ``create`` refuse a tree the user never
+    touched, blaming them for a directory we made. The entry is relative to the
+    tree being asked about, which is why the test is on ``_CONTAINER`` and not
+    on the container's absolute path (this is also the guard ``remove`` runs
+    inside the worktree itself, where the container is not under the root at
+    all). A tree whose only entries are ours is clean.
+    """
     code, out, err = _run(["status", "--porcelain"], cwd, user_config=True)
     if code != 0:
         raise WorktreeError(
@@ -524,7 +536,18 @@ def _dirty_files(cwd: str) -> list[str]:
             f"git status failed: {_first_line(err)}",
             {"stderr": err.strip()},
         )
-    return [line[3:] for line in out.splitlines() if line.strip()][:_DIRTY_FILES_MAX]
+    prefix = _CONTAINER + "/"
+    files: list[str] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        # `status --porcelain` writes the path relative to the tree it is asked
+        # about, with either separator, so both are folded before the test.
+        path = line[3:]
+        if path.replace("\\", "/").startswith(prefix):
+            continue
+        files.append(path)
+    return files[:_DIRTY_FILES_MAX]
 
 
 def _common_dir(root: str) -> str | None:
