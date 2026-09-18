@@ -81,7 +81,7 @@ export default function ContextMenu() {
   const groups = useStore((s) => s.groups)
   const sessions = useStore((s) => s.sessions)
   const requestDeleteSession = useStore((s) => s.requestDeleteSession)
-  const deleteGroup = useStore((s) => s.deleteGroup)
+  const requestDeleteGroup = useStore((s) => s.requestDeleteGroup)
   const moveSession = useStore((s) => s.moveSession)
   const moveSessionToProject = useStore((s) => s.moveSessionToProject)
   const pinSession = useStore((s) => s.pinSession)
@@ -135,14 +135,16 @@ export default function ContextMenu() {
     close()
   }
 
+  // The group/project delete goes through the store, exactly like the sidebar's
+  // two entries, so this menu cannot be the one way to delete a group WITHOUT
+  // being asked about its worktrees: the store reads the preview first and only
+  // falls back to the ordinary one-click confirm when the group holds no removable
+  // tree (a group with none behaves as it always did — no extra click). Deciding
+  // it here instead — a window.confirm followed by deleteGroup's default 'keep' —
+  // is what used to delete every session in the group while silently stranding
+  // their trees and branches on disk.
   const doDeleteGroup = () => {
-    if (target?.type === 'group') {
-      const p = groups.find((x) => x.id === target.id)
-      const confirmKey = p?.is_auto ? 'sessionList.deleteProjectConfirm' : 'sessionList.deleteGroupConfirm'
-      if (p && window.confirm(t(confirmKey, { name: p.name }))) {
-        deleteGroup(target.id)
-      }
-    }
+    if (target?.type === 'group') void requestDeleteGroup(target.id)
     close()
   }
 

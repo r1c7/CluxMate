@@ -121,11 +121,36 @@ export default function DeleteGroupDialog({ prompt }: { prompt: DeleteGroupPromp
   const occupied = new Set(blockedTrees.map((b) => b.sessionId))
   const cannotRemove = blockedTrees.length > 0
 
+  // An auto group IS a project, and the confirm this prompt replaces worded
+  // itself accordingly (SessionList's deleteProjectConfirm), so the noun travels
+  // with the prompt's identity and every sentence below uses it.
+  const noun = t(prompt.isAuto ? 'deleteGroup.nounProject' : 'deleteGroup.nounGroup')
+  const name = prompt.name || t('deleteGroup.unnamed', { noun })
+  // TWO sentences, each counting one thing: the sessions that go, and the
+  // worktrees this delete would remove. One sentence could only say the worktree
+  // count as a share of the SESSIONS ("{trees} of them run in a worktree"), which
+  // is false as soon as two sessions share one tree, and the flat dictionary has
+  // no plural machinery — hence a singular and a plural key per sentence. The
+  // tree sentence is omitted entirely at zero trees (the `noneFound` warning says
+  // why), and the count-bearing first sentence needs the preview: without it,
+  // "all 0 sessions" would be a statement this dialog cannot back up.
+  const body = !preview
+    ? t('deleteGroup.bodyUnknown', { name, noun })
+    : t(preview.sessions === 1 ? 'deleteGroup.bodySessionsOne' : 'deleteGroup.bodySessions', {
+        name,
+        noun,
+        count: preview.sessions,
+      }) + (trees.length === 0
+        ? ''
+        : ' ' + t(trees.length === 1 ? 'deleteGroup.bodyTreeOne' : 'deleteGroup.bodyTrees', { trees: trees.length }))
+
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
       <div className="bg-chat-agent rounded-xl w-[560px] max-h-[85vh] flex flex-col shadow-2xl border border-surface-border">
         <div className="flex items-center justify-between px-6 pt-5 pb-2">
-          <h2 className="text-base font-semibold text-ink">{t('deleteGroup.title')}</h2>
+          <h2 className="text-base font-semibold text-ink">
+            {t(prompt.isAuto ? 'deleteGroup.titleProject' : 'deleteGroup.title')}
+          </h2>
           {/* Disabled while busy like the three buttons below: closing unmounts
               this dialog, and both outcomes report their {ok:false} refusal
               through local state — removal kills bridges first and may retry once
@@ -142,19 +167,7 @@ export default function DeleteGroupDialog({ prompt }: { prompt: DeleteGroupPromp
             content height, so without it a long list of trees and dirty files
             would grow the panel past max-h and be clipped instead of scrolling. */}
         <div className="flex-1 min-h-0 overflow-y-auto px-6 py-3 space-y-4">
-          <p className="text-sm text-ink-soft leading-relaxed">
-            {/* The count-bearing sentence needs the preview. Without it, saying
-                "all 0 sessions" would be a statement this dialog cannot back up,
-                so the unnamed variant says only what is known: the group and its
-                sessions are deleted. */}
-            {preview
-              ? t('deleteGroup.body', {
-                name: prompt.name || t('deleteGroup.unnamed'),
-                count: preview.sessions,
-                trees: trees.length,
-              })
-              : t('deleteGroup.bodyUnknown', { name: prompt.name || t('deleteGroup.unnamed') })}
-          </p>
+          <p className="text-sm text-ink-soft leading-relaxed">{body}</p>
 
           {loading && <div className="text-[11px] text-ink-faint">{t('common.loading')}</div>}
 

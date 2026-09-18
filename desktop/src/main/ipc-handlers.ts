@@ -111,13 +111,14 @@ function worktreeInUseResult(blockers: SessionMeta[]): WorktreeRemoveResult {
 //      path as its target — never the bare name, and never a path the caller did
 //      not verify. The CLI's own container check is then a second gate.
 //
-// `session` is the row the CLI call is anchored on, `killIds` every session
-// still dwelling in the tree (whichever tree each of them THINKS it is in — a
-// stale name or a plain row filed here is just as capable of locking it), and
-// `deletingIds` the sessions the caller is deleting right now: they do not block
-// each other (see `sessionsInTreeExcluding`). Returning the CLI's own result —
-// never a synthesized success — is what keeps "nothing is deleted unless the CLI
-// actually removed the tree" true for both callers.
+// `session` is the row the CLI call is anchored on, `killIds` the caller's
+// SNAPSHOT of the sessions dwelling in the tree (whichever tree each of them
+// THINKS it is in — a stale name or a plain row filed here is just as capable of
+// locking it; the current occupants that are also being deleted are re-read and
+// added to it below), and `deletingIds` the sessions the caller is deleting right
+// now: they do not block each other (see `sessionsInTreeExcluding`). Returning the
+// CLI's own result — never a synthesized success — is what keeps "nothing is
+// deleted unless the CLI actually removed the tree" true for both callers.
 //
 // The declared type is the IPC reply's `WorktreeRemoveResult` (what the
 // per-session handler has always answered with): the object handed back at
@@ -129,7 +130,22 @@ async function removeTreeNow(
   deletingIds: ReadonlySet<string>,
   force: boolean,
 ): Promise<WorktreeRemoveResult> {
-  for (const id of killIds) {
+  // The caller's `killIds` is a SNAPSHOT — for a bulk delete it is the phase-1
+  // plan, which can be seconds old by the time this runs (each tree kills a
+  // bridge and may wait ~1.5s for a git retry). A session that is ALSO being
+  // deleted and has since changed its cwd into this tree is then neither killed
+  // here nor a blocker below (blockers exclude the deletion set by construction),
+  // so its live process keeps the directory locked — the CLI fails honestly on
+  // Windows — or, where nothing holds a lock, the directory is removed out from
+  // under an agent whose row is deleted moments later. Re-read the tree's current
+  // occupants HERE, so the kills cover everyone who is actually in it. The set
+  // stays limited to the DELETING sessions: a session from outside the set is the
+  // refusal case below, and it is not this path's to kill.
+  const toKill = new Set<string>(killIds)
+  for (const resident of sessionsInTree(target, sessionStore.listSessions())) {
+    if (deletingIds.has(resident.id)) toKill.add(resident.id)
+  }
+  for (const id of toKill) {
     const bridge = bridges.get(id)
     if (!bridge) continue
     bridges.delete(id)
@@ -1208,8 +1224,33 @@ export function registerIpcHandlers() {
     // trees being removed, the re-check inside `removeTreeNow` refuses that tree
     // (reported in `failed`) instead of deleting a directory a live session sits
     // in.
-    for (const s of sessionStore.listSessions().filter((s) => s.group_id === id)) deleteSessionFully(s.id)
+    const latecomers = sessionStore.listSessions().filter((s) => s.group_id === id)
+    for (const s of latecomers) deleteSessionFully(s.id)
     sessionStore.deleteGroup(id)
+    // A latecomer that brought its OWN worktree into the group was never in the
+    // phase-1 plan, so its tree was never a removal candidate and `failed` above
+    // cannot mention it — its row is now gone, which takes away the last UI entry
+    // to that tree, while the response would claim `failed: []`. The rows actually
+    // deleted are therefore compared against the plan, and a tree NO candidate
+    // covers is named here. Two classes are deliberately left out: a latecomer
+    // already in the deletion set (a planned tree, whose outcome — removed or
+    // failed — is already reported), and one whose tree the plan does cover
+    // (reporting it again would double-count one tree). A latecomer that no
+    // longer runs in the tree it records is left out too, the same way the plan
+    // treats that class: nothing reaches it, so there is no removal to report.
+    for (const s of latecomers) {
+      if (deletingIds.has(s.id)) continue
+      const target = worktreePathForSession(s)
+      if (!target) continue
+      const planned = plan.removable.some((c) =>
+        isInsideOrEqual(c.target, target) && isInsideOrEqual(target, c.target))
+      if (planned) continue
+      failed.push({
+        name: (s.worktree_name || '').trim() || target,
+        message:
+          'This session was created into the group while it was being deleted, after the worktrees to remove had already been chosen, so this worktree was never removed.',
+      })
+    }
     // `removed` counts TREES, not sessions: the sessions are gone either way, and
     // the renderer has to say so honestly when `failed` is non-empty (the tree is
     // still on disk and only the CLI can remove it now).

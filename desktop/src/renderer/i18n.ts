@@ -512,10 +512,28 @@ const en = {
   // keeps the plain confirm. The dirty-file lines deliberately reuse
   // contextMenu.removeWorktree* and worktree.dirtyFiles — same facts, same words
   // as the per-session prompt and the "Remove Worktree…" path.
+  //
+  // An AUTO group IS a project: the confirm this prompt replaces said "Delete
+  // project" for one (sessionList.deleteProjectConfirm), so the caller passes the
+  // noun it looked up (`{noun}` — 'group' or 'project') and the title has a key
+  // per kind, the same distinction the two confirms make.
+  //
+  // The body is TWO sentences so that neither count is misattributed: the first
+  // is about sessions, the second about the worktrees this delete would remove.
+  // Each has a singular and a plural key — the previous single sentence said
+  // "{trees} of them [the sessions] run in a worktree of their own", which is
+  // wrong twice over the moment two sessions share one tree (2 sessions, 1 tree),
+  // and "all {count} session(s)" was wrong for every count.
   'deleteGroup.title': 'Delete Group and Its Worktrees',
-  'deleteGroup.body': 'Deleting the group "{name}" deletes all {count} session(s) inside it. {trees} of them run in a worktree of their own — remove those worktrees too?',
-  'deleteGroup.bodyUnknown': 'Deleting the group "{name}" deletes every session inside it.',
-  'deleteGroup.unnamed': '(unnamed group)',
+  'deleteGroup.titleProject': 'Delete Project and Its Worktrees',
+  'deleteGroup.nounGroup': 'group',
+  'deleteGroup.nounProject': 'project',
+  'deleteGroup.bodySessions': 'Deleting the {noun} "{name}" deletes all {count} sessions inside it.',
+  'deleteGroup.bodySessionsOne': 'Deleting the {noun} "{name}" deletes its only session.',
+  'deleteGroup.bodyTrees': '{trees} worktrees inside it would be removed with it — remove those worktrees too?',
+  'deleteGroup.bodyTreeOne': 'One worktree inside it would be removed with it — remove that worktree too?',
+  'deleteGroup.bodyUnknown': 'Deleting the {noun} "{name}" deletes every session inside it.',
+  'deleteGroup.unnamed': '(unnamed {noun})',
   'deleteGroup.previewFailed': 'Could not read what the sessions in this group are running in ({msg}), so no worktree can be removed safely. Deleting the sessions and keeping the worktrees is still available.',
   'deleteGroup.noneFound': 'There is no worktree to remove right now — no session in this group still runs in one of its own. Deleting the sessions leaves whatever trees they recorded on disk.',
   'deleteGroup.worktreesTitle': 'Worktrees that would be removed ({count})',
@@ -1192,10 +1210,25 @@ const zh: Record<keyof typeof en, string> = {
   // 只在分组内确实有工作树时打开；没有工作树的分组仍走原来的 confirm。
   // 未提交文件的行刻意复用 contextMenu.removeWorktree* 与 worktree.dirtyFiles：
   // 与单会话弹窗、"移除工作树…"路径描述同一批事实，用同一套措辞。
+  //
+  // auto 分组就是"项目"：本弹窗取代的那个 confirm 对它就写作"删除项目"
+  // （sessionList.deleteProjectConfirm），所以调用方把查到的名词传进来
+  // （`{noun}` = 分组 / 项目），标题也按两类各有一个键。
+  //
+  // 正文拆成两句，避免把工作树的数量挂到会话头上：第一句说会话，第二句说本次
+  // 删除会一并移除的工作树；两句各有序数/复数键——原来那句"{trees} 个运行在
+  // 自己的工作树里"在两个会话共用一棵树时（2 个会话、1 棵树）会数错，
+  // "全部 {count} 个 Session" 的复数形式也不对。
   'deleteGroup.title': '删除分组及其工作树',
-  'deleteGroup.body': '删除分组“{name}”会一并删除其中的全部 {count} 个 Session，其中 {trees} 个运行在自己的工作树里——是否连同这些工作树一起移除？',
-  'deleteGroup.bodyUnknown': '删除分组“{name}”会一并删除其中的所有 Session。',
-  'deleteGroup.unnamed': '（未命名分组）',
+  'deleteGroup.titleProject': '删除项目及其工作树',
+  'deleteGroup.nounGroup': '分组',
+  'deleteGroup.nounProject': '项目',
+  'deleteGroup.bodySessions': '删除{noun}“{name}”会一并删除其中的全部 {count} 个 Session。',
+  'deleteGroup.bodySessionsOne': '删除{noun}“{name}”会一并删除其中唯一的 Session。',
+  'deleteGroup.bodyTrees': '其中的 {trees} 个工作树也会随之移除——是否连同这些工作树一起移除？',
+  'deleteGroup.bodyTreeOne': '其中有 1 个工作树也会随之移除——是否连同该工作树一起移除？',
+  'deleteGroup.bodyUnknown': '删除{noun}“{name}”会一并删除其中的所有 Session。',
+  'deleteGroup.unnamed': '（未命名{noun}）',
   'deleteGroup.previewFailed': '无法读取该分组内会话的运行位置（{msg}），因此无法安全地移除任何工作树。仍可选择“仅删除会话、保留工作树”。',
   'deleteGroup.noneFound': '当前没有可移除的工作树——分组内已没有会话仍运行在自己的工作树里。仅删除会话会把这些会话记录过的工作树留在磁盘上。',
   'deleteGroup.worktreesTitle': '将被移除的工作树（{count}）',

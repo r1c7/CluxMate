@@ -310,9 +310,14 @@ export interface DeleteSessionPrompt {
 // new prompt). Like DeleteSessionPrompt it carries ONLY identity — the group's id
 // and the name to print; the live preview, the busy state and the refusal text
 // are local to DeleteGroupDialog, which re-reads the preview when it opens.
+// `isAuto` is part of that identity for one reason: an auto group IS a project,
+// and the confirm this prompt replaces worded itself accordingly ("Delete
+// project" — SessionList's deleteProjectConfirm / deleteGroupConfirm pair), so the
+// dialog needs to know which noun to use.
 export interface DeleteGroupPrompt {
   groupId: string
   name: string
+  isAuto: boolean
 }
 
 // What the renderer has to show the user BEFORE a worktree removal happens:
@@ -529,9 +534,10 @@ interface AppState {
   removeWorktreeSession: (sessionId: string) => Promise<WorktreeActionResult>
   createGroup: (name: string) => Promise<void>
   renameGroup: (id: string, name: string) => Promise<void>
-  // The sidebar's group delete calls THIS, not deleteGroup: a group whose
-  // sessions run in worktrees opens the three-outcome prompt (its trees would
-  // otherwise be stranded), while a group with none keeps the plain confirm.
+  // EVERY group-delete entry point (the sidebar's two and the group context
+  // menu's) calls THIS, not deleteGroup: a group whose sessions run in worktrees
+  // opens the three-outcome prompt (its trees would otherwise be stranded), while
+  // a group with none keeps the plain confirm.
   requestDeleteGroup: (id: string) => Promise<void>
   closeDeleteGroupPrompt: () => void
   // The authoritative read-only preview (see shared/types.ts). Rejects when the
@@ -540,7 +546,10 @@ interface AppState {
   // `worktrees: 'remove'` also removes the group's trees; 'keep' (and nothing at
   // all) is the historical delete. A `{ok:false}` refusal propagated back to the
   // caller deletes nothing; on success a non-empty `failed` is toasted here,
-  // because the sessions are gone and only the message can say so.
+  // because the sessions are gone and only the message can say so. A REJECTED
+  // invoke is re-read before it is reported: a fresh list proving the rows are
+  // gone converges the same way and returns success (the delete happened, the
+  // reply did not arrive), while rows still there reject as before.
   deleteGroup: (id: string, worktrees?: 'remove' | 'keep') => Promise<GroupDeleteResult>
   moveSession: (sessionId: string, groupId: string | null) => Promise<void>
   moveSessionToProject: (sessionId: string) => Promise<void>
@@ -628,6 +637,57 @@ retryMessage: (messageId: string) => Promise<void>
   notifyHooks: (message: string) => Promise<void>
   clearError: () => void
   setError: (msg: string | null) => void
+}
+
+// Everything the store must do once a group's sessions are really gone from the
+// main process: drop their session states, repair the active pointer, reload the
+// group list and refresh the sidebar's bridge dots. Shared by the two ways that
+// can become true — a CONFIRMED delete (the reply that did it) and an ADOPTED one
+// (the call rejected, but a fresh read proves the rows are gone) — so the two
+// cannot converge into different states.
+//
+// The groups reload gets its OWN try/catch, like removeWorktreeSession's and
+// adoptDeletedSession's: it runs AFTER the sessions and the group are already
+// gone, so letting a failed GROUP_LIST reject here would abandon the convergence
+// below and leave the sidebar full of ghost rows for sessions that no longer
+// exist — and the caller would report a failure for a delete that happened.
+// Falling back to the groups already held costs nothing else.
+async function convergeDeletedGroup(
+  get: () => AppState,
+  set: (partial: Partial<AppState>) => void,
+  id: string,
+): Promise<void> {
+  const states = new Map(get().sessionStates)
+  for (const s of get().sessions) {
+    if (s.group_id === id) states.delete(s.id)
+  }
+  const remaining = get().sessions.filter((s) => s.group_id !== id)
+  const activeGone = get().activeSessionId != null &&
+    !remaining.some((s) => s.id === get().activeSessionId)
+  const nextId = activeGone ? null : get().activeSessionId
+  const ss = nextId ? states.get(nextId) : undefined
+  let groups = get().groups
+  try {
+    groups = await window.electronAPI.listGroups()
+  } catch (e: any) {
+    get().setError(tGlobal('error.groupDeletedRefreshFailed', { msg: e?.message || tGlobal('error.unknown') }))
+  }
+  set({
+    groups,
+    sessions: remaining,
+    activeSessionId: nextId,
+    sessionStates: states,
+    messages: ss?.messages || [],
+    isStreaming: ss?.isStreaming || false,
+    streamingContent: ss?.streamingContent || '',
+    thinkingContent: ss?.thinkingContent || '',
+    pendingPermission: ss?.pendingPermission || null,
+    pendingBatchEdit: ss?.pendingBatchEdit || null,
+    pendingQuestion: ss?.pendingQuestion || null,
+    pendingTrust: ss?.pendingTrust || null,
+    todos: ss?.todos ?? null,
+  })
+  get().refreshBridgeStatuses()
 }
 
 const NEW_SS: SessionState = {
@@ -760,15 +820,13 @@ export const useStore = create<AppState>((set, get) => ({
   // "could not tell" must not be answered as "no worktrees" by the caller.
   groupDeletePreview: (groupId) => window.electronAPI.groupDeletePreview(groupId),
 
-  // The group-delete entry point the SIDEBAR uses. A group whose sessions run in
-  // worktrees is the bulk delete that can strand those trees and branches on disk
-  // with no UI entry left to reach them, so it asks first — the same three
-  // outcomes the per-session prompt offers — while a group with no worktree keeps
-  // today's plain confirm and today's single click.
-  //
-  // NOTE: the group context menu (ContextMenu.tsx) still calls `deleteGroup`
-  // directly, i.e. the 'keep' behaviour: it never asks, and it never removes a
-  // tree.
+  // The group-delete entry point BOTH group-delete entries use — the sidebar
+  // (SessionList) and the group context menu (ContextMenu), so neither can be a
+  // way around the worktree choice. A group whose sessions run in worktrees is the
+  // bulk delete that can strand those trees and branches on disk with no UI entry
+  // left to reach them, so it asks first — the same three outcomes the per-session
+  // prompt offers — while a group with no worktree keeps today's plain confirm and
+  // today's single click.
   requestDeleteGroup: async (id) => {
     const group = get().groups.find((g) => g.id === id)
     const name = group?.name || ''
@@ -795,7 +853,9 @@ export const useStore = create<AppState>((set, get) => ({
       }
       return
     }
-    set({ deleteGroupPrompt: { groupId: id, name } })
+    // `isAuto` travels with the identity: the dialog words itself as a project
+    // delete for an auto group, exactly like the confirm above does.
+    set({ deleteGroupPrompt: { groupId: id, name, isAuto: !!group?.is_auto } })
   },
 
   // Only closes the prompt. Both outcomes converge the sidebar themselves
@@ -803,50 +863,37 @@ export const useStore = create<AppState>((set, get) => ({
   closeDeleteGroupPrompt: () => set({ deleteGroupPrompt: null }),
 
   deleteGroup: async (id, worktrees) => {
-    const res = await window.electronAPI.deleteGroup(id, worktrees ? { worktrees } : undefined)
+    let res: GroupDeleteResult
+    try {
+      res = await window.electronAPI.deleteGroup(id, worktrees ? { worktrees } : undefined)
+    } catch (e: any) {
+      // The invoke REJECTED — which is not proof that nothing happened. The main
+      // process deletes every row and the group BEFORE it answers, so a reply lost
+      // on the way back (or a throw in the handler after the deletes) leaves the
+      // group gone in the database while this store still holds its rows: the
+      // caller renders "could not delete" for a delete that happened, and the
+      // ghost rows are left for nothing to repair (the same residual class
+      // adoptDeletedSession exists for on the per-session path).
+      //
+      // Only a FRESH, SUCCESSFUL read may prove the rows are gone — a failed read
+      // proves nothing, and falling back to the held rows would report a deletion
+      // that never happened as a success. Rows still there ⇒ nothing was deleted,
+      // so the rejection is the honest answer and is re-thrown untouched.
+      const fresh = await window.electronAPI.listSessions().catch(() => null)
+      if (!fresh || fresh.some((s) => s.group_id === id)) throw e
+      await convergeDeletedGroup(get, set, id)
+      // How many TREES went is unknowable once the reply is lost, and nothing
+      // renders `removed` (the toast below reads `failed`) — 0 is reported rather
+      // than a number that would have to be invented.
+      return { ok: true, removed: 0, failed: [] }
+    }
     // A refusal (worktree-in-use) deleted NOTHING, so the local state must not
     // converge on it — the caller renders the main process's own message.
     if (!res.ok) return res
     // The main process deleted every session inside the group along with it —
     // mirror that in local state (drop their session states, fix the active
     // pointer if it was one of them) and reload groups from the source of truth.
-    const states = new Map(get().sessionStates)
-    for (const s of get().sessions) {
-      if (s.group_id === id) states.delete(s.id)
-    }
-    const remaining = get().sessions.filter((s) => s.group_id !== id)
-    const activeGone = get().activeSessionId != null &&
-      !remaining.some((s) => s.id === get().activeSessionId)
-    const nextId = activeGone ? null : get().activeSessionId
-    const ss = nextId ? states.get(nextId) : undefined
-    // The groups reload gets its OWN try/catch, like removeWorktreeSession's: it
-    // runs AFTER the sessions and the group are already gone, so letting a failed
-    // GROUP_LIST reject here would abandon the convergence below and leave the
-    // sidebar full of ghost rows for sessions that no longer exist — and the
-    // caller would report a failure for a delete that happened. Falling back to
-    // the groups already held costs nothing else.
-    let groups = get().groups
-    try {
-      groups = await window.electronAPI.listGroups()
-    } catch (e: any) {
-      get().setError(tGlobal('error.groupDeletedRefreshFailed', { msg: e?.message || tGlobal('error.unknown') }))
-    }
-    set({
-      groups,
-      sessions: remaining,
-      activeSessionId: nextId,
-      sessionStates: states,
-      messages: ss?.messages || [],
-      isStreaming: ss?.isStreaming || false,
-      streamingContent: ss?.streamingContent || '',
-      thinkingContent: ss?.thinkingContent || '',
-      pendingPermission: ss?.pendingPermission || null,
-      pendingBatchEdit: ss?.pendingBatchEdit || null,
-      pendingQuestion: ss?.pendingQuestion || null,
-      pendingTrust: ss?.pendingTrust || null,
-      todos: ss?.todos ?? null,
-    })
-    get().refreshBridgeStatuses()
+    await convergeDeletedGroup(get, set, id)
     // The sessions are deleted, so a tree that could not be removed has NO entry
     // left in the UI — this toast is the only thing that will ever say so, and it
     // says exactly that (never "the delete failed"). Toasted rather than returned
