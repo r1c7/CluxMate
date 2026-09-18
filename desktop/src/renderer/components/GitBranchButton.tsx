@@ -1,12 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../stores'
 import BranchSwitchModal from './BranchSwitchModal'
+import { branchPillLabel, canSwitchBranches } from '../../shared/worktree-rules'
 import { useT } from '../useI18n'
 import { tGlobal } from '../i18n'
 
 // Compact branch pill in the working-dir bar. Hidden when the working directory
-// isn't inside a git repo (or git is missing). Clicking opens an anchored
-// dropdown of local branches; picking a dirty one prompts via BranchSwitchModal.
+// isn't inside a git repo (or git is missing). Inside a linked worktree it is
+// rendered DISABLED and names the TREE instead of the branch — a worktree's
+// branch is the tree's identity (`cluxmate/<slug>`, read by the sidebar badge,
+// the removal confirmation and a Phase-2 merge) and git refuses most switches
+// there anyway, so the pill would only offer errors (canSwitchBranches /
+// branchPillLabel). Elsewhere, clicking it opens an anchored dropdown of the
+// branches this tree can actually switch to (worktree-held ones are filtered
+// out); picking a dirty one prompts via BranchSwitchModal.
 export default function GitBranchButton() {
   const t = useT()
   const git = useStore((s) => s.git)
@@ -44,14 +51,34 @@ export default function GitBranchButton() {
   }, [isStreaming])
 
   // Early return AFTER all hooks so the hook count never varies between renders.
+  // `!git?.inRepo` first, purely so the null is narrowed away below — "is this a
+  // repository" is the only reason to render nothing at all.
   if (!git?.inRepo) return null
   const label = git.currentBranch || t('git.noBranch')
+
+  // A worktree session: the tree's name, greyed, no dropdown. `title` sits on the
+  // wrapper as well as the button because a DISABLED button does not receive the
+  // mouse events some platforms need to show a tooltip.
+  if (!canSwitchBranches(git)) {
+    return (
+      <div className="relative flex-shrink-0" title={t('git.worktreeLocked')}>
+        <button
+          disabled
+          className="text-xs px-2 py-0.5 rounded-md border border-surface-border text-ink-soft opacity-50 cursor-not-allowed font-mono flex items-center gap-1.5 max-w-[180px]"
+        >
+          ⎇ <span className="truncate">{branchPillLabel(git) ?? label}</span>
+        </button>
+      </div>
+    )
+  }
 
   const toggle = async () => {
     if (isStreaming) return
     if (open) { setOpen(false); return }
     try {
-      const list = await window.electronAPI.listGitBranches(workingDir)
+      // The tree's own list, minus the branches another worktree holds: those
+      // cannot be checked out here and belong to that tree's session.
+      const list = await window.electronAPI.listGitBranches(workingDir, { excludeWorktreeBranches: true })
       setBranches(list.branches)
       setCurrent(list.current)
       setHasChanges(list.hasChanges)

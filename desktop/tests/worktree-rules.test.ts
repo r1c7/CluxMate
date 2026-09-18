@@ -9,9 +9,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  branchPillLabel,
+  canCreateWorktree,
+  canSwitchBranches,
   isWorktreeSession,
   parseCluxmateJson,
+  plainSessionCwd,
   spawnErrorMessage,
+  withoutWorktreeBranches,
   worktreeBadgeLabel,
 } from '../src/shared/worktree-rules.ts'
 
@@ -147,4 +152,135 @@ test('isWorktreeSession gates on the name, the column the badge and menu use', (
   assert.equal(isWorktreeSession({ worktree_name: null, worktree_branch: null }), false)
   // A pre-worktree session row: the columns are absent entirely.
   assert.equal(isWorktreeSession(PRE_WORKTREE_SESSION), false)
+})
+
+// --- the directory a new plain session starts in ---
+
+// §E: `project_root` differs from `cwd` exactly when the session runs inside a
+// linked worktree, so "equal" covers a plain repo, a plain-repo subdirectory and
+// a non-git directory — all of which must keep inheriting the exact directory.
+test('plainSessionCwd keeps an inherited directory that is not a worktree', () => {
+  assert.equal(plainSessionCwd('E:\\repo', { cwd: 'E:\\repo', project_root: 'E:\\repo' }), 'E:\\repo')
+  assert.equal(
+    plainSessionCwd('E:\\repo\\pkg', { cwd: 'E:\\repo\\pkg', project_root: 'E:\\repo\\pkg' }),
+    'E:\\repo\\pkg',
+  )
+})
+
+test('plainSessionCwd sends a worktree checkout to its project root', () => {
+  assert.equal(
+    plainSessionCwd('E:\\repo\\.worktrees\\me', { cwd: 'E:\\repo\\.worktrees\\me', project_root: 'E:\\repo' }),
+    'E:\\repo',
+  )
+  // ...including a session whose cwd is a SUBDIRECTORY of the tree.
+  assert.equal(
+    plainSessionCwd('E:\\repo\\.worktrees\\me\\src', {
+      cwd: 'E:\\repo\\.worktrees\\me\\src',
+      project_root: 'E:\\repo',
+    }),
+    'E:\\repo',
+  )
+})
+
+test('plainSessionCwd leaves the inherited path alone when no row owns it or the row is incomplete', () => {
+  const gone = 'E:\\gone\\.worktrees\\me'
+  assert.equal(plainSessionCwd(gone, null), gone)
+  assert.equal(plainSessionCwd(gone, undefined), gone)
+  // A row from before `project_root` (or a blank one) tells us nothing.
+  assert.equal(plainSessionCwd('E:\\repo', { cwd: 'E:\\repo' }), 'E:\\repo')
+  assert.equal(plainSessionCwd('E:\\repo', { cwd: 'E:\\repo', project_root: '   ' }), 'E:\\repo')
+  assert.equal(plainSessionCwd('E:\\repo', { project_root: 'E:\\repo' }), 'E:\\repo')
+})
+
+// --- which branches the project may switch to ---
+
+test('canSwitchBranches is false inside a linked worktree, true in the project tree', () => {
+  assert.equal(canSwitchBranches({ inRepo: true, isWorktree: false }), true)
+  assert.equal(canSwitchBranches({ inRepo: true, isWorktree: true }), false)
+})
+
+test('canSwitchBranches hides the pill for anything that is not a repo, and for missing state', () => {
+  assert.equal(canSwitchBranches(null), false)
+  assert.equal(canSwitchBranches(undefined), false)
+  assert.equal(canSwitchBranches({ inRepo: false, isWorktree: false }), false)
+  assert.equal(canSwitchBranches({ inRepo: false, isWorktree: true }), false)
+})
+
+// Fail-safe on the newest field: a main process that does not report
+// `isWorktree` yet keeps today's behaviour (the pill is shown).
+test('an absent isWorktree field does not hide the pill', () => {
+  assert.equal(canSwitchBranches({ inRepo: true }), true)
+})
+
+// The pill is DISABLED inside a worktree, not gone: it names the tree.
+test('branchPillLabel is the branch in the project tree and the TREE name in a worktree', () => {
+  assert.equal(branchPillLabel({ currentBranch: 'master', isWorktree: false }), 'master')
+  assert.equal(branchPillLabel({ currentBranch: 'cluxmate/me', isWorktree: true, worktreeName: 'me' }), 'me')
+})
+
+test('branchPillLabel falls back to the branch, and to null when there is nothing to name', () => {
+  // A tree whose name could not be read must not blank the pill either.
+  assert.equal(branchPillLabel({ currentBranch: 'cluxmate/me', isWorktree: true, worktreeName: '' }), 'cluxmate/me')
+  assert.equal(branchPillLabel({ currentBranch: 'x', isWorktree: true, worktreeName: null }), 'x')
+  assert.equal(branchPillLabel({ currentBranch: '  ', isWorktree: false }), null)
+  assert.equal(branchPillLabel({ isWorktree: true }), null)
+  assert.equal(branchPillLabel(null), null)
+  assert.equal(branchPillLabel(undefined), null)
+})
+
+// --- which projects may offer "new session in a git worktree" ---
+
+test('canCreateWorktree withholds the entry only for a CONFIRMED non-repository', () => {
+  assert.equal(canCreateWorktree(true), true)
+  assert.equal(canCreateWorktree(false), false)
+  // Not answered yet (the probe is in flight, or the group has no path): today's
+  // behaviour, and the CLI's own `not-a-repo` stays the backstop.
+  assert.equal(canCreateWorktree(undefined), true)
+  assert.equal(canCreateWorktree(null), true)
+})
+
+// `cluxmate worktree list --json` rows, minus the fields this rule ignores.
+const ROWS = [
+  { path: 'E:\\repo', branch: 'master', is_main: true },
+  { path: 'E:\\repo\\.worktrees\\me', branch: 'cluxmate/me', is_main: false },
+  { path: 'E:\\repo\\.worktrees\\two', branch: 'cluxmate/two', is_main: false },
+]
+
+test('withoutWorktreeBranches drops exactly the branches a linked worktree holds', () => {
+  assert.deepEqual(
+    withoutWorktreeBranches(['master', 'cluxmate/me', 'cluxmate/two', 'feature'], ROWS),
+    ['master', 'feature'],
+  )
+})
+
+// The main worktree is a row too, and its branch is the ordinary current branch.
+test('the main worktree row never hides its own branch', () => {
+  assert.deepEqual(withoutWorktreeBranches(['master', 'feature'], [ROWS[0]]), ['master', 'feature'])
+})
+
+// A tree removed with --keep-branch is no longer in `list`, so its branch is an
+// ordinary branch again — which is exactly what keeping it is for (Phase 2's
+// 「保留成分支」: the user merges or switches to it from the project tree).
+test('a branch kept from a removed worktree stays switchable', () => {
+  assert.deepEqual(
+    withoutWorktreeBranches(['master', 'cluxmate/kept'], [ROWS[0]]),
+    ['master', 'cluxmate/kept'],
+  )
+})
+
+// A detached HEAD row carries no branch, and an unusable list (older CLI, no
+// python) is null/absent/empty: all of them filter nothing.
+test('rows without a branch and unusable lists filter nothing', () => {
+  const branches = ['master', 'cluxmate/me']
+  assert.deepEqual(withoutWorktreeBranches(branches, [{ is_main: false }]), branches)
+  assert.deepEqual(withoutWorktreeBranches(branches, [{ branch: '', is_main: false }]), branches)
+  assert.deepEqual(withoutWorktreeBranches(branches, []), branches)
+  assert.deepEqual(withoutWorktreeBranches(branches, null), branches)
+  assert.deepEqual(withoutWorktreeBranches(branches, undefined), branches)
+})
+
+test('withoutWorktreeBranches preserves order and leaves its input alone', () => {
+  const input = ['z', 'cluxmate/me', 'a']
+  assert.deepEqual(withoutWorktreeBranches(input, ROWS), ['z', 'a'])
+  assert.deepEqual(input, ['z', 'cluxmate/me', 'a'])
 })

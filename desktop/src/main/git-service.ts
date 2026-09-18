@@ -1,14 +1,19 @@
 import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
-import type { GitInfo, GitBranchList, GitCheckoutStrategy, GitCheckoutResult } from '../shared/types'
-import { worktreeInfo } from './worktree.ts'
+import type { GitInfo, GitBranchList, GitBranchOptions, GitCheckoutStrategy, GitCheckoutResult } from '../shared/types'
+import { worktreeInfo, worktreeList } from './worktree.ts'
+import type { WorktreeInfoResult, WorktreeResult } from './worktree.ts'
 import {
   NO_CONTAINER,
   commitGuardRefusal,
   withoutContainerLines,
   type WorktreeContainer,
 } from '../shared/worktree-container.ts'
+// The pure half of "which branches may the PROJECT switch to" — the branch pill
+// hides itself inside a worktree and the main tree's list drops the branches a
+// linked worktree holds. Rules only; the git facts come from the CLI above.
+import { withoutWorktreeBranches } from '../shared/worktree-rules.ts'
 
 // Run git directly (no shell) against a working directory. Mirrors the Python
 // side's CheckpointManager._run pattern (resolve binary, direct argv) but lives
@@ -64,7 +69,13 @@ async function currentBranch(root: string): Promise<string | null> {
 // "not a repository" or an older CLI all degrade to NO_CONTAINER, which filters
 // nothing and keeps today's behaviour.
 async function containerFor(cwd: string): Promise<WorktreeContainer> {
-  const info = await worktreeInfo(cwd)
+  return containerFrom(await worktreeInfo(cwd))
+}
+
+// The container as every reader below needs it. `gitInfo` also reads
+// `is_worktree` off the SAME payload, so one `cluxmate worktree info` call keeps
+// answering both questions — one subprocess, one project-root policy.
+function containerFrom(info: WorktreeResult<WorktreeInfoResult>): WorktreeContainer {
   return info.ok ? { name: info.container, ignored: info.container_ignored } : NO_CONTAINER
 }
 
@@ -137,15 +148,47 @@ export async function statusLines(cwd: string, container: WorktreeContainer = NO
   return withoutContainerLines(container, lines)
 }
 
-export async function gitInfo(cwd: string): Promise<GitInfo> {
-  const root = await repoRoot(cwd)
-  if (!root) return { inRepo: false, currentBranch: null, hasChanges: false }
-  const branch = await currentBranch(root)
-  const dirty = await hasChanges(root, await containerFor(cwd))
-  return { inRepo: true, currentBranch: branch, hasChanges: dirty }
+// Is this directory inside a git repository? The cheapest question here (one
+// `rev-parse --show-toplevel`, no python): the sidebar's "new session in a git
+// worktree" entry asks it per project, because a directory that is not a
+// repository has no tree to make. Never throws — `repoRoot` swallows every
+// failure (no git on PATH, a missing directory, a bare repo) into `null`.
+export async function isRepo(cwd: string): Promise<boolean> {
+  return (await repoRoot(cwd)) !== null
 }
 
-export async function gitBranches(cwd: string): Promise<GitBranchList> {
+export async function gitInfo(cwd: string): Promise<GitInfo> {
+  const root = await repoRoot(cwd)
+  if (!root) return { inRepo: false, currentBranch: null, hasChanges: false, isWorktree: false, worktreeName: null }
+  const info = await worktreeInfo(cwd)
+  const branch = await currentBranch(root)
+  const dirty = await hasChanges(root, containerFrom(info))
+  // `is_worktree` is git's answer about THIS directory, and it is what turns the
+  // branch pill into a disabled pill naming the tree (shared/worktree-rules.ts).
+  // An unusable payload — no python, not a repository, an older CLI — leaves it
+  // false, i.e. today's behaviour.
+  const isWorktree = info.ok && info.is_worktree
+  return {
+    inRepo: true,
+    currentBranch: branch,
+    hasChanges: dirty,
+    isWorktree,
+    // The tree's own directory name, read off git's root (NOT off `cwd`, which
+    // may be a subdirectory of the tree) — `me` for `<repo>/.worktrees/me`.
+    worktreeName: isWorktree ? path.basename(root) : null,
+  }
+}
+
+// Local branches of the tree `cwd` lives in. `opts.excludeWorktreeBranches`
+// drops the ones a LINKED worktree currently holds: git refuses to check those
+// out here ("already checked out at …"), and they belong to another session's
+// tree. The rule is pure (shared/worktree-rules.ts) and WHICH branch each tree
+// holds comes from the `cluxmate worktree list` CLI — the one implementation of
+// that fact — so the desktop never parses `git worktree` output itself.
+export async function gitBranches(
+  cwd: string,
+  opts: GitBranchOptions = {},
+): Promise<GitBranchList> {
   const root = await repoRoot(cwd)
   if (!root) return { current: null, branches: [], hasChanges: false }
   const branch = await currentBranch(root)
@@ -153,7 +196,15 @@ export async function gitBranches(cwd: string): Promise<GitBranchList> {
   try {
     const out = await runGit(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads'])
     const branches = out.split('\n').map((b) => b.trim()).filter(Boolean)
-    return { current: branch, branches, hasChanges: dirty }
+    if (!opts.excludeWorktreeBranches) return { current: branch, branches, hasChanges: dirty }
+    const trees = await worktreeList(cwd)
+    return {
+      current: branch,
+      // A `list` that could not answer (no python, an older CLI) filters
+      // nothing: the dropdown shows exactly what it showed before this rule.
+      branches: trees.ok ? withoutWorktreeBranches(branches, trees.worktrees) : branches,
+      hasChanges: dirty,
+    }
   } catch {
     return { current: branch, branches: [], hasChanges: dirty }
   }

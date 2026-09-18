@@ -747,12 +747,34 @@ export interface GitInfo {
   inRepo: boolean
   currentBranch: string | null
   hasChanges: boolean
+  // Whether this directory is inside a LINKED git worktree. Git truth, from
+  // `cluxmate worktree info` (the ONE project-root policy), not a session
+  // column: a worktree session moved back to the main tree reads false again,
+  // and a plain session opened inside any tree reads true. The branch pill reads
+  // it to show a DISABLED pill naming the tree — see canSwitchBranches and
+  // branchPillLabel in shared/worktree-rules.ts.
+  isWorktree: boolean
+  // The name of that tree — the basename of its root, so `me` for
+  // `<repo>/.worktrees/me` and the directory's own name for a tree made by hand.
+  // Null outside a worktree. Taken from the git root rather than `worktree_name`
+  // for the same reason as `isWorktree`, and because a session can sit in a
+  // SUBDIRECTORY of the tree (where the cwd's basename is not the tree's name).
+  worktreeName: string | null
 }
 
 export interface GitBranchList {
   current: string | null
   branches: string[]
   hasChanges: boolean
+}
+
+// What a branch LIST should leave out. The composer's branch pill asks for
+// worktree branches to be hidden (they are checked out in another tree, so git
+// refuses to switch to them here — "already checked out at …" — and every pick
+// would end in an error); the new-worktree dialog asks for the FULL list, since
+// basing a new tree on another tree's branch is legitimate.
+export interface GitBranchOptions {
+  excludeWorktreeBranches?: boolean
 }
 
 // How to reconcile uncommitted changes before switching branches.
@@ -1026,7 +1048,11 @@ export interface ElectronAPI {
   readFile: (sessionId: string, path: string) => Promise<string | null>
 
   getGitInfo: (cwd: string) => Promise<GitInfo>
-  listGitBranches: (cwd: string) => Promise<GitBranchList>
+  // Is this directory inside a git repository? The cheapest git question the
+  // main process answers (one `rev-parse`), for the sidebar's "new session in a
+  // git worktree" entry — a project with no repository has no tree to make.
+  isGitRepo: (cwd: string) => Promise<boolean>
+  listGitBranches: (cwd: string, opts?: GitBranchOptions) => Promise<GitBranchList>
   checkoutBranch: (cwd: string, branch: string, strategy: GitCheckoutStrategy) => Promise<GitCheckoutResult>
   // Arm the main-process `.git` watcher for this working dir; a branch switch
   // (incl. one the agent performs via its shell) pushes `git:changed`.

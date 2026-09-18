@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
 import { useStore } from '../stores'
 import type { SessionMeta, GroupMeta, SessionSearchHit } from '../../shared/types'
-import { worktreeBadgeLabel } from '../../shared/worktree-rules'
+import { worktreeBadgeLabel, canCreateWorktree } from '../../shared/worktree-rules'
 import { useT } from '../useI18n'
 
 // ── Highlight ──
@@ -549,6 +549,10 @@ export default function SessionList({ width }: { width: number }) {
   const requestDeleteSession = useStore((s) => s.requestDeleteSession)
   const createSession = useStore((s) => s.createSession)
   const openWorktreeDialog = useStore((s) => s.openWorktreeDialog)
+  const refreshProjectGit = useStore((s) => s.refreshProjectGit)
+  // Which projects are git repositories (keyed by the auto group's path). Filled
+  // by the effect below; a missing key keeps today's behaviour.
+  const projectGit = useStore((s) => s.projectGit)
   const createGroup = useStore((s) => s.createGroup)
   const renameGroup = useStore((s) => s.renameGroup)
   const requestDeleteGroup = useStore((s) => s.requestDeleteGroup)
@@ -581,6 +585,16 @@ export default function SessionList({ width }: { width: number }) {
 
   // Auto groups sharing a basename get a shortest-unique path suffix label.
   const projectLabels = disambiguateProjectLabels(groups)
+
+  // ── which projects can host a worktree session ──
+  // One cheap `rev-parse` per project (`git:is-repo`), asked only when the SET of
+  // project paths changes — not on every render, session switch or group rename —
+  // hence the joined key. A group with no resolvable path is left out of the probe
+  // and keeps the fail-open "unknown" verdict (see canCreateWorktree); the CLI's
+  // own `not-a-repo` remains the backstop.
+  const projectPaths = groups.filter((g) => g.is_auto).map((g) => (g.path || '').trim()).filter(Boolean)
+  const projectPathsKey = projectPaths.join('\n')
+  useEffect(() => { void refreshProjectGit(projectPaths) }, [projectPathsKey])
 
   // Whether the currently dragged session may be dropped onto the given group
   // (or the root). Used to gate the drop highlight so invalid targets never
@@ -837,7 +851,12 @@ export default function SessionList({ width }: { width: number }) {
                     const cwd = g.path || first?.project_root || first?.cwd
                     if (cwd) { createSession(cwd); showChat() }
                   }}
-                  onCreateWorktree={() => openWorktreeDialog(g.id)}
+                  // No repository, no tree to make: the header entry is withheld
+                  // for a project the probe has CONFIRMED is not a git repository
+                  // (an unanswered path keeps it — see canCreateWorktree).
+                  onCreateWorktree={canCreateWorktree(projectGit[g.path || ''])
+                    ? () => openWorktreeDialog(g.id)
+                    : undefined}
                 />
               </div>
             ))}

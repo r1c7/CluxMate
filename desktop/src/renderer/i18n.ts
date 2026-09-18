@@ -275,6 +275,7 @@ const en = {
   // ── git branch ──
   'git.noBranch': '(no branch)',
   'git.disabledWorking': 'Branch switch disabled while the agent is working',
+  'git.worktreeLocked': 'Inside a git worktree: this tree is pinned to its own branch, so branches cannot be switched here',
   'git.noBranches': 'No branches',
   'git.listFailed': 'Failed to list branches: {msg}',
   'git.switchFailed': 'Failed to switch branch: {msg}',
@@ -707,6 +708,7 @@ const en = {
   'error.worktreeRefreshFailed': 'The worktree change was applied, but the session list could not be refreshed ({msg}). Re-open the project to see the change.',
   'error.notAWorktreeSession': 'This session does not live in a git worktree.',
   'error.noProjectPath': 'This project has no directory to create a worktree from.',
+  'error.notAGitRepo': 'This project is not a git repository, so there is no worktree to create.',
   // The group delete's own failures. `groupWorktreesLeftBehind` is the one that
   // must never be reworded into "the delete failed": the sessions ARE gone and
   // only the trees remain.
@@ -984,6 +986,7 @@ const zh: Record<keyof typeof en, string> = {
   // ── git branch ──
   'git.noBranch': '（无分支）',
   'git.disabledWorking': 'Agent 工作时无法切换分支',
+  'git.worktreeLocked': '在 git 工作树里：这棵树固定在自己的分支上，因此不提供分支切换',
   'git.noBranches': '无分支',
   'git.listFailed': '获取分支列表失败：{msg}',
   'git.switchFailed': '切换分支失败：{msg}',
@@ -1400,6 +1403,7 @@ const zh: Record<keyof typeof en, string> = {
   'error.worktreeRefreshFailed': '工作树更改已生效，但 Session 列表刷新失败（{msg}）。请重新打开项目查看更改。',
   'error.notAWorktreeSession': '该 Session 不在 git 工作树中。',
   'error.noProjectPath': '该项目没有可用于创建工作树的目录。',
+  'error.notAGitRepo': '该项目不是 git 仓库，无法创建工作树。',
   // 分组删除自己的失败文案。groupWorktreesLeftBehind 绝不能改写成"删除失败"：
   // 会话确实已经删除，留在磁盘上的只有工作树。
   'error.groupWorktreesBlocked': '无法移除工作树——{msg}',

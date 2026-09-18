@@ -9,7 +9,7 @@ import type {
 } from '../../shared/types'
 import { deriveSessionTitle } from '../../shared/session-title'
 import { markShadowed } from '../../shared/skill-rules'
-import { isWorktreeSession } from '../../shared/worktree-rules'
+import { isWorktreeSession, plainSessionCwd } from '../../shared/worktree-rules'
 import { shouldPromptFromFetch } from '../../shared/trust-rules'
 import { defaultReasoningValue } from '../../shared/reasoning'
 import { editsFromToolInput } from '../components/MultiEditDiff'
@@ -343,6 +343,12 @@ export type WorktreeActionResult = { ok: true } | { ok: false; message: string; 
 interface AppState {
   sessions: SessionMeta[]
   groups: GroupMeta[]
+  // Which project directories are git repositories, keyed by the auto group's
+  // resolved path. Read by the "new session in a git worktree" entry (sidebar
+  // header + project menu): a project that is not a repository has no tree to
+  // make. Filled by `refreshProjectGit`; a MISSING key means "not answered yet"
+  // and keeps today's behaviour (the entry is shown) — see canCreateWorktree.
+  projectGit: Record<string, boolean>
   // ── session full-text search ──
   // `searchQuery` is the live input (not lowercased/debounced); `searchResults`
   // is null when not searching (render the normal grouped list) or the latest
@@ -519,8 +525,15 @@ interface AppState {
   // confirmed gone", so the caller reports a failure instead of a success.
   adoptDeletedSession: (sessionId: string) => Promise<boolean>
   // ── worktree sessions ──
+  // Ask the main process which of these project directories are git repositories
+  // (one cheap `rev-parse` each, no python). Called by the sidebar with the auto
+  // groups' paths whenever that SET changes; the answer replaces the whole map, so
+  // a project that left the list takes its verdict with it. Fail-open: a failed
+  // probe records `true` — an unknown project keeps showing the entry.
+  refreshProjectGit: (paths: string[]) => Promise<void>
   // Open the create dialog for one project (auto group id). Resolves the project
-  // directory itself; a group with no resolvable path reports instead of opening.
+  // directory itself; a group with no resolvable path — or one already known NOT
+  // to be a repository — reports instead of opening.
   openWorktreeDialog: (groupId: string) => void
   closeWorktreeDialog: () => void
   // Create a worktree + a session inside it. On success the sidebar is reloaded
@@ -752,6 +765,7 @@ export const useStore = create<AppState>((set, get) => ({
   contextMenuTarget: null,
   editingSessionId: null,
   editingGroupId: null,
+  projectGit: {},
   worktreeDialog: null,
   deletePrompt: null,
   deleteGroupPrompt: null,
@@ -1041,7 +1055,16 @@ export const useStore = create<AppState>((set, get) => ({
     // An explicit override (the sidebar project "+") wins; otherwise new sessions
     // inherit the cwd of the session that last sent a message (falling back to
     // the currently-viewed session's dir, then the app default).
-    const cwd = cwdOverride || lastSentCwd || workingDir
+    //
+    // NEVER a worktree checkout, though: that is where `plainSessionCwd` comes in.
+    // A tree belongs to ONE session, so a plain "New Session" clicked while a
+    // worktree session is around — sent from, or merely viewed — would otherwise
+    // be born inside that tree, on its branch, sharing its undo history and
+    // blocking its removal. The rule sends that case to the session's project
+    // root (the main worktree) and leaves every other inherited dir untouched.
+    const inherited = lastSentCwd || workingDir
+    const owner = sessions.find((s) => sameCwd(s.cwd, inherited))
+    const cwd = cwdOverride || plainSessionCwd(inherited, owner)
     // If an empty session already has an unsent draft in THIS project (same cwd),
     // jump back to it instead of creating another session (InputBox restores the
     // draft on switch). Each project keeps its own at most one empty session.
@@ -1278,6 +1301,24 @@ export const useStore = create<AppState>((set, get) => ({
   // renderer only collects the inputs, mirrors createSession's state wiring, and
   // hands the CLI's failure `message` back to the dialog untouched.
 
+  refreshProjectGit: async (paths) => {
+    const want = [...new Set(paths.map((p) => (p || '').trim()).filter(Boolean))]
+    const verdicts = await Promise.all(want.map(async (path): Promise<[string, boolean]> => {
+      try {
+        return [path, await window.electronAPI.isGitRepo(path)]
+      } catch {
+        // Fail-open: the entry's own rule treats an unknown verdict as "show it",
+        // and a project that IS a repository must never lose the entry because a
+        // probe failed.
+        return [path, true]
+      }
+    }))
+    // Replaces the map wholesale: the caller passes the CURRENT project list, so
+    // a path that is no longer there must not keep answering for a later group
+    // that reuses the string.
+    set({ projectGit: Object.fromEntries(verdicts) })
+  },
+
   openWorktreeDialog: (groupId) => {
     const group = get().groups.find((g) => g.id === groupId)
     if (!group?.is_auto) return
@@ -1287,6 +1328,16 @@ export const useStore = create<AppState>((set, get) => ({
     const path = group.path || member?.project_root || member?.cwd || ''
     if (!path) {
       set({ error: tGlobal('error.noProjectPath') })
+      return
+    }
+    // The sidebar already hides the entry for a project it has confirmed is not
+    // a repository; this is the same rule at the one other door into the dialog,
+    // so a stale render (or a keyboard path) cannot open it either. The verdict is
+    // keyed by the GROUP's path — what the sidebar probes; a group without one
+    // falls back to a member's root, stays unknown, and opens, with the CLI's own
+    // `not-a-repo` as the backstop.
+    if (group.path && get().projectGit[group.path] === false) {
+      set({ error: tGlobal('error.notAGitRepo') })
       return
     }
     set({ worktreeDialog: { groupId, path } })
@@ -1468,6 +1519,12 @@ export const useStore = create<AppState>((set, get) => ({
       groups,
       activeSessionId: wasActive ? null : get().activeSessionId,
       sessionStates: states,
+      // The tree is gone from disk, so a "last sent from" pointer into it must go
+      // too: `createSession` inherits that directory, and inheriting a deleted
+      // one would file the next plain session against a path that no longer
+      // exists (the session row's cwd at this point IS the tree — main refuses
+      // the removal unless the session still runs inside it).
+      ...(sameCwd(get().lastSentCwd || '', session.cwd) ? { lastSentCwd: null } : {}),
       ...(wasActive
         ? {
             messages: [],

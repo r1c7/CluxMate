@@ -3,7 +3,7 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot, SessionMeta, WorktreeCreateSessionParams, WorktreeCreateSessionResult, WorktreeRemoveResult, GroupDeletePreview, GroupDeleteResult } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitBranchOptions, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot, SessionMeta, WorktreeCreateSessionParams, WorktreeCreateSessionResult, WorktreeRemoveResult, GroupDeletePreview, GroupDeleteResult } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { bridgesToRestart, planTrustCall, projectConfigRoot, trustTargetDir } from '../shared/trust-rules'
 import { canonicalCwdKey } from './cwd-key'
@@ -1868,7 +1868,12 @@ export function registerIpcHandlers() {
   // renderer (store.workingDir), matching how SKILL_LIST takes cwd.
   ipcMain.handle(IPC.GIT_INFO, async (_, cwd: string) => gitService.gitInfo(cwd))
 
-  ipcMain.handle(IPC.GIT_BRANCHES, async (_, cwd: string) => gitService.gitBranches(cwd))
+  // The sidebar's worktree entry asks this per project: one `rev-parse`, no
+  // python, and it never throws (`false` = no repository to build a tree from).
+  ipcMain.handle(IPC.GIT_IS_REPO, async (_, cwd: string) => gitService.isRepo(cwd))
+
+  ipcMain.handle(IPC.GIT_BRANCHES, async (_, cwd: string, opts?: GitBranchOptions) =>
+    gitService.gitBranches(cwd, opts ?? {}))
 
   ipcMain.handle(IPC.GIT_CHECKOUT, async (_, cwd: string, branch: string, strategy: GitCheckoutStrategy) => {
     try {

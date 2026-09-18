@@ -3,7 +3,7 @@ import { IPC } from '../shared/ipc-channels'
 import type {
   ElectronAPI, CreateSessionParams,
   ChatResult, SessionStreamEvent, SsrConfigPayload, EgressConfigPayload,
-  TrustSnapshot, WorktreeCreateSessionParams,
+  TrustSnapshot, WorktreeCreateSessionParams, GitBranchOptions,
 } from '../shared/types'
 
 const api: ElectronAPI = {
@@ -69,7 +69,8 @@ const api: ElectronAPI = {
   readFile: (sessionId: string, path: string) => ipcRenderer.invoke(IPC.FILE_READ, sessionId, path),
 
   getGitInfo: (cwd: string) => ipcRenderer.invoke(IPC.GIT_INFO, cwd),
-  listGitBranches: (cwd: string) => ipcRenderer.invoke(IPC.GIT_BRANCHES, cwd),
+  isGitRepo: (cwd: string) => ipcRenderer.invoke(IPC.GIT_IS_REPO, cwd),
+  listGitBranches: (cwd: string, opts?: GitBranchOptions) => ipcRenderer.invoke(IPC.GIT_BRANCHES, cwd, opts),
   checkoutBranch: (cwd: string, branch: string, strategy) =>
     ipcRenderer.invoke(IPC.GIT_CHECKOUT, cwd, branch, strategy),
   watchGit: (cwd: string) => ipcRenderer.invoke(IPC.GIT_WATCH, cwd),

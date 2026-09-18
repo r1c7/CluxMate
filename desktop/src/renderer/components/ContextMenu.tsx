@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useStore } from '../stores'
-import { isWorktreeSession } from '../../shared/worktree-rules'
+import { canCreateWorktree, isWorktreeSession } from '../../shared/worktree-rules'
 import { useT } from '../useI18n'
 
 // How many uncommitted paths the removal confirm lists. The prompt is plain
@@ -79,6 +79,9 @@ export default function ContextMenu() {
   const target = useStore((s) => s.contextMenuTarget)
   const close = useStore((s) => s.closeContextMenu)
   const groups = useStore((s) => s.groups)
+  // Which projects are git repositories (filled by the sidebar's probe). A
+  // project with no repository has no tree to make, so its entry is withheld.
+  const projectGit = useStore((s) => s.projectGit)
   const sessions = useStore((s) => s.sessions)
   const requestDeleteSession = useStore((s) => s.requestDeleteSession)
   const requestDeleteGroup = useStore((s) => s.requestDeleteGroup)
@@ -251,8 +254,9 @@ export default function ContextMenu() {
         onContextMenu={(e) => e.preventDefault()}
       >
         {/* A project (auto group) is the only kind of group with a repository to
-            build a worktree from. */}
-        {!!group?.is_auto && (
+            build a worktree from — and the probe has to have CONFIRMED one: an
+            unanswered path keeps the entry (canCreateWorktree is fail-open). */}
+        {!!group?.is_auto && canCreateWorktree(projectGit[group.path || '']) && (
           <>
             <MenuItem
               label={t('contextMenu.newWorktreeSession')}

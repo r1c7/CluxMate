@@ -60,6 +60,7 @@ export const IPC = {
   FILE_READ:      'file:read',
 
   GIT_INFO:      'git:info',
+  GIT_IS_REPO:   'git:is-repo',
   GIT_BRANCHES:  'git:branches',
   GIT_CHECKOUT:  'git:checkout',
   GIT_WATCH:     'git:watch',

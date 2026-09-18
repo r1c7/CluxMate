@@ -114,3 +114,129 @@ export function worktreeBadgeLabel(session: WorktreeSessionFields | null | undef
 export function isWorktreeSession(session: WorktreeSessionFields | null | undefined): boolean {
   return worktreeBadgeLabel(session) !== null
 }
+
+// --- the directory a new PLAIN session starts in ------------------------------
+
+// A session row, read structurally like the shapes above: only the two directory
+// fields the rule below needs.
+export interface SessionDirFields {
+  cwd?: string | null
+  project_root?: string | null
+}
+
+// Where a new plain session starts when it INHERITS a directory — the one the
+// last send came from, or the one being viewed (the store's chain, and the only
+// two paths that are implicit; an explicit "new session in this project" passes a
+// project directory and never reaches this rule).
+//
+// Inheriting a linked worktree would be wrong on three counts: a tree is ONE
+// session's isolation (`create` makes one per session, and §C's occupancy guard
+// refuses to remove a tree another session occupies), a second session in it
+// shares that tree's undo history, and it would silently run on the tree's branch
+// without anyone asking for a worktree. Per §E a session's `project_root` differs
+// from its `cwd` exactly when it lives in a linked worktree — everywhere else
+// (a plain repo, a plain-repo subdirectory, a non-git dir) the two are the same
+// directory — so a difference IS the signal, and the project root is where the
+// new session belongs.
+//
+// `owner` is the CALLER's lookup of the session running in `inherited` (the store
+// owns the cwd comparison rules); null means no live session claims that
+// directory, and the inherited path is returned untouched — inheriting what the
+// user last worked in stays the rule for everything that is not a worktree.
+export function plainSessionCwd(inherited: string, owner: SessionDirFields | null | undefined): string {
+  const root = typeof owner?.project_root === 'string' ? owner.project_root.trim() : ''
+  const cwd = typeof owner?.cwd === 'string' ? owner.cwd.trim() : ''
+  if (!root || !cwd || root === cwd) return inherited
+  return root
+}
+
+// --- which branches the PROJECT may switch to --------------------------------
+
+// One row of `cluxmate worktree list --json`, read structurally so this module
+// stays independent of the CLI's full payload (same convention as
+// WorktreeSessionFields above): only the two fields the filter needs.
+export interface WorktreeBranchRow {
+  branch?: string | null
+  is_main?: boolean
+}
+
+// May the composer's branch pill SWITCH a branch here?
+//
+// Inside a linked worktree, no: the branch is the tree's identity — `create`
+// pins it to `cluxmate/<slug>`, the sidebar badge and the removal confirmation
+// read it, and a Phase-2 merge would merge it back — so a session must not
+// switch it out from under those readers. Git agrees for the common case: a
+// branch checked out in the main worktree cannot be checked out in a linked one,
+// so the dropdown would mostly offer errors. Switching inside a worktree stays
+// possible from a terminal and from the agent's own shell; that is deliberate
+// and is not what the UI offers.
+//
+// `false` does NOT hide the pill: it is rendered DISABLED and names the tree
+// (see branchPillLabel), so the user can still see where the session runs.
+//
+// `isWorktree` is git truth about the CURRENT directory (`cluxmate worktree
+// info`), not a session column, so this covers ANY session living in a linked
+// worktree — including a plain one pointed at a tree the user made by hand — and
+// allows switching again the moment a worktree session is moved to the main tree.
+//
+// Fail-safe: an absent field keeps today's behaviour (switching allowed).
+export function canSwitchBranches(
+  git: { inRepo?: boolean; isWorktree?: boolean } | null | undefined,
+): boolean {
+  return git?.inRepo === true && git.isWorktree !== true
+}
+
+// What the pill shows. In the project tree: the current branch. Inside a linked
+// worktree: the TREE's name (`me`), because that is the session's identity while
+// the branch is not switchable — the branch itself stays in the sidebar badge's
+// tooltip and in the removal confirmation. Null when there is nothing to name.
+export function branchPillLabel(
+  git: { currentBranch?: string | null; isWorktree?: boolean; worktreeName?: string | null } | null | undefined,
+): string | null {
+  const branch = typeof git?.currentBranch === 'string' ? git.currentBranch.trim() : ''
+  if (git?.isWorktree !== true) return branch || null
+  const name = typeof git?.worktreeName === 'string' ? git.worktreeName.trim() : ''
+  // A tree whose name could not be read still shows something true about it.
+  return name || branch || null
+}
+
+// May this project offer "new session in a git worktree"? Only a repository has
+// trees to make, and the sidebar asks the main process per project (`isGitRepo`,
+// one `rev-parse`).
+//
+// Fail-open on purpose: `undefined` is "not answered yet" — a project that IS a
+// repository must not lose the entry to a slow probe, so an unknown verdict shows
+// the entry (today's behaviour) and only a confirmed `false` hides it. The dialog
+// stays the backstop: creating one against a non-repository still fails with the
+// CLI's own `not-a-repo`.
+export function canCreateWorktree(isRepo: boolean | null | undefined): boolean {
+  return isRepo !== false
+}
+
+// Hide the branches a LINKED worktree currently has checked out.
+//
+// They cannot be switched to from the main tree (git answers "already checked
+// out at …"), and they are the identity of another session's tree — pulling one
+// into the project's tree would break the one-tree-one-branch rule the worktree
+// columns, the removal path and the Phase-2 finish actions are built on.
+//
+// Only `is_main === false` rows count: the main worktree's own branch is the
+// ordinary current branch and stays in the list, and a tree removed with
+// `--keep-branch` puts its branch back in the list, which is exactly what
+// keeping it is for (Phase 2's 「保留成分支」).
+//
+// Fail-safe by construction: no rows — an older CLI, a non-repository, a failed
+// call — filter nothing, so the dropdown shows today's list.
+export function withoutWorktreeBranches(
+  branches: readonly string[],
+  rows: readonly WorktreeBranchRow[] | null | undefined,
+): string[] {
+  const all = [...branches]
+  const held = new Set<string>()
+  for (const row of rows ?? []) {
+    if (row?.is_main === true) continue
+    const branch = typeof row?.branch === 'string' ? row.branch.trim() : ''
+    if (branch) held.add(branch)
+  }
+  return held.size ? all.filter((branch) => !held.has(branch)) : all
+}
