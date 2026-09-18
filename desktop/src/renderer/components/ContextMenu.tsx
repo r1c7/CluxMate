@@ -173,7 +173,16 @@ export default function ContextMenu() {
     }))
     if (!ok) return
     const res = await removeWorktreeSession(sessionId)
-    if (!res.ok) setError(t('error.removeWorktreeFailed', { msg: res.message }))
+    if (!res.ok) {
+      // A deliberate refusal is not a failure. `not-a-worktree` (the session no
+      // longer runs in the tree it names) and `worktree-in-use` (another session
+      // is still living in it) both mean NOTHING was deleted and the user has a
+      // way forward, so they must not be announced as a removal that broke; only
+      // the real execution errors (`git-failed`, `python-missing`, …) keep the
+      // failure wording. The body stays the main process's own message.
+      const refused = res.error === 'not-a-worktree' || res.error === 'worktree-in-use'
+      setError(t(refused ? 'error.removeWorktreeBlocked' : 'error.removeWorktreeFailed', { msg: res.message }))
+    }
   }
 
   // Session context menu

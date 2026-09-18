@@ -19,6 +19,10 @@ import { SKILL_MAX_BYTES, isAllowedSkillPath, listSkills, setSkillDisabled } fro
 // branches on `ok` instead of wrapping the call.
 import { worktreeCreate, worktreeInfo, worktreeRemove } from './worktree'
 import type { WorktreeRemoveOptions, WorktreeRemovePayload, WorktreeResult } from './worktree'
+// The containment test and the occupancy guard are PURE (no electron import), so
+// desktop/tests can exercise them directly with the Node runner — this file
+// cannot be loaded there. See the module header.
+import { isInsideOrEqual, sessionsInTree } from './worktree-guard'
 import { version as appVersion } from '../../package.json'
 
 // §B: every tree CluxMate creates lives in `<repo_root>/.worktrees/<name>`, and a
@@ -26,15 +30,6 @@ import { version as appVersion } from '../../package.json'
 // path below need to ask "is the session still IN that tree?" — see
 // `worktreePathForSession`.
 const WORKTREE_CONTAINER = '.worktrees'
-
-// Is `candidate` inside `container` (or the container itself)? Plain
-// string/relative comparison on resolved paths: `session.cwd` is where the
-// bridge runs, and by the time it is asked about, the tree is on disk.
-function isInsideDir(container: string, candidate: string): boolean {
-  if (!container || !candidate) return false
-  const rel = path.relative(path.resolve(container), path.resolve(candidate))
-  return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel))
-}
 
 // The absolute path of the tree a session's recorded worktree names — but ONLY
 // while the session still runs inside it. `worktree_name`/`worktree_branch`
@@ -47,7 +42,7 @@ function worktreePathForSession(session: SessionMeta): string | null {
   const name = session.worktree_name
   if (!name) return null
   const tree = path.join(projectConfigRoot(session, session.cwd), WORKTREE_CONTAINER, name)
-  return isInsideDir(tree, session.cwd) ? tree : null
+  return isInsideOrEqual(tree, session.cwd) ? tree : null
 }
 
 // `AgentBridge.kill()` sends SIGTERM and schedules SIGKILL after 5s, then
@@ -828,6 +823,28 @@ export function registerIpcHandlers() {
           ok: false,
           error: 'not-a-worktree',
           message: `This session is no longer running in its worktree (${name}), so there is nothing here to remove.`,
+        }
+      }
+      // …and no OTHER session may still be living in that tree. One tree per
+      // session is what the CREATE path builds, not something the sessions table
+      // enforces: "change working directory", the CLI's `--cwd`, or opening the
+      // tree directory as a project can each file a second session in a tree
+      // that already has one, and deleting the tree takes that session's working
+      // directory (and anything uncommitted in it) out from under it. The SESSION
+      // ROWS decide this, not the live bridges: a session that is merely idle
+      // right now runs in that tree again on its next turn. Refusing here — still
+      // before the bridge is killed and before the CLI is called — leaves every
+      // session exactly as it was.
+      const blockers = sessionsInTree(target, sessionStore.listSessions(), sid)
+      if (blockers.length > 0) {
+        const first = blockers[0].title || blockers[0].id
+        return {
+          ok: false,
+          error: 'worktree-in-use',
+          message:
+            blockers.length === 1
+              ? `This worktree is in use by another session: "${first}". Close that session, or move it to another directory, and then remove the worktree.`
+              : `This worktree is in use by ${blockers.length} other sessions, starting with "${first}". Close them, or move them to another directory, and then remove the worktree.`,
         }
       }
       // Kill the bridge and AWAIT it BEFORE removing the directory: on Windows a

@@ -638,6 +638,8 @@ const en = {
   'error.trustSetFailed': 'Failed to set project trust: {msg}',
   'error.trustRemoveFailed': 'Failed to revoke the trust decision: {msg}',
   'error.removeWorktreeFailed': 'Failed to remove the worktree: {msg}',
+  // Deliberate refusals (not-a-worktree / worktree-in-use): nothing was deleted.
+  'error.removeWorktreeBlocked': 'Cannot remove the worktree: {msg}',
   'error.worktreeRefreshFailed': 'The worktree change was applied, but the session list could not be refreshed ({msg}). Re-open the project to see the change.',
   'error.notAWorktreeSession': 'This session does not live in a git worktree.',
   'error.noProjectPath': 'This project has no directory to create a worktree from.',
@@ -1272,6 +1274,8 @@ const zh: Record<keyof typeof en, string> = {
   'error.trustSetFailed': '设置项目信任失败：{msg}',
   'error.trustRemoveFailed': '撤销信任决定失败：{msg}',
   'error.removeWorktreeFailed': '移除工作树失败：{msg}',
+  // Deliberate refusals (not-a-worktree / worktree-in-use): nothing was deleted.
+  'error.removeWorktreeBlocked': '无法移除工作树：{msg}',
   'error.worktreeRefreshFailed': '工作树更改已生效，但 Session 列表刷新失败（{msg}）。请重新打开项目查看更改。',
   'error.notAWorktreeSession': '该 Session 不在 git 工作树中。',
   'error.noProjectPath': '该项目没有可用于创建工作树的目录。',

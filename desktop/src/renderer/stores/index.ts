@@ -306,8 +306,11 @@ export interface WorktreeRemovalInfo {
 
 // Result the worktree dialog renders verbatim: a failure carries the IPC
 // result's own `message` (the only exit for dirty / branch-exists / not-a-repo /
-// bad-name — the renderer never re-words or re-derives those codes).
-export type WorktreeActionResult = { ok: true } | { ok: false; message: string }
+// bad-name — the renderer never re-words or re-derives those codes). `error` is
+// that result's code when it has one (`not-a-worktree` / `worktree-in-use` /
+// `git-failed` / …): the message is prose, so only the code lets a caller tell a
+// deliberate refusal from an execution failure.
+export type WorktreeActionResult = { ok: true } | { ok: false; message: string; error?: string }
 
 interface AppState {
   sessions: SessionMeta[]
@@ -1126,7 +1129,7 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e: any) {
       return { ok: false, message: e?.message || tGlobal('error.unknown') }
     }
-    if (!res.ok) return { ok: false, message: res.message || tGlobal('error.unknown') }
+    if (!res.ok) return { ok: false, message: res.message || tGlobal('error.unknown'), error: res.error }
 
     // The main process deleted the session row along with the tree; mirror
     // deleteSession's local cleanup and then point the app somewhere that exists.
