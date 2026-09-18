@@ -3,7 +3,7 @@ import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { IPC } from '../shared/ipc-channels'
-import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot } from '../shared/types'
+import type { CreateSessionParams, StreamEvent, ChatMessage, SkillMeta, McpServer, GroupMeta, GitCheckoutStrategy, SessionSearchHit, HookEntry, SsrConfigPayload, EgressConfigPayload, RetrievalConfigPayload, AgentsConfig, MemoryFactList, TrustSnapshot, SessionMeta, WorktreeCreateSessionParams, WorktreeCreateSessionResult, WorktreeRemoveResult } from '../shared/types'
 import { deriveSessionTitle } from '../shared/session-title'
 import { bridgesToRestart, planTrustCall } from '../shared/trust-rules'
 import { canonicalCwdKey } from './cwd-key'
@@ -13,6 +13,11 @@ import * as sessionStore from './session-store'
 import * as gitService from './git-service'
 import { deleteFact, scanFacts } from './memory-facts'
 import { SKILL_MAX_BYTES, isAllowedSkillPath, listSkills, setSkillDisabled } from './skills'
+// The `cluxmate worktree` client (§A): naming rules, the `.worktrees/`
+// container, the dirty-tree guard and the project-root resolution all live in
+// the Python CLI. Every function here resolves — none throws — so a caller
+// branches on `ok` instead of wrapping the call.
+import { worktreeCreate, worktreeInfo, worktreeRemove } from './worktree'
 import { version as appVersion } from '../../package.json'
 
 const bridges = new Map<string, AgentBridge>()
@@ -20,13 +25,16 @@ const pendingSpawns = new Map<string, Promise<void>>()
 let activeSessionId: string | null = null
 
 // Session-only trust decisions ("trust this run only"), keyed by the CANONICAL
-// cwd (canonicalCwdKey): they are re-sent on every spawn because the Python
-// process that held the in-memory override is killed on a bridge restart, and a
-// variant spelling of the directory must not file the decision under a second
-// key that the respawn then misses. Only decisions about the directory a session
-// actually runs in belong here (TRUST_SET enforces it): a spawn reads this map
-// with its own cwd, so an entry for any other directory is a decision with no
-// consumer.
+// PROJECT CONFIG ROOT of the session (canonicalCwdKey of `project_root || cwd`,
+// §E): they are re-sent on every spawn because the Python process that held the
+// in-memory override is killed on a bridge restart, and a variant spelling of
+// the directory must not file the decision under a second key that the respawn
+// then misses. The registry the user writes (and the CLI/TUI write) is keyed by
+// the project root too, so a session in a linked worktree finds the same answer
+// the main tree's sessions do. Only decisions about the directory a session's
+// project config lives in belong here (TRUST_SET enforces it): a spawn reads
+// this map with its own project root, so an entry for any other directory is a
+// decision with no consumer.
 const sessionTrust = new Map<string, 'trusted' | 'denied'>()
 
 // Kill EVERY bridge running in a directory whose answer changed, so the next
@@ -37,7 +45,15 @@ const sessionTrust = new Map<string, 'trusted' | 'denied'>()
 // from the live process that answered, so the comparison is against the answer
 // it actually resolved, not the one the renderer asked for.
 function restartBridgesOnTrustChange(cwd: string, before: TrustSnapshot | null, after: TrustSnapshot | null) {
-  const live = [...bridges].map(([sessionId, b]) => ({ sessionId, cwd: b._spawnCwd }))
+  // Each bridge is described by the directory it reads its project config from
+  // (§E): its session's PROJECT CONFIG ROOT, which for a session running in a
+  // linked worktree is the main worktree — the key the trust answer the process
+  // resolved is filed under, and therefore the row a revoke is about. A bridge
+  // whose session row is gone falls back to the directory it was spawned in.
+  const live = [...bridges].map(([sessionId, b]) => ({
+    sessionId,
+    cwd: sessionStore.getSession(sessionId)?.project_root || b._spawnCwd,
+  }))
   for (const sid of bridgesToRestart(before?.status, after?.status, cwd, live, sameCwd)) {
     const b = bridges.get(sid)
     if (!b) continue
@@ -85,9 +101,59 @@ function sameCwd(a: string, b: string): boolean {
   try { return fs.realpathSync(a) === fs.realpathSync(b) } catch { return a === b }
 }
 
+// The repository root for a directory, resolved the way git-service resolves it
+// for its own commands (`rev-parse --show-toplevel`, so a nested session cwd
+// still acts on the WHOLE work tree). git-service keeps its resolver private and
+// is owned elsewhere, so `git:stash` / `git:commit-wip` mirror it here; a
+// directory that cannot be resolved is passed through unchanged, and git then
+// reports the real reason (which the caller turns into `{ok:false, message}`).
+function gitRepoRoot(cwd: string): Promise<string> {
+  return new Promise((resolve) => {
+    execFile('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', windowsHide: true },
+      (err, stdout) => resolve(err ? cwd : (String(stdout).trim() || cwd)),
+    )
+  })
+}
+
+// §E — the ONE place the desktop's project-config-root policy lives: a session's
+// project config root is `session.project_root || session.cwd`.
+//
+// Every main-process read or write of PROJECT CONFIG on disk resolves it through
+// here: permissions.json, mcp.json, settings.json, skills.json, memory facts,
+// AGENTS.md, and the trust key. Everything that locates the EXECUTION tree — the
+// bridge spawn cwd, an ensureBridge warm cwd, the RPCs sent to it, and every
+// workspace file read — keeps using `session.cwd`, the tree the agent actually
+// runs in. Getting the two backwards silently moves the agent or the panels into
+// the wrong tree.
+//
+// `fallback` is the caller's `cwd`: a row written before the project_root column
+// existed has it NULL, and `project_root || cwd` must then be the row's own cwd
+// (today's behaviour), never an empty string.
+function projectConfigRoot(session: SessionMeta | undefined | null, fallback: string): string {
+  return session?.project_root || fallback
+}
+
+// The directory a TRUST call is about, as the trust subsystem files it (§E).
+// Python resolves every trust target to that directory's PROJECT CONFIG ROOT —
+// both the registry rows and the answer a process loaded are keyed there — so a
+// call about a session's own execution tree and a call about its project root are
+// the same call about the same config. Normalizing here is what keeps the two
+// spellings from becoming two different answers: the renderer asks about the tree
+// the session runs in (`workingDir`), while the session-only decision map and the
+// restart guard below are keyed on the project root. Without it, a worktree
+// session's card would neither file its "just this once" answer where the next
+// spawn reads it, nor restart the processes that loaded the answer that changed.
+// A target that is NOT this session's own tree travels unchanged: the Settings
+// list revokes any recorded row, and rows are project roots already.
+function trustTargetDir(cwd: string, meta: SessionMeta, projectRoot: string): string {
+  return sameCwd(cwd, meta.cwd) ? projectRoot : cwd
+}
+
 // Project-scoped tool-approval policy, mirrors cluxmate/core/permissions.py.
-// Lives at <cwd>/.cluxmate/permissions.json so "accept edits" is per-project
-// and does not follow the user to a different working directory.
+// Lives at <project config root>/.cluxmate/permissions.json so "accept edits" is
+// per-project and does not follow the user to a different working directory.
+// `cwd` here is that PROJECT CONFIG ROOT (§E), not the session's execution tree:
+// a worktree session shares its project's always-allow rules.
 // mode is per-session (never persisted) — a cold bridge always reports
 // 'default'. always_allow_tools (write tier) and always_allow_dangerous_tools
 // (dangerous tier) live on disk.
@@ -508,7 +574,13 @@ async function ensureBridge(sid: string, cwd: string, modelId: string): Promise<
     }
   }
   bridges.set(sid, b)
-  const spawnPromise = b.spawn(cwd, modelId, sid, sessionTrust.get(canonicalCwdKey(cwd))).catch((e) => {
+  // The session-only decision a spawn re-sends is keyed on the session's PROJECT
+  // CONFIG ROOT (§E), not on the tree the bridge runs in: the registry row — and
+  // the answer Python resolves — lives under the main worktree, so a session
+  // running in a linked worktree has to look its decision up there. `cwd` itself
+  // stays the session's own tree: that is what the bridge is spawned in.
+  const trustKey = canonicalCwdKey(sessionStore.getSession(sid)?.project_root || cwd)
+  const spawnPromise = b.spawn(cwd, modelId, sid, sessionTrust.get(trustKey)).catch((e) => {
     console.error(`Agent spawn failed for ${sid} at ${cwd}:`, e?.message)
     bridges.delete(sid)
   })
@@ -585,7 +657,22 @@ export function registerIpcHandlers() {
     const existing = sessionStore.listSessions().find(
       (s) => s.message_count === 0 && !bridges.get(s.id)?._busy && sameCwd(s.cwd, params.cwd)
     )
-    const meta = existing || sessionStore.createSession(params)
+    let meta: SessionMeta
+    if (existing) {
+      meta = existing
+    } else {
+      // §E: resolve the project CONFIG root before the row exists. A session
+      // started inside a linked worktree must read its config — and file its
+      // trust answer — under the main worktree, while `cwd` stays the tree the
+      // bridge runs in. Fail-safe by construction: worktreeInfo never throws and
+      // `ok:false` covers a missing interpreter, a timeout and "not a git
+      // repository", so every degraded case keeps today's behaviour (`cwd`).
+      // Note `config_root`, NOT `root`: only a linked worktree redirects a
+      // session — a plain repo and a plain-repo SUBDIRECTORY keep their own dir.
+      const info = await worktreeInfo(params.cwd)
+      const projectRoot = params.projectRoot || (info.ok ? info.config_root : params.cwd)
+      meta = sessionStore.createSession({ ...params, projectRoot })
+    }
     activeSessionId = meta.id
     // Don't block the IPC response on the Python spawn+initialize handshake
     // (~8s): the renderer only needs `meta` to show the session, and the bridge
@@ -601,10 +688,120 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle(IPC.SESSION_UPDATE_CWD, async (_, id: string, cwd: string) => {
-    sessionStore.updateSessionCwd(id, cwd)
+    // §E: re-resolve the project CONFIG root for the NEW directory. Not optional:
+    // a session moved into (or out of) a linked worktree has to keep reading its
+    // config from the right tree, and skipping this would leave a worktree
+    // session's project_root pointing at the worktree itself — a second, private
+    // copy of the project's permissions / mcp / skills / facts. Same fail-safe as
+    // SESSION_CREATE: an unusable `worktreeInfo` degrades to `cwd`.
+    const info = await worktreeInfo(cwd)
+    sessionStore.updateSessionCwd(id, cwd, info.ok ? info.config_root : cwd)
     // Don't kill bridge here — ensureBridge will detect the cwd
     // change and respawn when CHAT_SEND fires next.
   })
+
+  // Create a session in a FRESH git worktree (§D). The tree, its branch, the
+  // `.worktrees/` container, the dirty-tree guard and every naming rule live in
+  // the Python CLI — main/worktree.ts is a thin client that never throws — so
+  // this handler only sequences: create the tree, bind a session to it, pre-warm.
+  ipcMain.handle(
+    IPC.WORKTREE_CREATE_SESSION,
+    async (_, params: WorktreeCreateSessionParams): Promise<WorktreeCreateSessionResult> => {
+      const result = await worktreeCreate({
+        cwd: params.cwd,
+        name: params.name,
+        title: params.title,
+        base: params.base,
+        branch: params.branch,
+      })
+      // NO fallback to a plain session at `params.cwd`: the user asked for an
+      // isolated tree, and silently running them in the shared directory is the
+      // exact surprise this channel exists to prevent. The §A failure object
+      // travels through unchanged (`dirty` / `branch-exists` / `not-a-repo` are
+      // the actionable ones) and the dialog renders `message`.
+      if (!result.ok) return result
+      // The new tree is the session's EXECUTION cwd; the project it belongs to
+      // (the dialog's cwd, which the CLI resolved) is where its config is read
+      // from and where its trust answer is filed (§E).
+      const session = sessionStore.createSession({
+        title: params.title,
+        cwd: result.path,
+        modelId: params.modelId,
+        apiType: params.apiType,
+        provider: params.provider,
+        model: params.model,
+        projectRoot: result.project_root,
+        worktreeName: result.name,
+        worktreeBranch: result.branch,
+      })
+      activeSessionId = session.id
+      // Deliberately NOT the SESSION_CREATE empty-session reuse check: the tree
+      // was created a moment ago and is empty, so reusing an unrelated "New
+      // Session" here would bind that session — and its history — to a tree it
+      // never ran in. Same background pre-warm path as SESSION_CREATE.
+      void ensureBridge(session.id, session.cwd, resolveModelId(session.model_id)).catch((e) => {
+        console.error(`Pre-warm bridge failed for ${session.id}:`, e?.message)
+      })
+      return {
+        ok: true,
+        session: { ...session, is_pinned: !!session.is_pinned },
+        path: result.path,
+        name: result.name,
+        branch: result.branch,
+      }
+    },
+  )
+
+  // Remove a worktree session: its tree, its branch, and then the session.
+  ipcMain.handle(
+    IPC.WORKTREE_REMOVE_SESSION,
+    async (_, params: { sessionId: string; force?: boolean }): Promise<WorktreeRemoveResult> => {
+      const sid = params?.sessionId
+      const session = sid ? sessionStore.getSession(sid) : undefined
+      const name = session?.worktree_name || ''
+      // Only a session that RECORDS a worktree of its own may remove one:
+      // `worktree remove` takes a name, and a session that merely runs inside
+      // some tree (a plain session in a subdirectory, or a row from before the
+      // column existed) has none. Nothing is deleted in this branch.
+      if (!session || !name) {
+        return {
+          ok: false,
+          error: 'not-a-worktree',
+          message: 'This session is not running in a worktree of its own.',
+        }
+      }
+      // Kill the bridge and AWAIT it BEFORE removing the directory: on Windows a
+      // live process's cwd LOCKS the directory, so `git worktree remove` would
+      // fail against a running agent. Dropping it from the map first keeps its
+      // exit notification from racing this handler's own bookkeeping.
+      const bridge = bridges.get(sid)
+      if (bridge) {
+        bridges.delete(sid)
+        try { await bridge.kill() } catch { /* already gone */ }
+      }
+      // The CLI resolves the tree from the repository, so hand it the project
+      // CONFIG root (§E) — the main worktree, where `.worktrees/` lives — and the
+      // worktree's NAME as the target. Default force: removing the tree discards
+      // whatever is left in it, which is what the user asked for.
+      const result = await worktreeRemove({
+        cwd: projectConfigRoot(session, session.cwd),
+        target: name || session.cwd,
+        force: params.force !== false,
+      })
+      // The tree is still on disk, so the session stays usable: report the
+      // failure and leave the row, its logs and its (now cold) bridge alone —
+      // the next interaction respawns it.
+      if (!result.ok) return result
+      deleteSessionFully(sid)
+      // The bridge is already dead (and already out of the map, so its own exit
+      // notification was suppressed) — tell the renderer explicitly, so the
+      // sidebar dot for this session greys out alongside its removed row.
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(IPC.BRIDGE_STATUS_CHANGED, { sessionIds: [sid], running: false })
+      }
+      return { ok: true }
+    },
+  )
 
   // Persist the session's selected model + reasoning level (the composer's
   // per-session selection). Also re-derives the denormalized provider/model/
@@ -819,9 +1016,12 @@ export function registerIpcHandlers() {
     const bridge = bridges.get(sid)
     if (bridge && bridge.isRunning) return await bridge.getPermissions()
     // Bridge cold: read the project's permissions.json directly so the UI still
-    // reflects state right after a session switch, before any chat/send.
+    // reflects state right after a session switch, before any chat/send. The
+    // file lives in the session's PROJECT CONFIG ROOT (§E), not in the tree the
+    // bridge would run in — and a missing session record keeps today's answer
+    // (the empty policy), which is what the `''` fallback produces.
     const meta = sessionStore.getSession(sid)
-    return readProjectPermissions(meta?.cwd || '')
+    return readProjectPermissions(projectConfigRoot(meta, meta?.cwd || ''))
   })
 
   // Project trust: the Python process owns the resolution (registry + the
@@ -855,7 +1055,18 @@ export function registerIpcHandlers() {
     // remove() forgets the registry entry only — a session-only answer to the
     // same directory stands (it lives in the Python process and in sessionTrust),
     // so there is nothing to clean up here; the restart decision sees both.
-    restartBridgesOnTrustChange(cwd, before, result)
+    // The target is normalized to the project root for that decision (see
+    // trustTargetDir): the bridges compared below are described by the root their
+    // config comes from, and a removal issued from a worktree session's own card
+    // has to reach every session that loaded that project's answer — including
+    // the ones running in the main tree. The two snapshots stay valid under the
+    // rename because Python resolves both spellings of the directory to one
+    // project-root answer, which is exactly what the normalized target names.
+    restartBridgesOnTrustChange(
+      trustTargetDir(cwd, meta, projectConfigRoot(meta, meta.cwd)),
+      before,
+      result,
+    )
     return result
   })
 
@@ -865,8 +1076,15 @@ export function registerIpcHandlers() {
   ) => {
     const meta = sessionStore.getSession(sid)
     if (!meta) throw new Error(`Session record not found (sid=${sid})`)
-    const plan = planTrustCall(cwd, meta.cwd, sameCwd)
-    const b = await ensureBridge(sid, plan.warmCwd, resolveModelId(meta.model_id))
+    // §E: a session's trust answer is keyed on its PROJECT CONFIG ROOT, so the
+    // target is compared against that root — a session in a linked worktree must
+    // recognize a call about the main worktree as its own. The bridge is still
+    // warmed at the session's own cwd: that is the EXECUTION tree, and warming at
+    // the project root would respawn the session's process in the other tree.
+    const projectRoot = projectConfigRoot(meta, meta.cwd)
+    const target = trustTargetDir(cwd, meta, projectRoot)
+    const plan = planTrustCall(target, projectRoot, sameCwd)
+    const b = await ensureBridge(sid, meta.cwd, resolveModelId(meta.model_id))
     const before = (await b.call('trust/get', { cwd })) as TrustSnapshot
     const result = await b.call('trust/set', { cwd, status, persist })
     // An invalid status comes back as an ordinary RESULT payload carrying
@@ -876,10 +1094,11 @@ export function registerIpcHandlers() {
     if (typeof error === 'string') throw new Error(error)
     // sessionTrust is what this session's next spawn re-sends as
     // `initialize {trust}`, and ensureBridge reads it back with the session's own
-    // cwd — so a decision about a foreign directory would sit in the map with
-    // nothing able to consume it. The plan drops those instead of filing them.
+    // PROJECT CONFIG ROOT — so a decision about a foreign directory would sit in
+    // the map with nothing able to consume it. The plan drops those instead of
+    // filing them.
     if (plan.targetIsSessionDir) {
-      const key = canonicalCwdKey(plan.warmCwd)
+      const key = canonicalCwdKey(projectRoot)
       if (persist) sessionTrust.delete(key)
       else sessionTrust.set(key, status)
     }
@@ -890,7 +1109,7 @@ export function registerIpcHandlers() {
     // just rewrites the registry. Whatever the caller asked, every session
     // running in the target directory is killed and its next interaction
     // re-initializes with the new decision instead of hot-swapping it.
-    restartBridgesOnTrustChange(cwd, before, result as TrustSnapshot)
+    restartBridgesOnTrustChange(target, before, result as TrustSnapshot)
     return result
   })
 
@@ -950,10 +1169,12 @@ export function registerIpcHandlers() {
   })
 
   // Open a hooks settings.json in the user's editor. `global` → ~/.cluxmate/
-  // settings.json; `project` → <session cwd>/.cluxmate/settings.json. Auto-creates
-  // the file (empty {"hooks":{}} skeleton) when missing so the editor always lands
-  // on a real, editable file. shell.openPath returns an error string on failure
-  // (e.g. no default editor) — surface it rather than swallowing.
+  // settings.json; `project` → <session's project config root>/.cluxmate/
+  // settings.json (§E — the file the agent actually reads, which for a worktree
+  // session is the main worktree's copy). Auto-creates the file (empty
+  // {"hooks":{}} skeleton) when missing so the editor always lands on a real,
+  // editable file. shell.openPath returns an error string on failure (e.g. no
+  // default editor) — surface it rather than swallowing.
   ipcMain.handle(IPC.HOOKS_OPEN, async (_, sid: string, scope: 'global' | 'project'): Promise<void> => {
     let dir: string
     if (scope === 'global') {
@@ -961,7 +1182,7 @@ export function registerIpcHandlers() {
     } else {
       const meta = sessionStore.getSession(sid)
       if (!meta) throw new Error('Session not found')
-      dir = path.join(meta.cwd, '.cluxmate')
+      dir = path.join(projectConfigRoot(meta, meta.cwd), '.cluxmate')
     }
     const filePath = path.join(dir, 'settings.json')
     if (!fs.existsSync(filePath)) {
@@ -1086,6 +1307,11 @@ export function registerIpcHandlers() {
   // plain fs in this process — the Python side is never involved, and no bridge
   // restart is needed (unlike the enabled toggle above): the recall index
   // reconciles from the files' mtime+size before the next recall.
+  // `cwd` is the session's PROJECT CONFIG ROOT (§E), supplied by the renderer
+  // (Settings → Memory resolves the active session's project root; '' lists
+  // global facts only). Deliberately NOT re-resolved here: deriving the root a
+  // second time inside the handler would be a second source of truth for the
+  // same rule.
   ipcMain.handle(IPC.MEMORY_FACTS_LIST, (_, cwd: string): MemoryFactList =>
     scanFacts(app.getPath('home'), cwd || ''))
 
@@ -1140,7 +1366,10 @@ export function registerIpcHandlers() {
 
   ipcMain.handle(IPC.SKILL_LIST, (_, cwd: string): SkillMeta[] => {
     // Project-only disable state (a global one makes no sense outside a
-    // project's toolset): <cwd>/.cluxmate/skills.json.
+    // project's toolset): <project config root>/.cluxmate/skills.json. `cwd` is
+    // the session's PROJECT CONFIG ROOT (§E), supplied by the renderer — the
+    // handler deliberately does not re-resolve it, so the rule keeps exactly one
+    // implementation (the renderer passes `project_root || cwd`).
     const base = cwd || process.cwd()
     const all = listSkills(app.getPath('home'), base)
     // Stable order: global first, then project, alphabetical within each.
@@ -1152,15 +1381,37 @@ export function registerIpcHandlers() {
   ipcMain.handle(IPC.SKILL_SET_DISABLED, (_, cwd: string, id: string, disabled: boolean): void => {
     // `id` is "<source>:<slug>" — one copy of a colliding slug, so toggling a
     // row no longer flips the other. A legacy bare entry in the file is
-    // rewritten into per-copy ids first (see main/skills.ts).
+    // rewritten into per-copy ids first (see main/skills.ts). `cwd` is the
+    // session's PROJECT CONFIG ROOT, as in SKILL_LIST above.
     setSkillDisabled(app.getPath('home'), cwd, id, disabled)
   })
 
   ipcMain.handle(IPC.SKILL_READ, (_, filePath: string): string => {
-    // Only serve SKILL.md files under a known skills root (both global and the
-    // active session's project root count as known).
-    const cwds = Array.from(bridges.values()).map((b) => b._spawnCwd).filter(Boolean)
-    const candidates = cwds.length > 0 ? cwds : [process.cwd()]
+    // Only serve SKILL.md files under a known skills root (the global one plus a
+    // session's project root count as known). Which PROJECT root that is follows
+    // §E, and it is the whole point of this candidate list: the list the user
+    // clicked came from a PROJECT CONFIG ROOT (`project_root || cwd`), so the read
+    // must be authorized against that same root — for a session running in a
+    // linked worktree that is the MAIN worktree, never the tree its bridge was
+    // spawned in. Checking `_spawnCwd` instead rejected every project skill of a
+    // worktree session ("not an allowed skill path"), because no such directory
+    // contains `<root>/.cluxmate/skills/<slug>/SKILL.md`.
+    //
+    // The active session's root is added on its own so the answer does not depend
+    // on bridge liveness (the Skills view lists without warming a process), and
+    // the live sessions' roots keep the breadth this check always had.
+    const roots = new Set<string>()
+    const active = activeSessionId ? sessionStore.getSession(activeSessionId) : undefined
+    if (active) roots.add(projectConfigRoot(active, active.cwd))
+    for (const [sid, b] of bridges) {
+      const meta = sessionStore.getSession(sid)
+      // A bridge whose session row is gone falls back to the directory it was
+      // spawned in — the same fallback restartBridgesOnTrustChange uses.
+      roots.add(projectConfigRoot(meta, meta?.cwd || b._spawnCwd))
+    }
+    // No session at all (Skills opened before one was selected): keep the old
+    // fallback, which still serves the global root for every candidate.
+    const candidates = roots.size > 0 ? [...roots] : [process.cwd()]
     const ok = candidates.some((c) => isAllowedSkillPath(filePath, app.getPath('home'), c))
     if (!ok) return 'Error: not an allowed skill path.'
     try {
@@ -1219,11 +1470,13 @@ export function registerIpcHandlers() {
     return (await bridge.listMcp()) as McpServer[]
   })
 
-  // Toggle `disabled` on a server in <cwd>/.cluxmate/mcp.json. Always writes
-  // to the project file — the Python side deep-merges project over global, so
-  // disabling a globally-configured server creates a project entry that
-  // overrides. Server name is validated on the Python side at config load;
-  // re-check here as defense in depth (renderer can pass arbitrary strings).
+  // Toggle `disabled` on a server in <project config root>/.cluxmate/mcp.json —
+  // the project CONFIG root (§E), never the tree the bridge runs in, because that
+  // is the file the agent merges over the global one. Always writes to the
+  // project file: the Python side merges project over global, so disabling a
+  // globally-configured server creates a project entry that overrides. Server
+  // name is validated on the Python side at config load; re-check here as defense
+  // in depth (renderer can pass arbitrary strings).
   // Does NOT hot-reload the running Python process — next `initialize` picks
   // up the change (next session or explicit reload).
   ipcMain.handle(
@@ -1234,7 +1487,7 @@ export function registerIpcHandlers() {
       }
       const meta = sessionStore.getSession(sid)
       if (!meta) throw new Error('Session not found')
-      const cfgDir = path.join(meta.cwd, '.cluxmate')
+      const cfgDir = path.join(projectConfigRoot(meta, meta.cwd), '.cluxmate')
       const cfgPath = path.join(cfgDir, 'mcp.json')
       fs.mkdirSync(cfgDir, { recursive: true })
       let config: any = {}
@@ -1291,6 +1544,44 @@ export function registerIpcHandlers() {
       return await gitService.checkout(cwd, branch, strategy)
     } catch (e: any) {
       return { ok: false, message: e?.message || 'git checkout failed' }
+    }
+  })
+
+  // --- worktree dialog support (§D) ---------------------------------------
+  // §D's three git channels take a PARAMS OBJECT (`{cwd}`, as the committed
+  // preload invokes them), not a positional string like the older git channels.
+  // Working-tree state for the "you have uncommitted changes" warning: one entry
+  // per changed file, with git's 2-char status + separator stripped. A git
+  // failure is reported AS a failure, never as "clean" — the dialog must not
+  // offer to create a tree while it cannot say what would be left behind.
+  ipcMain.handle(IPC.GIT_STATUS, async (_, params: { cwd: string }): Promise<{ ok: boolean; files: string[]; message?: string }> => {
+    try {
+      return { ok: true, files: await gitService.statusLines(params?.cwd || '') }
+    } catch (e: any) {
+      return { ok: false, files: [], message: e?.message || 'git status failed' }
+    }
+  })
+
+  // Reconcile uncommitted changes before creating a worktree. Same two command
+  // sequences the branch switcher uses (git-service owns them); resolved against
+  // the repository root so a session cwd nested inside the project still acts on
+  // the whole work tree. `{ok:false, message}` instead of a throw: the dialog
+  // shows the reason next to the button that failed.
+  ipcMain.handle(IPC.GIT_STASH, async (_, params: { cwd: string }): Promise<{ ok: boolean; message?: string }> => {
+    try {
+      await gitService.stashChanges(await gitRepoRoot(params?.cwd || ''), 'cluxmate: WIP before creating a worktree')
+      return { ok: true }
+    } catch (e: any) {
+      return { ok: false, message: e?.message || 'git stash failed' }
+    }
+  })
+
+  ipcMain.handle(IPC.GIT_COMMIT_WIP, async (_, params: { cwd: string }): Promise<{ ok: boolean; message?: string }> => {
+    try {
+      await gitService.commitWip(await gitRepoRoot(params?.cwd || ''))
+      return { ok: true }
+    } catch (e: any) {
+      return { ok: false, message: e?.message || 'git commit failed' }
     }
   })
 
