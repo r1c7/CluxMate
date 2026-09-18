@@ -305,6 +305,7 @@ export default function SettingsView() {
   const sessions = useStore((s) => s.sessions)
   const workingDir = useStore((s) => s.workingDir)
   const setError = useStore((s) => s.setError)
+  const confirm = useStore((s) => s.confirm)
   // Same resolution the skills view uses: the active session's project, else
   // the app working dir. '' means "global facts only". §E: the PROJECT CONFIG
   // root, not the execution tree — facts for a worktree session live in the main
@@ -329,7 +330,21 @@ export default function SettingsView() {
   }, [section, loadFacts])
 
   const removeFact = async (f: MemoryFact) => {
-    if (!window.confirm(t('settings.memory.facts.deleteConfirm', { id: f.id }))) return
+    // The app's shared confirmation dialog (not window.confirm), so a destructive
+    // step looks the same everywhere and the fact's id has room to be shown.
+    const ok = await confirm({
+      title: t('settings.memory.facts.deleteTitle'),
+      body: t('settings.memory.facts.deleteBody', { id: f.id }),
+      note: t('settings.memory.facts.deleteNote', {
+        // The same scope label the row itself shows (there is no shared
+        // `scope.<value>` key: the list builds it from this pair).
+        scope: t(f.scope === 'global'
+          ? 'settings.memory.facts.scopeGlobal'
+          : 'settings.memory.facts.scopeProject'),
+      }),
+      confirmLabel: t('common.delete'),
+    })
+    if (!ok) return
     try {
       setFacts(await window.electronAPI.deleteMemoryFact(factsCwd, f.scope, f.id))
       if (expandedFact === `${f.scope}:${f.id}`) setExpandedFact(null)

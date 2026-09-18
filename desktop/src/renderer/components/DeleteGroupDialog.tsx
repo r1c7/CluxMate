@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useStore } from '../stores'
 import type { DeleteGroupPrompt } from '../stores'
 import type { GroupDeletePreview } from '../../shared/types'
+import { DialogButton, DialogShell, Warning } from './Dialog'
 import { useT } from '../useI18n'
 import { tGlobal } from '../i18n'
 
@@ -145,150 +146,123 @@ export default function DeleteGroupDialog({ prompt }: { prompt: DeleteGroupPromp
         : ' ' + t(trees.length === 1 ? 'deleteGroup.bodyTreeOne' : 'deleteGroup.bodyTrees', { trees: trees.length }))
 
   return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-      <div className="bg-chat-agent rounded-xl w-[560px] max-h-[85vh] flex flex-col shadow-2xl border border-surface-border">
-        <div className="flex items-center justify-between px-6 pt-5 pb-2">
-          <h2 className="text-base font-semibold text-ink">
-            {t(prompt.isAuto ? 'deleteGroup.titleProject' : 'deleteGroup.title')}
-          </h2>
-          {/* Disabled while busy like the three buttons below: closing unmounts
-              this dialog, and both outcomes report their {ok:false} refusal
-              through local state — removal kills bridges first and may retry once
-              after ~1.5s per tree, so a late refusal would land on a dead
-              component and the user would never learn that nothing was deleted. */}
-          <button
-            onClick={closeDeleteGroupPrompt}
-            disabled={busy}
-            className="text-ink-faint hover:text-ink text-xl disabled:opacity-50"
-          >&times;</button>
-        </div>
-
-        {/* min-h-0 on the scroll body: a flex item's automatic minimum size is its
-            content height, so without it a long list of trees and dirty files
-            would grow the panel past max-h and be clipped instead of scrolling. */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-3 space-y-4">
-          <p className="text-sm text-ink-soft leading-relaxed">{body}</p>
-
-          {loading && <div className="text-[11px] text-ink-faint">{t('common.loading')}</div>}
-
-          {/* The preview could not be read, so nothing here can claim what would
-              be removed. The removal exit is disabled; deleting the sessions and
-              keeping the trees is still offered, because that is the outcome that
-              cannot lose work. */}
-          {!loading && loadError && (
-            <Warning tone="error">{t('deleteGroup.previewFailed', { msg: loadError })}</Warning>
-          )}
-
-          {!loading && preview && trees.length === 0 && (
-            <Warning tone="warn">{t('deleteGroup.noneFound')}</Warning>
-          )}
-
-          {!loading && trees.length > 0 && (
-            <div className="space-y-2">
-              <div className="text-xs font-medium text-ink">{t('deleteGroup.worktreesTitle', { count: trees.length })}</div>
-              {trees.map((tree) => (
-                <div key={tree.path} className="rounded-lg border border-surface-border px-3 py-2 space-y-1">
-                  <div className="flex flex-wrap items-baseline gap-x-2 text-xs text-ink">
-                    <span className="font-medium">{tree.name || tree.path}</span>
-                    <span className="text-ink-faint">{t('deleteGroup.branch', { branch: tree.branch || t('git.noBranch') })}</span>
-                    {occupied.has(tree.sessionId) && (
-                      <span className="text-amber-700">{t('deleteGroup.inUse')}</span>
-                    )}
-                  </div>
-                  <div className="text-[11px] text-ink-faint/70 truncate" title={tree.path}>{tree.path}</div>
-                  {/* git could not be read: "clean" and "could not tell" must not
-                      look alike on a prompt that is about to delete a directory. */}
-                  {tree.dirtyError ? (
-                    <div className="text-[11px] text-amber-700">
-                      {t('contextMenu.removeWorktreeUnknown', { msg: tree.dirtyError })}
-                    </div>
-                  ) : tree.dirty.length === 0 ? (
-                    <div className="text-[11px] text-ink-faint">{t('contextMenu.removeWorktreeClean')}</div>
-                  ) : (
-                    <>
-                      <div className="text-[11px] text-ink-soft">{t('worktree.dirtyFiles', { count: tree.dirty.length })}</div>
-                      <pre className="max-h-24 overflow-y-auto text-[11px] font-mono text-ink-soft whitespace-pre-wrap break-words">
-                        {tree.dirty.slice(0, MAX_LISTED_FILES).join('\n')}
-                        {tree.dirty.length > MAX_LISTED_FILES ? '\n…' : ''}
-                      </pre>
-                    </>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Who blocks what, by name: a refusal the user can act on. */}
-          {blockedTrees.length > 0 && (
-            <Warning tone="warn">
-              <div className="font-medium">{t('deleteGroup.blockedTitle')}</div>
-              {blockedTrees.map((b) => (
-                <div key={b.sessionId} className="mt-1 leading-snug">
-                  {t('deleteGroup.blockedBody', {
-                    name: b.name,
-                    blockers: b.blockers.map((x) => x.title || x.id).join(', '),
-                  })}
-                </div>
-              ))}
-            </Warning>
-          )}
-
-          {/* Stale rows are stated, not silently dropped: the group may hold a
-              session that still records a tree it no longer runs in, and that tree
-              is NOT touched (nor can it be — nothing here knows where it is). */}
-          {stale.length > 0 && (
-            <div className="text-[11px] text-ink-faint leading-snug">
-              {t('deleteGroup.staleNote', { count: stale.length })}
-            </div>
-          )}
-
-          {message && <Warning tone={blocked ? 'warn' : 'error'}>{message}</Warning>}
-
-          {/* The second exit's consequence stated BEFORE the click: after the
-              sessions are gone the UI has no entry to those trees at all, and the
-              CLI is the only way left. */}
-          {trees.length > 0 && (
-            <div className="text-[11px] text-ink-faint leading-snug">{t('deleteGroup.keepHint')}</div>
-          )}
-        </div>
-
-        <div className="px-6 py-4 border-t border-surface-border flex flex-wrap items-center justify-end gap-2">
-          {/* Removing trees kills each session's bridge first and may retry once
-              after a beat (a live process locks the directory on Windows), so the
-              wait is not instant — dimmed buttons alone would read as a dead
-              click. */}
-          {busy && <span className="mr-auto text-[11px] text-ink-faint">{t('common.loading')}</span>}
-          <button
-            onClick={closeDeleteGroupPrompt}
-            disabled={busy}
-            className="px-4 py-2 bg-surface-raised hover:bg-sidebar-hover text-ink text-sm rounded-lg border border-surface-border disabled:opacity-50"
-          >{t('common.cancel')}</button>
-          <button
+    <DialogShell
+      title={t(prompt.isAuto ? 'deleteGroup.titleProject' : 'deleteGroup.title')}
+      closeLabel={t('common.close')}
+      onClose={closeDeleteGroupPrompt}
+      // Closing while busy is held: closing unmounts this dialog, and both
+      // outcomes report their {ok:false} refusal through local state — removal
+      // kills bridges first and may retry once after ~1.5s per tree, so a late
+      // refusal would land on a dead component and the user would never learn
+      // that nothing was deleted.
+      closeDisabled={busy}
+      width="w-[560px]"
+      footerLeading={busy ? <span className="mr-auto text-[11px] text-ink-faint">{t('common.loading')}</span> : undefined}
+      footer={(
+        <>
+          <DialogButton label={t('common.cancel')} onClick={closeDeleteGroupPrompt} disabled={busy} />
+          <DialogButton
+            label={t('deleteGroup.deleteOnly')}
             onClick={() => void deleteOnly()}
             disabled={busy}
             title={t('deleteGroup.keepHint')}
-            className="px-4 py-2 bg-surface-raised hover:bg-sidebar-hover text-ink text-sm rounded-lg border border-surface-border disabled:opacity-50"
-          >{t('deleteGroup.deleteOnly')}</button>
+          />
           {/* Disabled until the facts are in, and when a tree is occupied (the
               reason is shown above). The main process refuses the whole batch
               again anyway — this button being enabled is not the authority. */}
-          <button
+          <DialogButton
+            tone="danger"
+            label={t('deleteGroup.removeAll')}
             onClick={() => void removeAll()}
             disabled={busy || !preview || trees.length === 0 || cannotRemove}
             title={cannotRemove ? t('deleteGroup.blockedTitle') : t('deleteGroup.removeAllDesc')}
-            className="px-4 py-2 border border-red-500/40 bg-red-500/5 hover:bg-red-500/10 text-red-600 text-sm rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >{t('deleteGroup.removeAll')}</button>
-        </div>
-      </div>
-    </div>
-  )
-}
+          />
+        </>
+      )}
+    >
+      <p className="text-sm text-ink-soft leading-relaxed">{body}</p>
 
-function Warning({ tone, children }: { tone: 'warn' | 'error'; children: React.ReactNode }) {
-  const cls = tone === 'error'
-    ? 'border-red-500/40 bg-red-500/5 text-red-600'
-    : 'border-amber-500/40 bg-amber-500/5 text-amber-700'
-  return (
-    <div className={`rounded-lg border px-3 py-2 text-xs leading-relaxed ${cls}`}>{children}</div>
+      {loading && <div className="text-[11px] text-ink-faint">{t('common.loading')}</div>}
+
+      {/* The preview could not be read, so nothing here can claim what would
+          be removed. The removal exit is disabled; deleting the sessions and
+          keeping the trees is still offered, because that is the outcome that
+          cannot lose work. */}
+      {!loading && loadError && (
+        <Warning tone="error">{t('deleteGroup.previewFailed', { msg: loadError })}</Warning>
+      )}
+
+      {!loading && preview && trees.length === 0 && (
+        <Warning tone="warn">{t('deleteGroup.noneFound')}</Warning>
+      )}
+
+      {!loading && trees.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-ink">{t('deleteGroup.worktreesTitle', { count: trees.length })}</div>
+          {trees.map((tree) => (
+            <div key={tree.path} className="rounded-lg border border-surface-border px-3 py-2 space-y-1">
+              <div className="flex flex-wrap items-baseline gap-x-2 text-xs text-ink">
+                <span className="font-medium">{tree.name || tree.path}</span>
+                <span className="text-ink-faint">{t('deleteGroup.branch', { branch: tree.branch || t('git.noBranch') })}</span>
+                {occupied.has(tree.sessionId) && (
+                  <span className="text-amber-700">{t('deleteGroup.inUse')}</span>
+                )}
+              </div>
+              <div className="text-[11px] text-ink-faint/70 truncate" title={tree.path}>{tree.path}</div>
+              {/* git could not be read: "clean" and "could not tell" must not
+                  look alike on a prompt that is about to delete a directory. */}
+              {tree.dirtyError ? (
+                <div className="text-[11px] text-amber-700">
+                  {t('contextMenu.removeWorktreeUnknown', { msg: tree.dirtyError })}
+                </div>
+              ) : tree.dirty.length === 0 ? (
+                <div className="text-[11px] text-ink-faint">{t('contextMenu.removeWorktreeClean')}</div>
+              ) : (
+                <>
+                  <div className="text-[11px] text-ink-soft">{t('worktree.dirtyFiles', { count: tree.dirty.length })}</div>
+                  <pre className="max-h-24 overflow-y-auto text-[11px] font-mono text-ink-soft whitespace-pre-wrap break-words">
+                    {tree.dirty.slice(0, MAX_LISTED_FILES).join('\n')}
+                    {tree.dirty.length > MAX_LISTED_FILES ? '\n…' : ''}
+                  </pre>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Who blocks what, by name: a refusal the user can act on. */}
+      {blockedTrees.length > 0 && (
+        <Warning tone="warn">
+          <div className="font-medium">{t('deleteGroup.blockedTitle')}</div>
+          {blockedTrees.map((b) => (
+            <div key={b.sessionId} className="mt-1 leading-snug">
+              {t('deleteGroup.blockedBody', {
+                name: b.name,
+                blockers: b.blockers.map((x) => x.title || x.id).join(', '),
+              })}
+            </div>
+          ))}
+        </Warning>
+      )}
+
+      {/* Stale rows are stated, not silently dropped: the group may hold a
+          session that still records a tree it no longer runs in, and that tree
+          is NOT touched (nor can it be — nothing here knows where it is). */}
+      {stale.length > 0 && (
+        <div className="text-[11px] text-ink-faint leading-snug">
+          {t('deleteGroup.staleNote', { count: stale.length })}
+        </div>
+      )}
+
+      {message && <Warning tone={blocked ? 'warn' : 'error'}>{message}</Warning>}
+
+      {/* The second exit's consequence stated BEFORE the click: after the
+          sessions are gone the UI has no entry to those trees at all, and the
+          CLI is the only way left. */}
+      {trees.length > 0 && (
+        <div className="text-[11px] text-ink-faint leading-snug">{t('deleteGroup.keepHint')}</div>
+      )}
+    </DialogShell>
   )
 }

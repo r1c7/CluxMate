@@ -18,6 +18,7 @@ import ContextMenu from './components/ContextMenu'
 import WorktreeDialog from './components/WorktreeDialog'
 import DeleteWorktreeSessionDialog from './components/DeleteWorktreeSessionDialog'
 import DeleteGroupDialog from './components/DeleteGroupDialog'
+import ConfirmDialog from './components/ConfirmDialog'
 import SkillsView from './components/SkillsView'
 import McpView from './components/McpView'
 import HooksView from './components/HooksView'
@@ -81,6 +82,11 @@ function AppInner() {
   // Same again for the group version: the group ✕ and the group context menu can
   // both unmount the sidebar (or the whole menu) while it is open.
   const deleteGroupPrompt = useStore((s) => s.deleteGroupPrompt)
+  // The plain confirmation every non-trivial action asks through (`store.confirm`):
+  // removing a worktree, deleting a group, restoring a checkpoint, deleting a
+  // memory fact. App-level for the same reason as the two above — the caller can
+  // be a context menu that unmounts the moment it is clicked.
+  const confirmRequest = useStore((s) => s.confirmRequest)
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title || t('chat.newSession')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [ready, setReady] = useState(false)
@@ -314,6 +320,7 @@ function AppInner() {
       {worktreeDialog && <WorktreeDialog path={worktreeDialog.path} />}
       {deletePrompt && <DeleteWorktreeSessionDialog prompt={deletePrompt} />}
       {deleteGroupPrompt && <DeleteGroupDialog prompt={deleteGroupPrompt} />}
+      {confirmRequest && <ConfirmDialog request={confirmRequest} />}
       <Toast />
     </div>
   )

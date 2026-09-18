@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { useStore } from '../stores'
 import type { DeleteSessionPrompt, WorktreeRemovalInfo } from '../stores'
+import { DialogButton, DialogShell, Warning } from './Dialog'
 import { useT } from '../useI18n'
 import { tGlobal } from '../i18n'
 
@@ -127,116 +128,88 @@ export default function DeleteWorktreeSessionDialog({ prompt }: { prompt: Delete
     : t('deleteWorktree.keepHintNoName')
 
   return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-      <div className="bg-chat-agent rounded-xl w-[520px] max-h-[85vh] flex flex-col shadow-2xl border border-surface-border">
-        <div className="flex items-center justify-between px-6 pt-5 pb-2">
-          <h2 className="text-base font-semibold text-ink">{t('deleteWorktree.title')}</h2>
-          {/* Disabled while busy like the three buttons below: closing unmounts this
-              dialog, and both outcomes report their {ok:false} refusal through local
-              state — removal kills the bridge first and retries once after ~1.5s, so
-              a late refusal would land on a dead component and the user would never
-              learn that nothing was deleted. */}
-          <button
-            onClick={closeDeletePrompt}
-            disabled={busy}
-            className="text-ink-faint hover:text-ink text-xl disabled:opacity-50"
-          >&times;</button>
-        </div>
-        {info?.path && (
-          <div className="px-6 pb-2 text-[11px] text-ink-faint/70 truncate" title={info.path}>{info.path}</div>
-        )}
-
-        {/* min-h-0 on the scroll body: a flex item's automatic minimum size is its
-            content height, so without it a long dirty-file list would grow the
-            panel past max-h and be clipped instead of scrolling. */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-3 space-y-4">
-          <p className="text-sm text-ink-soft leading-relaxed">
-            {/* Same empty-title fallback the sidebar card uses: a row with no
-                title is rendered as "New Session", never as "". */}
-            {hasName
-              ? t('deleteWorktree.body', {
-                title: prompt.title || t('sessionList.newSession'),
-                name: prompt.name,
-                branch,
-              })
-              : t('deleteWorktree.bodyNoName', { title: prompt.title || t('sessionList.newSession') })}
-          </p>
-
-          {loading && <div className="text-[11px] text-ink-faint">{t('common.loading')}</div>}
-
-          {/* git could not be read: "clean" and "could not tell" must not look
-              alike on a prompt that is about to delete a directory. */}
-          {!loading && !!info?.error && (
-            <Warning tone="error">{t('contextMenu.removeWorktreeUnknown', { msg: info.error })}</Warning>
-          )}
-
-          {/* The session row is gone (deleted from another window), so there is
-              nothing left to remove the tree by — say so rather than show an
-              empty, falsely reassuring listing. */}
-          {!loading && !info && <Warning tone="warn">{t('deleteWorktree.missing')}</Warning>}
-
-          {dirty && info && (
-            <Warning tone="warn">
-              <div className="font-medium">{t('deleteWorktree.dirtyTitle')}</div>
-              <div className="mt-0.5 leading-snug">{t('deleteWorktree.dirtyBody')}</div>
-              <div className="mt-2 text-[11px] text-ink-soft">{t('worktree.dirtyFiles', { count: info.files.length })}</div>
-              <pre className="mt-1 max-h-28 overflow-y-auto text-[11px] font-mono text-ink-soft whitespace-pre-wrap break-words">
-                {info.files.slice(0, MAX_LISTED_FILES).join('\n')}
-                {info.files.length > MAX_LISTED_FILES ? '\n…' : ''}
-              </pre>
-            </Warning>
-          )}
-
-          {clean && (
-            <div className="text-[11px] text-ink-faint">{t('contextMenu.removeWorktreeClean')}</div>
-          )}
-
-          {message && <Warning tone={blocked ? 'warn' : 'error'}>{message}</Warning>}
-
-          {/* The second exit needs its consequence stated BEFORE the click: after
-              the session is gone the UI has no entry to the tree at all, and the
-              CLI is the only way left. */}
-          <div className="text-[11px] text-ink-faint leading-snug">
-            {keepHint}
-          </div>
-        </div>
-
-        <div className="px-6 py-4 border-t border-surface-border flex flex-wrap items-center justify-end gap-2">
-          {/* Removing a tree kills the session's bridge first and may retry once
-              after a beat (a live process locks the directory on Windows), so the
-              wait is not instant — dimmed buttons alone would read as a dead
-              click. */}
-          {busy && <span className="mr-auto text-[11px] text-ink-faint">{t('common.loading')}</span>}
-          <button
-            onClick={closeDeletePrompt}
-            disabled={busy}
-            className="px-4 py-2 bg-surface-raised hover:bg-sidebar-hover text-ink text-sm rounded-lg border border-surface-border disabled:opacity-50"
-          >{t('common.cancel')}</button>
-          <button
+    <DialogShell
+      title={t('deleteWorktree.title')}
+      closeLabel={t('common.close')}
+      onClose={closeDeletePrompt}
+      // Closing while busy is held: closing unmounts this dialog, and both
+      // outcomes report their {ok:false} refusal through local state — removal
+      // kills the bridge first and retries once after ~1.5s, so a late refusal
+      // would land on a dead component and the user would never learn that
+      // nothing was deleted.
+      closeDisabled={busy}
+      subtitle={info?.path}
+      footerLeading={busy ? <span className="mr-auto text-[11px] text-ink-faint">{t('common.loading')}</span> : undefined}
+      footer={(
+        <>
+          <DialogButton label={t('common.cancel')} onClick={closeDeletePrompt} disabled={busy} />
+          <DialogButton
+            label={t('deleteWorktree.deleteOnly')}
             onClick={() => void deleteOnly()}
             disabled={busy}
             title={keepHint}
-            className="px-4 py-2 bg-surface-raised hover:bg-sidebar-hover text-ink text-sm rounded-lg border border-surface-border disabled:opacity-50"
-          >{t('deleteWorktree.deleteOnly')}</button>
+          />
           {/* Disabled until the worktree facts are in (and when the session row is
               already gone, where there is nothing left to remove the tree by). */}
-          <button
+          <DialogButton
+            tone="danger"
+            label={t('deleteWorktree.removeBoth')}
             onClick={() => void removeBoth()}
             disabled={busy || !info}
             title={t('deleteWorktree.removeBothDesc')}
-            className="px-4 py-2 border border-red-500/40 bg-red-500/5 hover:bg-red-500/10 text-red-600 text-sm rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >{t('deleteWorktree.removeBoth')}</button>
-        </div>
-      </div>
-    </div>
-  )
-}
+          />
+        </>
+      )}
+    >
+      <p className="text-sm text-ink-soft leading-relaxed">
+        {/* Same empty-title fallback the sidebar card uses: a row with no
+            title is rendered as "New Session", never as "". */}
+        {hasName
+          ? t('deleteWorktree.body', {
+            title: prompt.title || t('sessionList.newSession'),
+            name: prompt.name,
+            branch,
+          })
+          : t('deleteWorktree.bodyNoName', { title: prompt.title || t('sessionList.newSession') })}
+      </p>
 
-function Warning({ tone, children }: { tone: 'warn' | 'error'; children: React.ReactNode }) {
-  const cls = tone === 'error'
-    ? 'border-red-500/40 bg-red-500/5 text-red-600'
-    : 'border-amber-500/40 bg-amber-500/5 text-amber-700'
-  return (
-    <div className={`rounded-lg border px-3 py-2 text-xs leading-relaxed ${cls}`}>{children}</div>
+      {loading && <div className="text-[11px] text-ink-faint">{t('common.loading')}</div>}
+
+      {/* git could not be read: "clean" and "could not tell" must not look
+          alike on a prompt that is about to delete a directory. */}
+      {!loading && !!info?.error && (
+        <Warning tone="error">{t('contextMenu.removeWorktreeUnknown', { msg: info.error })}</Warning>
+      )}
+
+      {/* The session row is gone (deleted from another window), so there is
+          nothing left to remove the tree by — say so rather than show an
+          empty, falsely reassuring listing. */}
+      {!loading && !info && <Warning tone="warn">{t('deleteWorktree.missing')}</Warning>}
+
+      {dirty && info && (
+        <Warning tone="warn">
+          <div className="font-medium">{t('deleteWorktree.dirtyTitle')}</div>
+          <div className="mt-0.5 leading-snug">{t('deleteWorktree.dirtyBody')}</div>
+          <div className="mt-2 text-[11px] text-ink-soft">{t('worktree.dirtyFiles', { count: info.files.length })}</div>
+          <pre className="mt-1 max-h-28 overflow-y-auto text-[11px] font-mono text-ink-soft whitespace-pre-wrap break-words">
+            {info.files.slice(0, MAX_LISTED_FILES).join('\n')}
+            {info.files.length > MAX_LISTED_FILES ? '\n…' : ''}
+          </pre>
+        </Warning>
+      )}
+
+      {clean && (
+        <div className="text-[11px] text-ink-faint">{t('contextMenu.removeWorktreeClean')}</div>
+      )}
+
+      {message && <Warning tone={blocked ? 'warn' : 'error'}>{message}</Warning>}
+
+      {/* The second exit needs its consequence stated BEFORE the click: after
+          the session is gone the UI has no entry to the tree at all, and the
+          CLI is the only way left. */}
+      <div className="text-[11px] text-ink-faint leading-snug">
+        {keepHint}
+      </div>
+    </DialogShell>
   )
 }

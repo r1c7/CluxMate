@@ -31,6 +31,7 @@ export default function CheckpointTimeline() {
   const toggle = useStore((s) => s.toggleCheckpoints)
   const activeSessionId = useStore((s) => s.activeSessionId)
   const openDiff = useStore((s) => s.openDiff)
+  const confirm = useStore((s) => s.confirm)
 
   const [busy, setBusy] = useState<string | null>(null)
 
@@ -50,9 +51,14 @@ export default function CheckpointTimeline() {
   }
 
   const doRestore = async (cp: Checkpoint) => {
-    const ok = window.confirm(
-      t('checkpoint.restoreConfirm', { label: cp.label || cp.id.slice(0, 7) })
-    )
+    // The app's shared confirmation dialog, not window.confirm: same look as the
+    // delete prompts, and the explanation has room to be read.
+    const ok = await confirm({
+      title: t('checkpoint.restoreTitle', { label: cp.label || cp.id.slice(0, 7) }),
+      body: t('checkpoint.restoreBody'),
+      tone: 'primary',
+      confirmLabel: t('checkpoint.restoreApply'),
+    })
     if (!ok) return
     setBusy(cp.id)
     try {

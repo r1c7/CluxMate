@@ -3,11 +3,6 @@ import { useStore } from '../stores'
 import { canCreateWorktree, isWorktreeSession } from '../../shared/worktree-rules'
 import { useT } from '../useI18n'
 
-// How many uncommitted paths the removal confirm lists. The prompt is plain
-// window.confirm text, so an unbounded list would be unreadable; the count line
-// always states the real total.
-const MAX_CONFIRM_FILES = 20
-
 function MenuItem({
   label, disabled, onClick,
 }: {
@@ -93,6 +88,9 @@ export default function ContextMenu() {
   const openWorktreeDialog = useStore((s) => s.openWorktreeDialog)
   const worktreeRemovalInfo = useStore((s) => s.worktreeRemovalInfo)
   const removeWorktreeSession = useStore((s) => s.removeWorktreeSession)
+  // The app's one confirmation dialog (store-driven, promise-returning): every
+  // destructive prompt in the app goes through it instead of window.confirm.
+  const confirm = useStore((s) => s.confirm)
   const setError = useStore((s) => s.setError)
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ x: 0, y: 0 })
@@ -159,27 +157,35 @@ export default function ContextMenu() {
   // Remove a worktree session's tree (and its branch). The user is shown exactly
   // what the removal destroys — the tree's path, its branch, and the files inside
   // it that are not committed — so git is read BEFORE the prompt (and the menu
-  // closed first, since that read is async). The removal itself is the store's;
-  // its failure is surfaced as a toast rather than dropped.
+  // closed first, since that read is async). The prompt is the app's shared
+  // ConfirmDialog, so it looks and behaves like every other confirmation; the
+  // removal itself is the store's, and its failure is surfaced as a toast rather
+  // than dropped.
   const doRemoveWorktree = async (sessionId: string) => {
     close()
     const info = await worktreeRemovalInfo(sessionId)
     if (!info) return
-    const files = info.error
-      ? t('contextMenu.removeWorktreeUnknown', { msg: info.error })
-      : info.files.length === 0
-        ? t('contextMenu.removeWorktreeClean')
-        : t('contextMenu.removeWorktreeDirty', {
-            count: info.files.length,
-            files: info.files.slice(0, MAX_CONFIRM_FILES).join('\n')
-              + (info.files.length > MAX_CONFIRM_FILES ? '\n…' : ''),
-          })
-    const ok = window.confirm(t('contextMenu.removeWorktreeConfirm', {
-      name: info.name,
-      path: info.path,
-      branch: info.branch || t('git.noBranch'),
-      files,
-    }))
+    const ok = await confirm({
+      title: t('contextMenu.removeWorktreeTitle', { name: info.name }),
+      body: t('contextMenu.removeWorktreeBody'),
+      details: [
+        { label: t('contextMenu.removeWorktreePath'), value: info.path, mono: true },
+        { label: t('contextMenu.removeWorktreeBranch'), value: info.branch || t('git.noBranch'), mono: true },
+      ],
+      // Absent on a failed git read: "clean" and "could not tell" must not look
+      // alike on a prompt that is about to delete a directory, which is why the
+      // error travels as the note below instead of as an empty file list.
+      files: info.error
+        ? undefined
+        : {
+            label: info.files.length === 0
+              ? t('contextMenu.removeWorktreeClean')
+              : t('contextMenu.removeWorktreeFiles', { count: info.files.length }),
+            items: info.files,
+          },
+      note: info.error ? t('contextMenu.removeWorktreeUnknown', { msg: info.error }) : undefined,
+      confirmLabel: t('contextMenu.removeWorktreeApply'),
+    })
     if (!ok) return
     const res = await removeWorktreeSession(sessionId)
     if (!res.ok) {

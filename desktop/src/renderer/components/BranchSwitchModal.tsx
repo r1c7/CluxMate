@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useStore } from '../stores'
 import type { GitCheckoutStrategy } from '../../shared/types'
+import { DialogButton, DialogShell } from './Dialog'
 import { useT } from '../useI18n'
 import { tGlobal } from '../i18n'
 
@@ -40,48 +41,40 @@ export default function BranchSwitchModal({ branch, onClose }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-      <div className="bg-chat-agent rounded-xl w-[420px] p-6 shadow-2xl border border-surface-border">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-base font-semibold text-ink">{t('branch.switchTitle')}</h2>
-          <button onClick={onClose} className="text-ink-faint hover:text-ink text-xl">&times;</button>
-        </div>
+    <DialogShell
+      title={t('branch.switchTitle')}
+      closeLabel={t('common.close')}
+      onClose={onClose}
+      closeDisabled={busy}
+      width="w-[420px]"
+      footer={<DialogButton label={t('branch.cancel')} onClick={onClose} disabled={busy} />}
+    >
+      <p className="text-sm text-ink-soft leading-relaxed">
+        {t('branch.prompt', { branch })}
+      </p>
 
-        <p className="text-sm text-ink-soft leading-relaxed">
-          {t('branch.prompt', { branch })}
-        </p>
-
-        <div className="mt-4 space-y-2">
-          <Option
-            title={t('branch.stash')}
-            description={t('branch.stashDesc')}
-            onClick={() => run('stash')}
-            disabled={busy}
-          />
-          <Option
-            title={t('branch.commit')}
-            description={t('branch.commitDesc')}
-            onClick={() => run('commit')}
-            disabled={busy}
-          />
-          <Option
-            title={t('branch.discard')}
-            description={t('branch.discardDesc')}
-            onClick={() => run('discard')}
-            disabled={busy}
-            destructive
-          />
-        </div>
-
-        <div className="mt-5 flex justify-end gap-2 border-t border-surface-border pt-4">
-          <button
-            onClick={onClose}
-            disabled={busy}
-            className="px-4 py-2 bg-surface-raised hover:bg-sidebar-hover text-ink text-sm rounded-lg border border-surface-border disabled:opacity-50"
-          >{t('branch.cancel')}</button>
-        </div>
+      <div className="space-y-2">
+        <Option
+          title={t('branch.stash')}
+          description={t('branch.stashDesc')}
+          onClick={() => run('stash')}
+          disabled={busy}
+        />
+        <Option
+          title={t('branch.commit')}
+          description={t('branch.commitDesc')}
+          onClick={() => run('commit')}
+          disabled={busy}
+        />
+        <Option
+          title={t('branch.discard')}
+          description={t('branch.discardDesc')}
+          onClick={() => run('discard')}
+          disabled={busy}
+          destructive
+        />
       </div>
-    </div>
+    </DialogShell>
   )
 }
 

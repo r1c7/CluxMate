@@ -80,6 +80,11 @@ function clearAuthPendingTimer(): void {
 let _msgId = 0
 function nextId(): string { return `msg-${++_msgId}` }
 
+// The pending `confirm(...)` answer, if one is open. Deliberately module state and
+// not store state: a promise resolver is not something a component may render,
+// and only ConfirmDialog ever touches it (through resolveConfirm).
+let _confirmResolve: ((ok: boolean) => void) | null = null
+
 // Normalized working-directory equality for the "one empty session per project"
 // rule: strips trailing separators and treats backslash/forward-slash as
 // equivalent, so one directory under different spellings counts as one project.
@@ -305,6 +310,37 @@ export interface DeleteSessionPrompt {
   branch: string
 }
 
+// One label/value row of a ConfirmRequest's fact block (a path, a branch…).
+export interface ConfirmDetail {
+  label: string
+  value: string
+  /** Render the value as a path/ref: monospace, and truncate rather than wrap. */
+  mono?: boolean
+}
+
+// The open plain confirmation, in the store so that BOTH halves live in one
+// place: `confirm(request)` is awaited by the call site (the shape
+// `window.confirm` had) and ConfirmDialog renders whatever is here. Every
+// confirmation in the app goes through it — removing a worktree, deleting a
+// group, restoring a checkpoint, deleting a memory fact — so they cannot drift
+// into different looks again, and so a destructive prompt can show the facts a
+// native message box has no room for.
+export interface ConfirmRequest {
+  title: string
+  /** Sentence under the title. */
+  body?: string
+  /** Fact rows (path / branch), rendered in one bordered block. */
+  details?: ConfirmDetail[]
+  /** A scrollable monospace listing, with its own label ("Uncommitted files (3)"). */
+  files?: { label: string; items: string[] }
+  /** Small print under everything — a caveat, not a question. */
+  note?: string
+  confirmLabel?: string
+  cancelLabel?: string
+  /** `danger` (default) for anything that destroys; `primary` for a normal step. */
+  tone?: 'danger' | 'primary'
+}
+
 // The open "delete this group/project?" prompt, for a group that HOLDS worktree
 // sessions (a group without any goes through the ordinary one-click confirm, no
 // new prompt). Like DeleteSessionPrompt it carries ONLY identity — the group's id
@@ -469,6 +505,9 @@ interface AppState {
   // group actually holds worktrees, because those are the trees and branches a
   // plain group delete would strand with no UI entry left to remove them.
   deleteGroupPrompt: DeleteGroupPrompt | null
+  // The open plain confirmation (null = closed) — the in-app replacement for
+  // `window.confirm`, awaited by whatever asked for it. See ConfirmRequest.
+  confirmRequest: ConfirmRequest | null
   // One-shot draft to load into the input box (e.g. the undone message's text).
   // InputBox consumes it on change, then clears it via consumeInputDraft.
   inputDraft: string | null
@@ -553,6 +592,12 @@ interface AppState {
   // a group with none keeps the plain confirm.
   requestDeleteGroup: (id: string) => Promise<void>
   closeDeleteGroupPrompt: () => void
+  // Ask the user to confirm something and resolve with their answer — the store's
+  // `window.confirm`. Resolves false when a SECOND request arrives while one is
+  // open (one dialog at a time; the first promise must not hang forever).
+  confirm: (request: ConfirmRequest) => Promise<boolean>
+  // Called by ConfirmDialog only; the answer is the caller's to act on.
+  resolveConfirm: (ok: boolean) => void
   // The authoritative read-only preview (see shared/types.ts). Rejects when the
   // read fails — "could not tell" must not be answered as "no worktrees".
   groupDeletePreview: (groupId: string) => Promise<GroupDeletePreview>
@@ -769,6 +814,7 @@ export const useStore = create<AppState>((set, get) => ({
   worktreeDialog: null,
   deletePrompt: null,
   deleteGroupPrompt: null,
+  confirmRequest: null,
   inputDraft: null,
   mainView: 'chat',
   skills: [],
@@ -859,7 +905,15 @@ export const useStore = create<AppState>((set, get) => ({
     // Stale-only counts as no worktrees: nothing would be removed, so this is the
     // ordinary delete (`worktrees` says which recorded names were left alone).
     if (preview && preview.worktrees.length === 0) {
-      if (!window.confirm(tGlobal(confirmKey, { name }))) return
+      // The same in-app dialog every other confirmation uses (the plain
+      // `window.confirm` this replaces is the OS's own box: different look, no
+      // dark-mode colours, and no room for the facts).
+      const ok = await get().confirm({
+        title: tGlobal(group?.is_auto ? 'sessionList.deleteProjectTitle' : 'sessionList.deleteGroupTitle'),
+        body: tGlobal(confirmKey, { name }),
+        confirmLabel: tGlobal('common.delete'),
+      })
+      if (!ok) return
       try {
         await get().deleteGroup(id, 'keep')
       } catch (e: any) {
@@ -875,6 +929,24 @@ export const useStore = create<AppState>((set, get) => ({
   // Only closes the prompt. Both outcomes converge the sidebar themselves
   // (deleteGroup), so clearing the identity here cannot fight either of them.
   closeDeleteGroupPrompt: () => set({ deleteGroupPrompt: null }),
+
+  // One dialog at a time: a second request cancels the first (its promise resolves
+  // false, the safe answer) instead of replacing it on screen and leaving the
+  // first caller awaiting forever.
+  confirm: (request) => {
+    _confirmResolve?.(false)
+    return new Promise<boolean>((resolve) => {
+      _confirmResolve = resolve
+      set({ confirmRequest: request })
+    })
+  },
+
+  resolveConfirm: (ok) => {
+    const resolve = _confirmResolve
+    _confirmResolve = null
+    set({ confirmRequest: null })
+    resolve?.(ok)
+  },
 
   deleteGroup: async (id, worktrees) => {
     let res: GroupDeleteResult

@@ -22,6 +22,7 @@ const en = {
   'common.edit': 'Edit',
   'common.loading': 'Loading…',
   'common.dismiss': 'Dismiss',
+  'common.confirm': 'Confirm',
 
   // ── settings ──
   'settings.title': 'Settings',
@@ -112,7 +113,9 @@ const en = {
   'settings.memory.facts.scopeProject': 'Project',
   'settings.memory.facts.expand': 'Show',
   'settings.memory.facts.collapse': 'Hide',
-  'settings.memory.facts.deleteConfirm': 'Delete fact {id}? It will no longer be recalled. This cannot be undone.',
+  'settings.memory.facts.deleteTitle': 'Delete this memory fact?',
+  'settings.memory.facts.deleteBody': 'The fact "{id}" will no longer be recalled. This cannot be undone.',
+  'settings.memory.facts.deleteNote': 'Scope: {scope}. Deleting removes the file immediately — no restart needed.',
   'settings.memory.facts.capped': 'Showing the {shown} newest of {total} facts.',
   'settings.memory.facts.refresh': 'Refresh',
   'settings.memory.facts.footnote': 'Read from ~/.cluxmate/memory and the project’s .cluxmate/memory. Deleting removes the file immediately — no restart needed. Turning retrieval memory off keeps these files; it only stops recall.',
@@ -157,6 +160,8 @@ const en = {
   'sessionList.pinned': 'Pinned',
   'sessionList.deleteGroupConfirm': 'Delete group "{name}"? All sessions inside it will be deleted too.',
   'sessionList.deleteProjectConfirm': 'Delete project "{name}"? All sessions inside it will be deleted too.',
+  'sessionList.deleteGroupTitle': 'Delete this group?',
+  'sessionList.deleteProjectTitle': 'Delete this project?',
 
   // ── chat ──
   'chat.emptyTitle': 'CluxMate Desktop',
@@ -246,9 +251,13 @@ const en = {
   'contextMenu.copyMarkdown': 'Copy as Markdown',
   'contextMenu.newWorktreeSession': 'New Worktree Session…',
   'contextMenu.removeWorktree': 'Remove Worktree…',
-  'contextMenu.removeWorktreeConfirm': 'Remove the worktree "{name}"?\n\nTree: {path}\nBranch: {branch}\n{files}\n\nThe tree directory and its branch are deleted, and this session is deleted with them.',
+  'contextMenu.removeWorktreeTitle': 'Remove the worktree "{name}"?',
+  'contextMenu.removeWorktreeBody': 'The tree directory and its branch are deleted, and this session is deleted with them.',
+  'contextMenu.removeWorktreePath': 'Tree',
+  'contextMenu.removeWorktreeBranch': 'Branch',
+  'contextMenu.removeWorktreeApply': 'Remove Worktree',
   'contextMenu.removeWorktreeClean': 'No uncommitted files.',
-  'contextMenu.removeWorktreeDirty': 'Uncommitted files ({count}):\n{files}',
+  'contextMenu.removeWorktreeFiles': 'Uncommitted files ({count})',
   'contextMenu.removeWorktreeUnknown': 'Could not read git status ({msg}) — uncommitted changes may be lost.',
 
   // ── modes ──
@@ -449,7 +458,9 @@ const en = {
   'checkpoint.time.m': '{count}m ago',
   'checkpoint.time.h': '{count}h ago',
   'checkpoint.time.d': '{count}d ago',
-  'checkpoint.restoreConfirm': 'Restore to "{label}"?\n\nThis will revert files changed by the agent after this checkpoint to their state at this point. Files you have manually modified are unaffected. This action is recorded as a new checkpoint and can be restored again.',
+  'checkpoint.restoreTitle': 'Restore to "{label}"?',
+  'checkpoint.restoreBody': 'This will revert files changed by the agent after this checkpoint to their state at this point. Files you have manually modified are unaffected. This action is recorded as a new checkpoint and can be restored again.',
+  'checkpoint.restoreApply': 'Restore',
 
   // ── branch switch modal ──
   'branch.switchTitle': 'Switch Branch',
@@ -733,6 +744,7 @@ const zh: Record<keyof typeof en, string> = {
   'common.edit': '编辑',
   'common.loading': '加载中…',
   'common.dismiss': '关闭',
+  'common.confirm': '确定',
 
   // ── settings ──
   'settings.title': '设置',
@@ -823,7 +835,9 @@ const zh: Record<keyof typeof en, string> = {
   'settings.memory.facts.scopeProject': '项目',
   'settings.memory.facts.expand': '展开',
   'settings.memory.facts.collapse': '收起',
-  'settings.memory.facts.deleteConfirm': '删除事实 {id}？删除后它不会再被召回，且无法撤销。',
+  'settings.memory.facts.deleteTitle': '删除这条记忆事实？',
+  'settings.memory.facts.deleteBody': '事实“{id}”删除后不会再被召回，且无法撤销。',
+  'settings.memory.facts.deleteNote': '范围：{scope}。删除会立即移除文件，无需重启。',
   'settings.memory.facts.capped': '共 {total} 条，这里显示最新的 {shown} 条。',
   'settings.memory.facts.refresh': '刷新',
   'settings.memory.facts.footnote': '读取自 ~/.cluxmate/memory 与项目的 .cluxmate/memory。删除会立即移除文件，无需重启。关闭检索记忆只是停止召回，这些事实文件仍会保留。',
@@ -868,6 +882,8 @@ const zh: Record<keyof typeof en, string> = {
   'sessionList.pinned': '已置顶',
   'sessionList.deleteGroupConfirm': '删除分组“{name}”？其中的所有 Session 也将一并删除。',
   'sessionList.deleteProjectConfirm': '删除项目“{name}”？其中的所有 Session 也将一并删除。',
+  'sessionList.deleteGroupTitle': '删除该分组？',
+  'sessionList.deleteProjectTitle': '删除该项目？',
 
   // ── chat ──
   'chat.emptyTitle': 'CluxMate Desktop',
@@ -957,9 +973,13 @@ const zh: Record<keyof typeof en, string> = {
   'contextMenu.copyMarkdown': '复制为 Markdown',
   'contextMenu.newWorktreeSession': '新建工作树会话…',
   'contextMenu.removeWorktree': '移除工作树…',
-  'contextMenu.removeWorktreeConfirm': '移除工作树“{name}”？\n\n目录：{path}\n分支：{branch}\n{files}\n\n将删除该工作树目录及其分支，本 Session 也会一并删除。',
+  'contextMenu.removeWorktreeTitle': '移除工作树“{name}”？',
+  'contextMenu.removeWorktreeBody': '将删除该工作树目录及其分支，本 Session 也会一并删除。',
+  'contextMenu.removeWorktreePath': '目录',
+  'contextMenu.removeWorktreeBranch': '分支',
+  'contextMenu.removeWorktreeApply': '移除工作树',
   'contextMenu.removeWorktreeClean': '没有未提交的文件。',
-  'contextMenu.removeWorktreeDirty': '未提交的文件（{count}）：\n{files}',
+  'contextMenu.removeWorktreeFiles': '未提交的文件（{count}）',
   'contextMenu.removeWorktreeUnknown': '无法读取 git 状态（{msg}）——未提交的更改可能会丢失。',
 
   // ── modes ──
@@ -1158,7 +1178,9 @@ const zh: Record<keyof typeof en, string> = {
   'checkpoint.time.m': '{count} 分钟前',
   'checkpoint.time.h': '{count} 小时前',
   'checkpoint.time.d': '{count} 天前',
-  'checkpoint.restoreConfirm': '恢复到“{label}”？\n\n这将把该检查点之后 Agent 更改的文件恢复到该时间点的状态。你手动修改的文件不受影响。此操作会记录为一个新检查点，可以再次恢复。',
+  'checkpoint.restoreTitle': '恢复到“{label}”？',
+  'checkpoint.restoreBody': '这将把该检查点之后 Agent 更改的文件恢复到该时间点的状态。你手动修改的文件不受影响。此操作会记录为一个新检查点，可以再次恢复。',
+  'checkpoint.restoreApply': '恢复',
 
   // ── branch switch modal ──
   'branch.switchTitle': '切换分支',
