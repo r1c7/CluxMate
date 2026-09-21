@@ -18,48 +18,217 @@ guarantees, and they are subtle enough to live in exactly one implementation:
 
 from __future__ import annotations
 
+import ctypes
 import os
 import platform
 import signal
 import subprocess
 import threading
+import time
 from typing import Any, Callable
 
 #: Deadline for the drain AFTER the kill. Bounded on purpose: a descendant that
 #: escaped the tree kill can hold the write end open forever, and an unbounded
 #: drain is the very hang this module exists to prevent.
-#: Worst case for one call is therefore ``timeout + 15 s (taskkill, Windows
-#: only) + KILL_DRAIN_SECONDS`` — see kill_process_tree for why taskkill's own
-#: subprocess.run(timeout=…) cannot stall.
+#: Worst case for one call is therefore ``timeout + TREE_KILL_SECONDS (Windows
+#: only) + KILL_DRAIN_SECONDS`` — see :func:`kill_process_tree` for why the tree
+#: kill spends a confirmation window of its own.
 KILL_DRAIN_SECONDS = 5.0
+
+#: Windows only: how long ONE tree kill may spend confirming the tree is gone.
+#: It replaces ``taskkill``, whose own worst case was a 15 s subprocess — so the
+#: ceiling of a call went DOWN even though the kill now polls.
+TREE_KILL_SECONDS = 2.0
+
+#: Windows only: gap between two snapshots of the tree.
+_TREE_POLL_SECONDS = 0.05
+
+#: Windows only: how long the tree must stay EMPTY before the kill is believed.
+#: "Nothing there right now" is not yet "nothing there": a process terminated a
+#: moment ago can still complete the CreateProcess it already had in flight.
+_TREE_QUIET_SECONDS = 0.4
+
+_PROCESS_TERMINATE = 0x0001
+_SYNCHRONIZE = 0x00100000
+_TH32CS_SNAPPROCESS = 0x00000002
+_WAIT_OBJECT_0 = 0x00000000
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+class _ProcessEntry32(ctypes.Structure):
+    """``PROCESSENTRY32`` (ANSI) — only the pid pair is read, but the layout has
+    to match what the API writes, hence every field and its natural alignment.
+    ``th32DefaultHeapID`` is ``ULONG_PTR``: pointer-sized, not a DWORD."""
+
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_char * 260),
+    ]
+
+
+_kernel32_lib: Any = None
+
+
+def _kernel32() -> Any:
+    """kernel32 with the five entry points this module needs, bound once.
+
+    Lazy on purpose: ``ctypes.WinDLL`` does not exist off Windows, so the module
+    stays importable (and the POSIX path stays untouched) everywhere.
+    """
+    global _kernel32_lib
+    if _kernel32_lib is None:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        k32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+        k32.Process32First.restype = ctypes.c_int
+        k32.Process32First.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_ProcessEntry32)
+        ]
+        k32.Process32Next.restype = ctypes.c_int
+        k32.Process32Next.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(_ProcessEntry32)
+        ]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k32.TerminateProcess.restype = ctypes.c_int
+        k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.WaitForSingleObject.restype = ctypes.c_uint32
+        k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.CloseHandle.restype = ctypes.c_int
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        _kernel32_lib = k32
+    return _kernel32_lib
+
+
+def _win_open(pid: int, access: int) -> int | None:
+    handle = _kernel32().OpenProcess(access, False, pid)
+    return int(handle) if handle else None
+
+
+def _win_exited(handle: int) -> bool:
+    return _kernel32().WaitForSingleObject(handle, 0) == _WAIT_OBJECT_0
+
+
+def _win_process_table() -> dict[int, int] | None:
+    """``{pid: parent pid}`` for every process, or None if the snapshot failed.
+
+    ``th32ParentProcessID`` is the pid that CREATED the process; Windows freezes
+    it, so an orphan still points at a parent that may be long dead. That is the
+    link :func:`_kill_tree_windows` walks — the one a ``taskkill /T`` snapshot
+    cannot follow once the parent is gone.
+    """
+    k32 = _kernel32()
+    snap = k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if not snap or int(snap) == _INVALID_HANDLE:
+        return None
+    try:
+        entry = _ProcessEntry32()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry32)
+        if not k32.Process32First(snap, ctypes.byref(entry)):
+            return None
+        table: dict[int, int] = {}
+        while True:
+            table[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not k32.Process32Next(snap, ctypes.byref(entry)):
+                break
+        return table
+    finally:
+        k32.CloseHandle(snap)
+
+
+def _kill_tree_windows(pid: int) -> None:
+    """Kill ``pid`` and everything below it, then confirm the tree stayed dead.
+
+    ``taskkill /F /T`` — what this used to be — takes ONE snapshot of the tree
+    and then kills what it saw. A descendant created between that snapshot and
+    the kill is missed, and missed FOR GOOD: its parent is dead, so a later
+    ``taskkill /PID`` has no tree left to walk. That is not theoretical. The
+    stale-epoch path in :func:`run_bounded` kills a child in the very
+    milliseconds it is starting its own children, and CI caught a writer
+    grandchild outliving its command that way, still writing minutes later.
+
+    So the tree is not snapshotted once, it is FOLLOWED. Every poll re-reads the
+    process table and adopts anything whose parent pid is already in the tree —
+    the parent may have died since, which is exactly the case that has to be
+    caught; then every adopted process is terminated, and the kill is over only
+    once each one has exited and nothing new appeared for
+    ``_TREE_QUIET_SECONDS`` (itself bounded by ``TREE_KILL_SECONDS``).
+
+    Each adopted pid is held open for the whole walk. That is what makes the
+    "is it gone" test exact — a terminated process that still has an open handle
+    stays visible to a snapshot, but is signalled here — and it is what stops an
+    adopted pid from being recycled into an unrelated process we would then kill.
+
+    Residual (documented, not fixed): the walk can only descend through a pid it
+    has SEEN. An intermediate that starts and exits before the walk reads the
+    table — or between two polls — was never adopted, so the children it left
+    behind are outside the walk: that is the shape of
+    ``test_bash_timeout_stays_bounded_when_a_descendant_escapes_the_kill``. And a
+    process whose ``OpenProcess`` is denied can be neither killed nor watched; it
+    is retried every poll and the loop simply runs to the deadline.
+    """
+    k32 = _kernel32()
+    access = _PROCESS_TERMINATE | _SYNCHRONIZE
+    root = _win_open(pid, access)
+    if root is None:  # already gone, or not ours to touch
+        return
+    tracked: dict[int, int] = {pid: root}  # pid -> open handle (pins the pid)
+    try:
+        deadline = time.monotonic() + TREE_KILL_SECONDS
+        quiet_since: float | None = None
+        while True:
+            table = _win_process_table()
+            for child, parent in (table or {}).items():
+                if parent in tracked and child not in tracked:
+                    handle = _win_open(child, access)
+                    if handle is not None:
+                        tracked[child] = handle
+            for handle in tracked.values():
+                k32.TerminateProcess(handle, 1)  # idempotent: retries a lost try
+            now = time.monotonic()
+            if all(_win_exited(handle) for handle in tracked.values()):
+                quiet_since = now if quiet_since is None else quiet_since
+                if now - quiet_since >= _TREE_QUIET_SECONDS:
+                    return
+            else:
+                quiet_since = None
+            if now >= deadline:
+                return
+            time.sleep(_TREE_POLL_SECONDS)
+    finally:
+        for handle in tracked.values():
+            k32.CloseHandle(handle)
+
 
 def kill_process_tree(pid: int) -> None:
     """Kill ``pid`` and the processes it spawned (best effort, never raises).
 
-    Windows: ``taskkill /F /T`` walks the parent/child tree. A low-integrity
-    child is terminable from this higher-integrity parent — the mandatory-label
-    policy only forbids writes UP, never termination DOWN. POSIX: the child owns
-    its process group (``start_new_session`` in :func:`run_bounded`), so one
-    ``SIGKILL`` to the group takes the shell and everything under it, and
-    bubblewrap's ``--die-with-parent`` then finishes its sandboxed child.
+    Windows: walk the tree through ``th32ParentProcessID`` and terminate what it
+    holds, repeatedly, until the tree is confirmed gone —
+    :func:`_kill_tree_windows` documents why one snapshot is not enough. A
+    low-integrity child is terminable from this higher-integrity parent: the
+    mandatory-label policy only forbids writes UP, never termination DOWN.
+    POSIX: the child owns its process group (``start_new_session`` in
+    :func:`run_bounded`), so one ``SIGKILL`` to the group takes the shell and
+    everything under it, and bubblewrap's ``--die-with-parent`` then finishes its
+    sandboxed child.
 
-    The ``taskkill`` call is a ``subprocess.run(timeout=15)``: that is safe HERE
-    (unlike for a command) because taskkill spawns no children, so nothing
-    survives to hold ITS pipes open — the unbounded post-kill ``communicate()``
-    CPython falls back to always returns. It does add up to 15 s to the worst
-    case, which is why :func:`run_bounded`'s bound is stated as
-    ``timeout + taskkill + drain``.
-
-    Residual (documented, not fixed): a descendant that was REPARENTED before
-    the kill is no longer in the tree ``taskkill`` walks, and one that started a
-    NEW session left the group.
+    Residual (documented, not fixed): on POSIX a descendant that started a NEW
+    session left the group; on Windows a descendant is out of reach when the pid
+    that created it was never observed by the walk (see
+    :func:`_kill_tree_windows`).
     """
     if platform.system() == "Windows":
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True, stdin=subprocess.DEVNULL, timeout=15,
-            )
+            _kill_tree_windows(pid)
         except Exception:
             pass
         return
@@ -138,9 +307,10 @@ def run_bounded(
     cancelled while it was starting. Either way the caller must not read the
     output as a completed run.
 
-    The return is bounded by ``timeout + kill + drain`` (the kill may spend up
-    to 15 s in ``taskkill`` on Windows, see :func:`kill_process_tree`); it never
-    waits for the command itself once the timeout has passed.
+    The return is bounded by ``timeout + kill + drain`` (on Windows the kill may
+    spend up to ``TREE_KILL_SECONDS`` confirming the tree, see
+    :func:`kill_process_tree`); it never waits for the command itself once the
+    timeout has passed.
 
     ``live`` registers the child so a cancelled turn can kill it
     (:class:`LiveProcesses`); the sandbox backends take the same registry from
