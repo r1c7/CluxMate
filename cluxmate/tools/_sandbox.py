@@ -44,6 +44,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ._proc import LiveProcesses, kill_process_tree, run_bounded
+
 # Escape hatch: explicitly disable the bash sandbox (e.g. running inside a
 # disposable container where bwrap/low-IL add nothing).
 ENV_DISABLE = "CLUXMATE_BASH_SANDBOX"
@@ -152,12 +154,22 @@ class ShellSandbox:
         cwd: str,
         timeout: float,
         env: dict[str, str],
+        live: LiveProcesses | None = None,
     ) -> SandboxResult:
         """Execute and return a CompletedProcess-like result.
 
         Exactly one of ``argv`` (direct invocation, no shell=True) or
         ``shell_cmd`` (a string for the platform shell) is set, mirroring
         BashTool's dual execution paths.
+
+        ``live`` is the caller's registry of running children
+        (``tools/_proc.py``): a backend that spawns a real process registers it
+        there so a cancelled turn can kill the command's whole tree. It is
+        optional — a direct caller (test, MCP wiring) may pass nothing and owns
+        its own cleanup.
+
+        A timeout kills the tree and still raises ``subprocess.TimeoutExpired``
+        (the contract BashTool's sandbox branch reads).
         """
         raise NotImplementedError
 
@@ -287,6 +299,7 @@ class BwrapSandbox(ShellSandbox):
         cwd: str,
         timeout: float,
         env: dict[str, str],
+        live: LiveProcesses | None = None,
     ) -> SandboxResult:
         resolved = str(Path(cwd).resolve())
         self._ensure_state_dir(resolved)
@@ -296,11 +309,16 @@ class BwrapSandbox(ShellSandbox):
         else:
             full = prefix + ["--"] + argv
         env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
-        proc = subprocess.run(
-            full, capture_output=True, stdin=subprocess.DEVNULL,
-            timeout=timeout, cwd=cwd, env=env,
+        # run_bounded, not subprocess.run: on a timeout it SIGKILLs bwrap's own
+        # process group (which bwrap's --die-with-parent then propagates to the
+        # sandboxed child) and drains the pipes on a deadline, so the timeout
+        # always reaches the caller even when a descendant holds stdout.
+        rc, out, err = run_bounded(
+            full, shell=False, cwd=cwd, env=env, timeout=timeout, live=live,
         )
-        return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
+        if rc is None:
+            raise subprocess.TimeoutExpired(full, timeout, output=out, stderr=err)
+        return SandboxResult(rc, out, err)
 
     def spawn_popen(self, argv: list[str], *, cwd: str, env: dict[str, str]):
         resolved = str(Path(cwd).resolve())
@@ -427,6 +445,7 @@ class DarwinSeatbeltSandbox(ShellSandbox):
         cwd: str,
         timeout: float,
         env: dict[str, str],
+        live: LiveProcesses | None = None,
     ) -> SandboxResult:
         prefix = self._prefix(str(Path(cwd).resolve()))
         if shell_cmd is not None:
@@ -434,11 +453,16 @@ class DarwinSeatbeltSandbox(ShellSandbox):
         else:
             full = prefix + argv
         env = apply_egress_env(env, self._egress_mode, self._proxy_addr)
-        proc = subprocess.run(
-            full, capture_output=True, stdin=subprocess.DEVNULL,
-            timeout=timeout, cwd=cwd, env=env,
+        # run_bounded, not subprocess.run — same reason as the bwrap backend:
+        # sandbox-exec execs the child in OUR process group, so the timeout has
+        # to SIGKILL that group and drain on a deadline (a survivor holding
+        # stdout would otherwise stall the returned timeout forever).
+        rc, out, err = run_bounded(
+            full, shell=False, cwd=cwd, env=env, timeout=timeout, live=live,
         )
-        return SandboxResult(proc.returncode, proc.stdout, proc.stderr)
+        if rc is None:
+            raise subprocess.TimeoutExpired(full, timeout, output=out, stderr=err)
+        return SandboxResult(rc, out, err)
 
     def spawn_popen(self, argv: list[str], *, cwd: str, env: dict[str, str]):
         prefix = self._prefix(str(Path(cwd).resolve()))
@@ -925,10 +949,16 @@ class WindowsLowILSandbox(ShellSandbox):
         cwd: str,
         timeout: float,
         env: dict[str, str],
+        live: LiveProcesses | None = None,
     ) -> SandboxResult:
         import ctypes
         import msvcrt
         from ctypes import wintypes
+
+        # The cancel epoch is read BEFORE _setup(): that call shells out to
+        # icacls and can take seconds, and a cancel arriving in that window must
+        # not leave this child running to its own timeout (see LiveProcesses).
+        epoch = live.epoch() if live is not None else 0
 
         self._setup()
 
@@ -1005,18 +1035,36 @@ class WindowsLowILSandbox(ShellSandbox):
                         f"CreateProcessAsUserW failed "
                         f"(WinError {ctypes.get_last_error()})"
                     )
+                child_pid = int(pi.dwProcessId)
+                tracked = True
+                if live is not None:
+                    tracked = live.add(
+                        epoch, child_pid, lambda: kill_process_tree(child_pid)
+                    )
                 try:
+                    if not tracked:
+                        # Cancelled since the epoch read (which happens BEFORE
+                        # _setup, so a cancel during the icacls work counts):
+                        # this child must not outlive the turn that asked for it.
+                        kill_process_tree(child_pid)
                     timed_out = (
                         kernel32.WaitForSingleObject(
                             pi.hProcess, int(timeout * 1000)
                         ) != 0
                     )
                     if timed_out:
+                        # The low-IL child is a shell, and the work is ITS child
+                        # (`cmd /d /c "…"`), so TerminateProcess alone leaves the
+                        # real command running: kill the whole tree first (a
+                        # higher-IL parent may terminate lower-IL processes).
+                        kill_process_tree(child_pid)
                         kernel32.TerminateProcess(pi.hProcess, 1)
                         kernel32.WaitForSingleObject(pi.hProcess, 10000)
                     rc = wintypes.DWORD()
                     kernel32.GetExitCodeProcess(pi.hProcess, ctypes.byref(rc))
                 finally:
+                    if live is not None:
+                        live.discard(child_pid)
                     kernel32.CloseHandle(pi.hThread)
                     kernel32.CloseHandle(pi.hProcess)
             finally:

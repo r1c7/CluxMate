@@ -10,6 +10,7 @@ import subprocess
 from typing import Any
 
 from .base import BaseTool
+from ._proc import LiveProcesses, run_bounded
 from ._sandbox import ESCALATION_SCHEMA_FIELDS, ShellSandbox
 
 # Strip ANSI escape sequences (colors, cursor movements, etc.) from output
@@ -124,6 +125,15 @@ def _decode(data: bytes) -> str:
     text = data.decode("utf-8", errors="replace")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return _ANSI_RE.sub("", text)
+
+
+# ── bounded execution + cancellation ───────────────────────────────────────
+# The timeout/process-tree machinery is SHARED with the sandbox backends, so it
+# lives in tools/_proc.py: that module owns the "a timeout must return, and the
+# command's whole process tree dies with it" contract (its docstring explains
+# the CPython behaviour that makes subprocess.run(timeout=…) unusable here).
+# BashTool keeps the registry of its own live children and cancels them when the
+# turn ends (cancel_running, called from the agent loop).
 
 
 # ── shell command risk classification ──────────────────────────────────────
@@ -307,6 +317,9 @@ class BashTool(BaseTool):
         self._sandbox = sandbox
         self._sandbox_required = sandbox_required
         self._egress_mode = egress_mode
+        # Live children of THIS tool instance, so a cancelled turn can kill the
+        # command's process tree (see tools/_proc.py).
+        self._live = LiveProcesses()
 
     @property
     def name(self) -> str:
@@ -355,6 +368,15 @@ class BashTool(BaseTool):
     def classify(self, command: str) -> _CommandClass:
         """Full classification: risk level + matched destructive categories."""
         return classify_command(command)
+
+    def cancel_running(self) -> None:
+        """Kill this tool's live children (called when the turn is cancelled).
+
+        The executor thread blocked on the child is abandoned on cancellation,
+        so the turn's own thread is the last chance to stop the work — without
+        this, a cancelled `pytest`/`npm run` keeps running to completion.
+        """
+        self._live.cancel_all()
 
     async def execute(
         self,
@@ -406,28 +428,24 @@ class BashTool(BaseTool):
                 # lines). Any interactive prompt — cmd.exe's "Overwrite? (Y/N)"
                 # on move/copy, "Are you sure (Y/N)?" on del/rmdir — would then
                 # block forever waiting on input that never comes, until the
-                # 180s tool timeout kills it. Feeding EOF makes such commands
-                # fail fast instead of hanging.
-                if use_shell:
-                    result = subprocess.run(
-                        command, shell=True, capture_output=True,
-                        stdin=subprocess.DEVNULL,
-                        timeout=timeout, cwd=cwd, env=env,
-                    )
-                else:
-                    result = subprocess.run(
-                        prefix + [command], capture_output=True,
-                        stdin=subprocess.DEVNULL,
-                        timeout=timeout, cwd=cwd, env=env,
-                    )
-                output = _decode(result.stdout)
-                if result.stderr:
-                    output += "\n" + _decode(result.stderr)
-                if result.returncode != 0:
-                    output += f"\n[exit code: {result.returncode}]"
+                # tool timeout kills it. Feeding EOF makes such commands fail
+                # fast instead of hanging.
+                args = command if use_shell else prefix + [command]
+                rc, raw_out, raw_err = run_bounded(
+                    args, shell=use_shell, cwd=cwd, env=env, timeout=timeout,
+                    live=self._live,
+                )
+                if rc is None:
+                    # Timed out (tree killed) or the turn was cancelled while
+                    # this was starting; either way there is no completed run to
+                    # report.
+                    return f"[Command timed out after {timeout}s]\n{command}"
+                output = _decode(raw_out)
+                if raw_err:
+                    output += "\n" + _decode(raw_err)
+                if rc != 0:
+                    output += f"\n[exit code: {rc}]"
                 return output.strip() or "(no output)"
-            except subprocess.TimeoutExpired:
-                return f"[Command timed out after {timeout}s]\n{command}"
             except FileNotFoundError:
                 return f"Command not found: {command}"
             except Exception as e:
@@ -463,14 +481,14 @@ class BashTool(BaseTool):
                 if use_shell:
                     result = sb.run(
                         argv=[], shell_cmd=command, cwd=cwd,
-                        timeout=timeout, env=env,
+                        timeout=timeout, env=env, live=self._live,
                     )
                 else:
                     # bash -c "<command>": pass through the resolved shell so
                     # the backend invokes it inside the sandbox.
                     result = sb.run(
                         argv=prefix + [command], shell_cmd=None, cwd=cwd,
-                        timeout=timeout, env=env,
+                        timeout=timeout, env=env, live=self._live,
                     )
                 output = _decode(result.stdout)
                 if result.stderr:

@@ -1013,6 +1013,11 @@ class AgentLoop:
         finally:
             # Self-close any tool calls left without a result before the turn
             # closes, so an aborted turn's surface is still a valid transcript.
+            # STOP the work first: a call that was still running when the turn
+            # ended has an abandoned executor thread and a live child process
+            # tree (a cancelled `pytest`/`npm run` would otherwise keep running),
+            # and only this thread can still reach it.
+            self.tools.cancel_running()
             self._close_orphaned_tools()
             if self._completion_audit_retries or self._completion_audit_unbacked:
                 # Audit trail: how many completion-audit reminders this turn

@@ -171,6 +171,93 @@ def test_lowil_child_tmp_is_writable():
 
 
 @pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_timeout_kills_the_command_tree():
+    """A timed-out sandboxed command must kill the command, not just its shell.
+
+    The low-IL child normally IS a shell (`cmd.exe /d /c "<cmd>"`), so
+    TerminateProcess on that single process left the real work running as an
+    orphan — it kept writing after the timeout returned, and it still held the
+    redirect file the backend was about to delete (so the pre-fix call ended in
+    a WinError 32 unlink instead of a SandboxResult). Here the child spawns a
+    grandchild that keeps writing, which is the witness: kill_process_tree walks
+    the child tree before TerminateProcess.
+    """
+    import time
+
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = WindowsLowILSandbox(str(ws))
+        writer = ws / "writer.py"
+        writer.write_text(
+            "import pathlib, sys, time\n"
+            "path = pathlib.Path(sys.argv[1])\n"
+            "for i in range(600):\n"
+            "    with path.open('a') as fh:\n"
+            "        fh.write(f'{i}\\n')\n"
+            "    time.sleep(0.05)\n"
+        )
+        child = ws / "child.py"
+        child.write_text(
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+            "time.sleep(600)\n"
+        )
+        counter = ws / "counter.txt"
+        r = sb.run(
+            argv=[sys.executable, str(child), str(writer), str(counter)],
+            shell_cmd=None, cwd=str(ws), timeout=3, env=os.environ.copy(),
+        )
+        assert r.returncode != 0
+        assert b"timed out" in r.stderr, r.stderr.decode(errors="replace")
+        assert counter.exists(), "the writer never ran — nothing was proven"
+        time.sleep(1.0)
+        first = counter.read_text()
+        time.sleep(1.0)
+        assert counter.read_text() == first, "the child tree survived the timeout"
+    finally:
+        import shutil
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
+def test_lowil_cancel_during_setup_kills_the_child(tmp_path, monkeypatch):
+    """A cancel that lands while `_setup()` is working must still reach the child.
+
+    The epoch is read BEFORE _setup (icacls can take seconds) precisely so this
+    window is covered: read after the spawn, the cancel is invisible, the child
+    is registered as if nothing happened and runs to the tool timeout.
+    """
+    import time
+
+    from cluxmate.tools._proc import LiveProcesses
+
+    ws = Path(tempfile.mkdtemp(prefix="cluxmate-sbtest-"))
+    try:
+        sb = WindowsLowILSandbox(str(ws))
+        live = LiveProcesses()
+        real_setup = sb._setup
+
+        def setup_after_cancel():
+            live.cancel_all()
+            real_setup()
+
+        monkeypatch.setattr(sb, "_setup", setup_after_cancel, raising=True)
+        started = time.monotonic()
+        r = sb.run(
+            argv=[sys.executable, "-c", "import time; time.sleep(600)"],
+            shell_cmd=None, cwd=str(ws), timeout=60,
+            env=os.environ.copy(), live=live,
+        )
+        elapsed = time.monotonic() - started
+        assert elapsed < 20, f"the cancelled child was awaited: {elapsed:.1f}s"
+        assert r.returncode != 0
+        assert live.cancel_all() == 0, "a dropped child must not stay tracked"
+    finally:
+        import shutil
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.skipif(not IS_WIN, reason="windows-only")
 def test_lowil_wait_infinite_does_not_raise():
     # Regression: _LowILProcess.wait(timeout=None) used an undefined
     # _WIN_INFINITE and raised NameError. It must block-then-return the code.

@@ -1,6 +1,9 @@
 """Tests for BashTool."""
 
+import asyncio
 import platform
+import sys
+import time
 
 import pytest
 
@@ -146,3 +149,151 @@ def test_resolve_shell_accepts_native_git_bash(monkeypatch):
     use_shell, prefix = _resolve_shell()
     assert use_shell is False
     assert prefix == [r"C:\Program Files\Git\bin\bash.exe", "-c"]
+
+
+# ---------------------------------------------------------------------------
+# A timeout must RETURN, and must kill the whole process tree
+# ---------------------------------------------------------------------------
+
+# The grandchild appends to a counter file every 50ms until killed, so the test
+# can prove the timeout killed it (file stops growing) rather than only killing
+# its parent. sys.executable in the helper scripts keeps this independent of
+# whatever "python" happens to be on PATH.
+_CHILD_SCRIPT = """
+import subprocess, sys, time
+subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+time.sleep(60)
+"""
+
+_GRANDCHILD_SCRIPT = """
+import pathlib, sys, time
+counter = pathlib.Path(sys.argv[1])
+for i in range(300):
+    with counter.open("a") as fh:
+        fh.write(f"{i}\\n")
+    time.sleep(0.05)
+"""
+
+# Spawns the grandchild and exits at once: it still holds our stdout pipe, but
+# its parent is gone, so a tree walk started at the shell can no longer reach it.
+_CHILD_ESCAPE_SCRIPT = """
+import subprocess, sys
+subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+"""
+
+
+async def _wait_for_writes(path, *, timeout=20.0) -> None:
+    """Block until the helper's grandchild has actually produced output.
+
+    Awaits between polls on purpose: the tool's work happens on an executor
+    thread that only starts once the event loop gets to run the task.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if path.stat().st_size > 0:
+                return
+        except OSError:
+            pass
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"the helper command never started writing {path}")
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_returns_and_kills_the_process_tree(tmp_path):
+    """A timed-out command must come back even when a grandchild holds stdout.
+
+    Regression (session 2c2811eccf26, 88 minutes with no result): the timeout
+    path was ``subprocess.run(..., timeout=N)``, whose Windows branch kills only
+    the direct child (cmd.exe) and then calls ``communicate()`` AGAIN with no
+    timeout to collect output. A surviving descendant still holds the stdout
+    pipe's write end, so that read never sees EOF: the TimeoutExpired — and with
+    it the "[Command timed out]" message — is delayed until the descendant dies
+    on its own, i.e. forever for a hung one. The same shape exists on POSIX
+    (killing the shell leaves the real work alive).
+    """
+    child = tmp_path / "child.py"
+    child.write_text(_CHILD_SCRIPT)
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(_GRANDCHILD_SCRIPT)
+    counter = tmp_path / "counter.txt"
+
+    tool = BashTool()
+    command = f'"{sys.executable}" "{child}" "{grandchild}" "{counter}"'
+    started = time.monotonic()
+    result = await asyncio.wait_for(
+        tool.execute(command=command, timeout_ms=1500), timeout=40
+    )
+    elapsed = time.monotonic() - started
+
+    assert "timed out" in result.lower()
+    # Without the tree kill this returns only when the grandchild finishes
+    # (TTL 15s) — and never at all for a command that hangs forever.
+    assert elapsed < 8, f"timeout did not return promptly: {elapsed:.1f}s"
+
+    time.sleep(1.0)
+    first = counter.read_text()
+    time.sleep(1.0)
+    assert counter.read_text() == first, "a descendant survived the timeout kill"
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_stays_bounded_when_a_descendant_escapes_the_kill(tmp_path):
+    """The bound holds even when the kill misses a survivor holding stdout.
+
+    The escapee is no longer reachable from the shell, so the drain read cannot
+    reach EOF: the tool must abandon the output and return the timeout message
+    anyway. Closing our own pipe ends instead is a REGRESSION (measured) — the
+    parked reader thread holds the buffered reader's lock, so ``close()`` blocks
+    until the escapee dies, and the call never returns.
+    """
+    child = tmp_path / "escape_child.py"
+    child.write_text(_CHILD_ESCAPE_SCRIPT)
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(_GRANDCHILD_SCRIPT)
+    counter = tmp_path / "counter.txt"
+
+    tool = BashTool()
+    command = f'"{sys.executable}" "{child}" "{grandchild}" "{counter}"'
+    started = time.monotonic()
+    result = await asyncio.wait_for(
+        tool.execute(command=command, timeout_ms=1500), timeout=30
+    )
+    elapsed = time.monotonic() - started
+
+    assert "timed out" in result.lower()
+    # timeout + the bounded drain + slack — not the escapee's 15s lifetime, and
+    # not forever (the assertion the close()-the-pipes variant fails).
+    assert elapsed < 12, f"the drain was not bounded: {elapsed:.1f}s"
+
+
+@pytest.mark.asyncio
+async def test_bash_cancel_running_kills_the_command_tree(tmp_path):
+    """A cancelled turn must stop the command it was running.
+
+    The loop abandons the executor thread blocked on the child (the turn is
+    gone), so `cancel_running()` is the only thing that can stop it — without
+    it a stopped `pytest`/`npm run` keeps burning CPU and holding the
+    workspace's files until the process finishes on its own.
+    """
+    child = tmp_path / "child.py"
+    child.write_text(_CHILD_SCRIPT)
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(_GRANDCHILD_SCRIPT)
+    counter = tmp_path / "counter.txt"
+
+    tool = BashTool()
+    command = f'"{sys.executable}" "{child}" "{grandchild}" "{counter}"'
+    task = asyncio.create_task(tool.execute(command=command, timeout_ms=60_000))
+    await _wait_for_writes(counter)
+    started = time.monotonic()
+    tool.cancel_running()
+    await asyncio.wait_for(task, timeout=20)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 10, f"the cancelled command still held the call: {elapsed:.1f}s"
+    time.sleep(1.0)
+    first = counter.read_text()
+    time.sleep(1.0)
+    assert counter.read_text() == first, "a descendant survived the cancellation"
+

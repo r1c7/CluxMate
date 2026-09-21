@@ -103,6 +103,17 @@ class BaseTool(ABC):
                 is_error=True,
             )
 
+    def cancel_running(self) -> None:
+        """Stop work this tool still has in flight; called when a turn ends.
+
+        Every exit from the turn (a user cancel, an RPC timeout) abandons the
+        executor thread that is blocked on this tool, so the turn's own thread is
+        the last chance to stop it — without this hook a cancelled `bash` call
+        leaves its process tree running to completion. Best-effort by contract:
+        implementations must not raise, and the default is a no-op (a tool with
+        nothing to stop).
+        """
+
     def definition(self) -> dict[str, Any]:
         """Generate the API-facing tool definition."""
         return {
@@ -140,3 +151,17 @@ class ToolBridge:
                 is_error=True,
             )
         return await tool.run_safe(tool_call_id, **params)
+
+    def cancel_running(self) -> None:
+        """Tell every registered tool to stop what it still has in flight.
+
+        Called once per turn, from ``AgentLoop.run()``'s teardown: a turn that
+        ended while a call was still running leaves that call's executor thread
+        blocked (and its child process alive) with nobody left to notice.
+        Best-effort — one tool's failure must not skip the others.
+        """
+        for tool in self._tools.values():
+            try:
+                tool.cancel_running()
+            except Exception:
+                pass
