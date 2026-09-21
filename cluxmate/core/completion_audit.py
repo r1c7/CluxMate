@@ -11,7 +11,11 @@ Design constraints for CluxMate:
   and the doom-loop reminder). It never hard-blocks a reply.
 - Detection is deliberately conservative: it fires only on strong signals (a
   change/test claim paired with a file or command token), never on a bare
-  "done". Negated claims ("did not modify", "couldn't run") are skipped.
+  "done". Negated claims ("did not modify", "couldn't run") are skipped, and a
+  change verb only counts as a WORD whose subject can be this agent — which is
+  what keeps a review report's prose ("the `implementer` gets stuck in
+  `test_pack.py`", "this commit edited the import group", a `--patch` flag next
+  to a path) from reading as a claim about its own work.
 - When a bash call DID run this turn, test-outcome claims get the benefit of
   the doubt (no command-semantics matching). File claims are then checked
   against the FILESYSTEM when the caller supplies a ``resolve_touched``
@@ -61,13 +65,80 @@ _CLAIM_VERB = re.compile(
 )
 
 # Change verbs (subset of claim verbs) that support a *file-change* claim.
-_CHANGE_VERB = re.compile(
-    r"(?:fix(?:ed)?|implement(?:ed)?|creat(?:ed|e)|add(?:ed)?|updat(?:ed|e)|"
+# The English alternatives must be WORDS: without boundaries `implementer`,
+# `StrategyPatch` and `create_app` read as verbs, and so does the `--patch` CLI
+# flag next to a path — a review report is made of exactly that prose, and every
+# false positive measured in one five-round review session came from one of
+# these or from a verb whose subject was somebody else (see below).
+_ASCII_CHANGE_VERB = (
+    r"fix(?:ed)?|implement(?:ed)?|creat(?:ed|e)|add(?:ed)?|updat(?:ed|e)|"
     r"modif(?:ied|y)|chang(?:ed|e)|edit(?:ed)?|remov(?:ed|e)|delet(?:ed|e)|"
-    r"wrot(?:e|ten)|generat(?:ed|e)|refactor(?:ed)?|patch(?:ed)?|"
-    r"修复|实现|创建|添加|删除|更新|修改|生成|重构|写好|改好)",
+    r"wrot(?:e|ten)|generat(?:ed|e)|refactor(?:ed)?|patch(?:ed)?"
+)
+# CJK words have no boundaries: a boundary class would reject 已修改, where 已
+# is itself a word character. The Chinese alternatives stay unbounded.
+_CJK_CHANGE_VERB = r"修复|实现|创建|添加|删除|更新|修改|生成|重构|写好|改好"
+_CHANGE_VERB = re.compile(
+    r"(?:(?<![\w\-./])(?:%s)(?![\w\-])|(?:%s))"
+    % (_ASCII_CHANGE_VERB, _CJK_CHANGE_VERB),
     re.IGNORECASE,
 )
+
+# A change verb whose *subject* is not this agent: a report narrating somebody
+# else's change or restating the requirement ("this commit edited the import
+# group", "the plan must create pack.py", "Requirement C4: add evaluator.py") is
+# not a completion claim. An actor word anywhere in the short prefix counts,
+# UNLESS that prefix also carries a first person — which is what keeps a real
+# claim in the same sentence ("the plan said to fix foo.py; I fixed foo.py")
+# firing on its own occurrence. `_claimed_files` scans EVERY verb in the window
+# for exactly that reason: one report sentence often contains both kinds.
+_THIRD_PARTY_ACTOR = re.compile(
+    r"(?:commit|commits|plan|plans|spec|specs|requirement|requirements|review|"
+    r"reviews|round|pass|passes|diff|diffs|author|host|audit|audits|task|tasks|"
+    r"step|steps|pr|prs)\b",
+    re.IGNORECASE,
+)
+# The agent's own voice. Deliberately narrow: "we/us/our" are how a document is
+# described ("the spec asks us to implement retriever.py"), not how this agent
+# states what it did.
+_FIRST_PERSON = re.compile(r"\b(?:I|my)\b|我", re.IGNORECASE)
+# How far an actor word may sit from the verb and still be read as its subject.
+_ACTOR_GAP = 25
+# How much text before the verb is read as its subject phrase.
+_ACTOR_WINDOW = 40
+
+# A modal in front of the verb is intent, not completion ("the plan says I
+# should create util.py"). Bare `to` is deliberately NOT here: "I managed to fix
+# util.py" is a completion claim.
+_NON_ASSERTIVE_MODAL = re.compile(
+    r"(?:must|should|shall|will|would|can|could|may|might)[ \t]+\Z",
+    re.IGNORECASE,
+)
+
+# A determiner in front of the change verb makes it a NOUN PHRASE, not a
+# predicate: "the fix to utils.py is missing", "the change to evaluator.py is
+# correct", "a patch to the ids". Those are how a report talks ABOUT a change
+# (and the shape AGENTS.md already documented as a false positive), while a real
+# claim puts the verb behind a subject ("I fixed utils.py").
+_NOUN_PHRASE = re.compile(
+    r"(?:\b(?:the|a|an|this|that|these|those|any|each|no|its|their|his|her|"
+    r"our|your|my|one|another|such|same)[ \t]+)\Z",
+    re.IGNORECASE,
+)
+
+# Passive voice right after the verb ("it is added by this commit"): the change
+# is predicated of something other than the agent.
+_PASSIVE_BY = re.compile(r"\s+by\b")
+
+# Inline-code and double-quoted spans on one line. A change verb inside one is
+# quoted material — a plan bullet such as `- Create: wiring.py`, or a report
+# sentence quoting one ("the \"Create wiring.py / Test test_cli.py\" bullet
+# merge") — not the agent's own assertion. The double-quoted form is
+# length-capped: prose quotes are often unbalanced, and an unbounded span could
+# swallow a real claim. The cap is generous (a report quotes whole sentences),
+# and the alternatives are tried in this order so an inline-code span is never
+# cut short by an unrelated double quote inside it.
+_QUOTED_SPAN = re.compile(r"`[^`\n]*`|\"[^\"\n]{0,300}\"")
 
 # Command/test-outcome tokens: "the tests passed" / "build is green".
 _TEST_VERB = re.compile(
@@ -88,7 +159,10 @@ _PASS_VERB = re.compile(
 _NEGATION = re.compile(
     r"(?:did not|didn'?t|does not|doesn'?t|cannot|can'?t|could not|couldn'?t|"
     r"not |no |without|unable|failed to|"
-    r"没有|并未|还没|尚未|无法|不能|未)",
+    # "never" only as a denial of a change ("I never claimed to change X"): a
+    # bare `never` would also swallow a real claim ("I never gave up and fixed X").
+    r"never\s+(?:\w+\s+){0,3}to[ \t]+\Z|"
+    r"没有|并未|还没|尚未|无法|不能|从未|未)",
     re.IGNORECASE,
 )
 
@@ -99,8 +173,15 @@ _CLAIM_WINDOW = 80
 
 
 def normalize_path(path: str) -> str:
-    """Comparable form of a tool-reported path: basename, lowercased."""
-    return path.replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    """Comparable form of a tool-reported path: basename, lowercased, unquoted.
+
+    Quote characters are stripped because ``_FILE_TOKEN`` matches an optional
+    opening backtick/quote: without this, a claim written as `` `utils.py `` can
+    never equal the write record's ``utils.py``, and the backup path check
+    bounces a claim it should have been able to back.
+    """
+    token = path.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    return token.strip("`\"'").lower()
 
 
 def tool_write_paths(name: str, args: dict) -> list[str]:
@@ -179,6 +260,30 @@ def _is_negated(text: str, claim_start: int) -> bool:
     return bool(_NEGATION.search(window))
 
 
+def _is_third_party(text: str, verb_start: int) -> bool:
+    """True when the verb is not an assertion of what THIS agent did.
+
+    Either the verb sits in somebody else's sentence — an actor word within
+    ``_ACTOR_GAP`` of it, with no first person in the prefix — or it is intent
+    rather than completion (``_NON_ASSERTIVE_MODAL``).
+    """
+    lo = max(0, verb_start - _ACTOR_WINDOW)
+    window = text[lo:verb_start]
+    if _NON_ASSERTIVE_MODAL.search(window):
+        return True
+    if _FIRST_PERSON.search(window):
+        return False
+    actor = _THIRD_PARTY_ACTOR.search(window)
+    if actor is None:
+        return False
+    return verb_start - (lo + actor.end()) <= _ACTOR_GAP
+
+
+def _is_quoted(spans: list[tuple[int, int]], pos: int) -> bool:
+    """True when ``pos`` falls inside a quoted span (quoted material)."""
+    return any(start < pos < end for start, end in spans)
+
+
 # Delete/remove verbs — a "deleted utils.py" claim cannot be cheaply verified
 # against mtime (the file is gone either way), so the fs check skips it.
 _DELETE_VERB = re.compile(
@@ -193,18 +298,27 @@ def _claimed_files(text: str) -> dict[str, str]:
     window, else ``"change"``.
     """
     claimed: dict[str, str] = {}
+    spans = [(m.start(), m.end()) for m in _QUOTED_SPAN.finditer(text)]
     for m in _FILE_TOKEN.finditer(text):
         lo = max(0, m.start() - _CLAIM_WINDOW)
         hi = min(len(text), m.end() + _CLAIM_WINDOW)
         window = text[lo:hi]
-        verb = _CHANGE_VERB.search(window)
-        if verb is None:
-            continue
-        if _is_negated(text, lo + verb.start()):
-            continue
-        name = normalize_path(m.group(0))
-        kind = "deletion" if _DELETE_VERB.search(window) else "change"
-        claimed[name] = kind
+        # EVERY verb in the window, not just the first: a report sentence
+        # routinely carries both a quoted/third-party verb and the agent's own
+        # claim ("the plan said to fix foo.py; I fixed foo.py"), and only one of
+        # them decides the verdict.
+        for verb in _CHANGE_VERB.finditer(window):
+            verb_start = lo + verb.start()
+            if _is_negated(text, verb_start) or _is_third_party(text, verb_start):
+                continue
+            if _is_quoted(spans, verb_start):
+                continue
+            if _PASSIVE_BY.match(text, lo + verb.end()):
+                continue
+            claimed[normalize_path(m.group(0))] = (
+                "deletion" if _DELETE_VERB.search(window) else "change"
+            )
+            break
     return claimed
 
 

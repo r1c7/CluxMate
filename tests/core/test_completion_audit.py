@@ -58,6 +58,116 @@ def test_negated_file_claim_does_not_fire():
     assert r is None
 
 
+def test_claim_word_inside_a_longer_word_does_not_fire():
+    """A change verb has to be a WORD. `_CHANGE_VERB` has no boundaries in the
+    first cut, so identifiers read as verbs: `implementer`, `StrategyPatch`,
+    `create_app`. Every one of these sentences is a real line from a reviewer's
+    report (session 2c2811eccf26), and each one bounced the review."""
+    text = (
+        "The single place an implementer gets stuck is "
+        "`tests/strategy/test_pack.py`; `StrategyPatch` is imported-unused in "
+        "`agents/evaluator.py`; `web.create_app` has no guard before it reads "
+        "`general.yaml`."
+    )
+    assert audit_completion(text, write_paths=[], tool_calls_made=3) is None
+
+
+def test_claim_word_as_a_cli_flag_does_not_fire():
+    # "gate --patch path/to/patch.json" — the flag is not an assertion.
+    text = "The README quotes `gate --patch path/to/patch.json` and `demo --fast`."
+    assert audit_completion(text, write_paths=[], tool_calls_made=3) is None
+
+
+def test_never_denied_claim_does_not_fire():
+    # "never" is a negation like "did not" — the reply is denying the change.
+    text = "I never claimed to change `tests/memory/test_store.py` — or any file."
+    assert audit_completion(text, write_paths=[], tool_calls_made=3) is None
+
+
+def test_third_party_subject_does_not_fire():
+    """A report narrates other people's changes. The verb's own subject decides:
+    "this commit edited X" and "it is added by this commit" are not completion
+    claims, while a first-person claim in the same sentence still is."""
+    quoted = 'Report: plan:4948 — the "Create wiring.py / Test test_cli.py" bullet.'
+    assert audit_completion(quoted, write_paths=[], tool_calls_made=3) is None
+    passive = "`tests/strategy/test_pack.py`: it is added by this very commit."
+    assert audit_completion(passive, write_paths=[], tool_calls_made=3) is None
+    # …but the agent's own claim about the same file still fires.
+    own = "I edited agents/evaluator.py myself; this commit only dropped an import."
+    assert audit_completion(own, write_paths=[], tool_calls_made=3) is not None
+
+
+def test_requirement_narration_does_not_fire():
+    """The other half of a report's prose: restating what the artifact requires.
+    "the plan must create X", "Requirement C4: add Y", "Task 3 says to create Z"
+    are all statements about the document — the actor word sits within a few
+    characters of the verb, which is what makes it its subject."""
+    for text in (
+        "The plan must create `pack.py`.",
+        "Requirement C4: add `agents/evaluator.py` with a propose() method.",
+        "Task 3 says to create `tests/memory/test_store.py`.",
+        "The spec asks us to implement `retriever.py`.",
+        "The plan says I should create `util.py`.",
+    ):
+        assert audit_completion(text, write_paths=[], tool_calls_made=3) is None, text
+
+
+def test_claim_after_a_quoted_or_third_party_verb_still_fires():
+    """Scanning only the FIRST verb in the window hid a real claim behind a
+    quoted one — the whole point of the scan is that a report sentence carries
+    both ("the plan said to fix foo.py; I fixed foo.py")."""
+    for text in (
+        'The plan says "Create utils.py". I fixed utils.py.',
+        "The plan bullet says `Create utils.py`; I fixed utils.py.",
+        "This commit added utils.py. I then fixed utils.py.",
+    ):
+        assert audit_completion(text, write_paths=[], tool_calls_made=3) is not None, text
+
+
+def test_deliberately_narrow_skips():
+    """"never" alone is not a denial, and an intent is not a completion: a real
+    claim keeps firing through the frames the skip rules must not swallow."""
+    for text in (
+        "I never gave up and fixed `utils.py`.",
+        "I managed to fix `utils.py`.",
+        "I was able to fix `utils.py`.",
+    ):
+        assert audit_completion(text, write_paths=[], tool_calls_made=3) is not None, text
+
+
+def test_reviewer_report_shaped_reply_does_not_fire():
+    """End to end on a report-shaped reply: a reviewer holds `bash` and quotes
+    paths in its findings, so the bash/filesystem path (case 3) is the one that
+    fired five times out of five reviews — each bounce costing a whole extra
+    round to write a correction that says "I edited nothing"."""
+    text = (
+        "**Status**: partial\n\n"
+        "- [C1 determinism] in-scope - pass - evidence: `plan:2134`.\n"
+        "- [C5 unused names] in-scope - fail - evidence: `:492` "
+        "`mock_handlers()` is never referenced; `:623` `import json` unused.\n"
+        "- [C9b] in-scope - fail - evidence: the single place an implementer "
+        "gets stuck is `tests/strategy/test_pack.py`; it is added by this very "
+        "commit and cannot pass against `default_pack.yaml`.\n"
+        "I made no edits to `__init__.py`, `default_pack.yaml` or `pack.py`.\n"
+    )
+    assert (
+        audit_completion(
+            text, any_bash=True, tool_calls_made=109, resolve_touched=lambda n: False
+        )
+        is None
+    )
+    # The control still fires: same turn shape, an actual claim.
+    assert (
+        audit_completion(
+            "I fixed utils.py via bash.",
+            any_bash=True,
+            tool_calls_made=109,
+            resolve_touched=lambda n: False,
+        )
+        is not None
+    )
+
+
 def test_backed_file_claim_does_not_fire():
     r = audit_completion(
         "I fixed src/utils.py.",
