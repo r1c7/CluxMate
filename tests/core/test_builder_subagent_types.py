@@ -142,6 +142,28 @@ def test_review_gate_orders_the_review_after_the_work(tmp_path, monkeypatch):
     assert "takes the whole workspace while they queue behind" in prompt
 
 
+def test_review_gate_scopes_the_re_review(tmp_path, monkeypatch):
+    """A re-review must not be a second full audit. Measured on one plan review
+    (session 2c2811eccf26): five rounds of 392-603 s each, and the last one spent
+    546 s judging a 43-line fix diff because the prompt still said the whole
+    6 000-line document was what had to be judged. The gate therefore has to name
+    the scope (previous findings + the fix diff), keep script-decidable checks
+    out of the reviewer's hands, guarantee the commands it needs, and cap the
+    loop instead of reviewing until the budget runs out."""
+    _home(monkeypatch, tmp_path)
+    b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()
+    prompt = b._render_system_prompt(b._get_tools())
+    assert "A re-review is SCOPED" in prompt
+    assert "never a second full audit" in prompt
+    assert "Before you re-review, fix EVERY finding of the round" in prompt
+    assert "Spend no round on what a script decides" in prompt
+    # Followable by the agent reading it: always-allow is a user action, and the
+    # permission config sits in the deny subtree the agent cannot write.
+    assert "ask the user to always-allow the command" in prompt
+    assert "the `bash:python` category" in prompt
+    assert "Two rounds, then stop" in prompt
+
+
 def test_builtin_reviewer_child_prompt_carries_its_contract(tmp_path, monkeypatch):
     _home(monkeypatch, tmp_path)
     b = AgentBuilder(str(tmp_path), _Provider()).with_default_tools().with_subagents()

@@ -155,6 +155,28 @@ Then hand it the material:
   a failure, and never upgrade a `fail` because prose explains it away.
 - On a `fail`/`unverifiable`, fix the specific claims and review AGAIN — the
   re-review needs fresh evidence, and the report's explanation is not evidence.
+  Before you re-review, fix EVERY finding of the round (including the report's
+  unrequested-changes list), one defect class per commit: a fix that drags
+  unrelated edits is what the next round then has to re-verify.
+- A re-review is SCOPED — never a second full audit. Hand it the previous
+  round's `fail`/`unverifiable` lines verbatim plus the fix diff that answers
+  them, and say which is which: those items and the regressions the diff
+  introduces are in scope; everything the diff did not touch is not. Review cost
+  follows what the prompt re-opens, so a round that re-audits the whole artifact
+  costs the same whether the fix was 40 lines or 1 400 (measured).
+- Spend no round on what a script decides — compilation, undefined or unused
+  names, expected test counts, agreement between the artifact's own names. Run
+  those checks yourself (they are deterministic and free) and save the reviewer
+  for what a script cannot judge: behaviour, coverage, contradiction, omission.
+- Make the evidence reachable: when a claim needs a test or a build to be
+  judged, the reviewer must be allowed to run it. A denied command turns a
+  finding into `unverifiable`, and an `unverifiable` buys another round. You
+  cannot grant that yourself — the permission config is outside your reach — so
+  ask the user to always-allow the command (e.g. the `bash:python` category)
+  rather than paying twice.
+- Two rounds, then stop: the full review, then one diff-scoped re-review. After
+  that, fix what is left and write the residue into the artifact itself (its own
+  limitations section) instead of paying for a third pass.
 </review_gate>
 {% endif %}
 
