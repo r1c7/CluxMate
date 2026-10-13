@@ -395,7 +395,7 @@ cluxmate worktree [info|create|list|remove] [--cwd DIR] --json   # 同一机制�
 ```
 
 - **`base_url`** —— 任意 OpenAI 兼容端点（DeepSeek、Qwen、GLM、OpenAI、OpenRouter、Ollama、自建…）。
-- **`api_key`** —— 可以留空；会回退到 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 环境变量。
+- **`api_key`** —— 内置 DeepSeek 或 OpenAI 条目可以留空；但 OpenAI 兼容客户端在密钥为空时仍可能回退到 `OPENAI_API_KEY`。自定义云端点应明确填写自己的密钥，避免把无关的 OpenAI Key 发给该地址；无鉴权的本地服务只有在未设置 `OPENAI_API_KEY` 时才适合留空。
 - **`context_1m`** —— 对支持 1M token 上下文的 provider 开启。
 - **`max_tokens`** —— 输出预算；留空/`0` 时使用 32768 默认值。
 - **`reasoning_efforts`** —— 可选的每模型推理强度覆盖（系统内置各方言预设：DeepSeek / Qwen / GLM / OpenAI）。

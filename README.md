@@ -395,7 +395,7 @@ Global config lives at `~/.cluxmate/config.json` (schema v2) — a list of model
 ```
 
 - **`base_url`** — any OpenAI-compatible endpoint (DeepSeek, Qwen, GLM, OpenAI, OpenRouter, Ollama, self-hosted…).
-- **`api_key`** — may be left empty; it falls back to the `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` environment variables.
+- **`api_key`** — may be left empty for the built-in DeepSeek or OpenAI entries. For any empty key, the OpenAI-compatible client can still fall back to `OPENAI_API_KEY`; a custom hosted endpoint should have its own explicit key so an unrelated OpenAI key is not sent to that host. A keyless local server can use an empty key when `OPENAI_API_KEY` is unset.
 - **`context_1m`** — enable for providers with 1M-token contexts.
 - **`max_tokens`** — output budget; leave empty/`0` for the 32768 default.
 - **`reasoning_efforts`** — optional per-model override of the reasoning-effort levels (the system ships presets per dialect: DeepSeek / Qwen / GLM / OpenAI).
