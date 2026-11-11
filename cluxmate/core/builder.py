@@ -909,15 +909,6 @@ class AgentBuilder:
         has_retrieval = any(
             getattr(t, "name", "") == "remember" for t in tools
         )
-        # The review gate is advertised only when THIS agent can actually
-        # dispatch a reviewer: it must hold the `task` tool (absent in plan
-        # mode, and under with_subagents(False)) and the slug must survive the
-        # allowlist. The allowlist half is defensive — a built-in cannot be
-        # deleted from the registry (a same-slug file replaces it in place), so
-        # today only a CHILD builder's `_subagent_allow` could narrow it away,
-        # and children don't render this prompt.
-        has_task = any(getattr(t, "name", "") == "task" for t in tools)
-        has_reviewer = has_task and "reviewer" in self.allowed_subagent_slugs()
         return render_system_prompt(
             os_name=os_name,
             shell_path=shell_path,
@@ -926,7 +917,6 @@ class AgentBuilder:
             has_update_memory=has_update_memory,
             has_todo_write=has_todo_write,
             has_retrieval=has_retrieval,
-            has_reviewer=has_reviewer,
         )
 
     def render_injections(self) -> list[tuple[str, str]]:

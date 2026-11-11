@@ -45,7 +45,7 @@ CluxMate 是一个 AI 编程智能体：它能阅读你的代码库、规划修�
 - **网络出口控制（bash/MCP）** —— bash 与 MCP stdio 子进程的出网可以被锁定：`shared`（不受限）、`off`（内核级断网——bwrap `--unshare-net` / Seatbelt `deny network*`）、或 `proxy`（仅白名单可出网，经本地过滤代理）。默认 `shared`；Windows 的 `off` 目前为失败即关闭。参见 [安全：网络出口（bash/MCP）](#安全网络出口bash--mcp)。
 - **检查点与回滚** —— 每个工作目录都有一个 shadow-git 仓库，在每轮前后快照你的文件，因此可以撤销任意一轮——且是会话级的，其他会话的修改会以冲突形式呈现，绝不会被覆盖。
 - **一个任务一棵树（git worktree）** —— 会话可以跑在自己的链接工作树、自己的分支上，桌面端侧栏一键创建（宿主侧就是 `cluxmate worktree …`），并行会话不再互相抢同一批文件。树内输入框不再提供分支切换（这棵树本身就是那条分支），项目树的分支列表也会隐藏其他树占用的分支；删除会话时可以选择连树一起移除。参见 [会话级 worktree](#会话级-worktree)。
-- **子 agent 委派** —— 把独立任务委派给工具集受限的子 agent（`general-purpose`、只读的 `explore`，以及一个只审不改、必须给证据的 `reviewer`），也可以用 Markdown 自定义类型。递归深度上限 4，并发有界（同时最多 4 个，其中最多 2 个可写），每个子 agent 都有回合预算、机器可读的状态头和自己可回放的会话日志。
+- **子 agent 委派** —— 把独立任务委派给工具集受限的子 agent（`general-purpose`、只读的 `explore`），也可以用 Markdown 自定义类型。递归深度上限 4，并发有界（同时最多 4 个，其中最多 2 个可写），每个子 agent 都有回合预算、机器可读的状态头和自己可回放的会话日志。
 - **代码理解（LSP）** —— 只读的 `lsp` 工具提供 10 种导航操作（跳转定义、查引用、hover、调用层级、诊断等），背后是七套语言服务器配置（Python、TypeScript、JavaScript、Go、Java、Rust、C/C++）。不内置任何服务器：只用你 `PATH` 上已有的；每次编辑后，语言服务器的**错误级诊断会随写工具的结果一起回来**。参见 [代码理解（LSP）](#代码理解lsp)。
 - **死循环防护** —— 如果 agent 开始重复相同的工具调用，逐级升级的提醒会把它拉回正轨；`MAX_TURNS` 仍是最终的硬兜底。
 - **技能、记忆与 MCP** —— 项目级技能包、持久化项目记忆（`AGENTS.md`）、可选的检索记忆，以及 Model Context Protocol 服务器（stdio / HTTP）接入同一条上下文管线。
@@ -197,7 +197,6 @@ cluxmate worktree remove NAME|PATH [--cwd DIR] [--force] [--keep-branch] --json
 
 - **`general-purpose`** —— 完整读写/bash 工具集，处理任意子任务。
 - **`explore`** —— 只读（`read_file`、`grep`、`list_dir`、`web_fetch`、`web_search`），用于调研。
-- **`reviewer`** —— 审查*已经完成*的工作是否满足它所声称的需求，并给出**逐条主张的结论 + 证据**（测试名、真实命令输出或 `file:line`）——没有证据的 pass 算失败，"看起来实现了"不算证据。它没有文件编辑工具，也不负责修：它的 `bash` 权限只用来跑那条能证明主张的命令。
 
 **也可以自定义**：在 `~/.cluxmate/agents/` 与 `<项目>/.cluxmate/agents/` 下放带 frontmatter（`name`、`description`、`tools`、`model`、`max_turns`、`subagents`）的 Markdown，正文就是该 agent 的指令。
 

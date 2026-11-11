@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from cluxmate.core.subagents import (
+    AgentType,
     BUILTIN_AGENT_TYPES,
     DEFAULT_SUBAGENT_MAX_TURNS,
     EDIT_TOOL_NAMES,
@@ -29,7 +30,7 @@ def test_no_config_yields_builtins_only(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
     reg = _reg(tmp_path, home)
-    assert list(reg.types()) == ["general-purpose", "explore", "reviewer"]
+    assert list(reg.types()) == ["general-purpose", "explore"]
     assert reg.errors() == []
     assert reg.types()["general-purpose"].max_turns == 150
     assert reg.types()["explore"].readonly is True
@@ -147,7 +148,7 @@ def test_order_is_deterministic_and_builtins_first(tmp_path, monkeypatch):
         _write_agent(tmp_path, slug, "---\ndescription: x\n---\n")
     reg = _reg(tmp_path)
     assert list(reg.types()) == [
-        "general-purpose", "explore", "reviewer", "alpha", "mid", "zeta"
+        "general-purpose", "explore", "alpha", "mid", "zeta"
     ]
 
 
@@ -218,8 +219,8 @@ def test_snapshot_shape(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     (tmp_path / "home").mkdir()
     snap = _reg(tmp_path).snapshot()
-    assert [a["slug"] for a in snap["agents"]][:3] == [
-        "general-purpose", "explore", "reviewer"
+    assert [a["slug"] for a in snap["agents"]] == [
+        "general-purpose", "explore"
     ]
     first = snap["agents"][0]
     assert set(first) == {
@@ -239,46 +240,15 @@ def test_builtin_definitions_stay_intact():
     assert ex.max_turns == MAX_AGENT_TURNS
 
 
-def test_builtin_reviewer_can_verify_but_never_edit():
-    """The reviewer holds exactly the tools its contract needs: read a change,
-    run the command that proves a claim — and nothing that could make or fix
-    the change it is judging."""
-    rv = BUILTIN_AGENT_TYPES["reviewer"]
-    assert set(rv.tools) == {"read_file", "grep", "list_dir", "lsp", "bash"}
-    assert rv.can_edit is False
-    assert not (set(rv.tools) & EDIT_TOOL_NAMES)
-    # No recursion: a reviewer reviews.
-    assert "task" not in rv.tools
-    assert rv.subagents_mode == "none"
-    # Holding bash makes it a scheduling writer; a reviewer must not race the
-    # edits it judges, but it must not claim a write scope either.
-    assert rv.readonly is False
-    assert rv.builtin is True
-    assert rv.instructions.strip()
-    # A review that dies at the turn cap delivers nothing, and the measured cost
-    # of a real review is ~50 turns, so the reviewer gets the full agent budget
-    # rather than the 50 a user-defined type defaults to.
-    assert rv.max_turns == MAX_AGENT_TURNS > DEFAULT_SUBAGENT_MAX_TURNS
-
-
 def test_can_edit_separates_running_from_editing():
     """`readonly` (the scheduling question) and `can_edit` (what the child prompt
     may claim) are different questions — bash collapses them otherwise."""
     gp = BUILTIN_AGENT_TYPES["general-purpose"]
     ex = BUILTIN_AGENT_TYPES["explore"]
-    rv = BUILTIN_AGENT_TYPES["reviewer"]
+    # A bash-holding, non-editing type (no built-in of its kind now that the
+    # reviewer is gone) still exercises the middle branch of the child prompt:
+    # it can run commands but must not be told it may edit.
+    runner = AgentType(slug="runner", description="r", tools=("read_file", "bash"))
     assert (gp.can_edit, gp.readonly) == (True, False)
     assert (ex.can_edit, ex.readonly) == (False, True)
-    assert (rv.can_edit, rv.readonly) == (False, False)
-
-
-def test_reviewer_instructions_carry_the_gate_contract():
-    text = BUILTIN_AGENT_TYPES["reviewer"].instructions
-    # The requirement taxonomy: in/out of scope per claim.
-    assert "out of scope" in text and "in-scope" in text
-    # Evidence or it is a fail; prose is not evidence.
-    assert "file:line" in text and "is NOT evidence" in text
-    # Silence is not a pass, and neither is an unsupported one.
-    assert "unverifiable" in text
-    # The verdict vocabulary must be what tools/task.py parses back.
-    assert "**Status**: success" in text and "**Status**: partial" in text
+    assert (runner.can_edit, runner.readonly) == (False, False)

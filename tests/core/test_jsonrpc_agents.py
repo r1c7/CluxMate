@@ -15,8 +15,8 @@ def test_agents_snapshot_returns_builtins(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
     snap = _server()._agents_snapshot({"cwd": str(tmp_path)})
-    assert [a["slug"] for a in snap["agents"]][:3] == [
-        "general-purpose", "explore", "reviewer"
+    assert [a["slug"] for a in snap["agents"]] == [
+        "general-purpose", "explore"
     ]
     assert snap["errors"] == []
 
